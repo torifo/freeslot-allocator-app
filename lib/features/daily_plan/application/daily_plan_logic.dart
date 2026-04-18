@@ -51,33 +51,73 @@ DateTime shiftDateTimeByDays(DateTime value, int days) {
   return value.add(Duration(days: days));
 }
 
+List<SlotTaskAssignment> moveAssignmentToSlotPosition({
+  required SlotTaskAssignment assignment,
+  required FreeTimeSlot targetSlot,
+  required List<SlotTaskAssignment> existingAssignments,
+  String? beforeAssignmentId,
+}) {
+  final remainingAssignments = existingAssignments
+      .where((item) => item.id != assignment.id)
+      .toList();
+  final insertIndex = beforeAssignmentId == null
+      ? remainingAssignments.length
+      : remainingAssignments.indexWhere(
+          (item) => item.id == beforeAssignmentId,
+        );
+
+  if (insertIndex < 0) {
+    throw const DailyPlanValidationException('移動先の位置が見つかりません。');
+  }
+
+  final prefix = remainingAssignments.take(insertIndex).toList();
+  final suffix = remainingAssignments.skip(insertIndex);
+  final ordered = <SlotTaskAssignment>[
+    ...prefix,
+    assignment.copyWith(
+      dailyPlanId: targetSlot.dailyPlanId,
+      slotId: targetSlot.id,
+    ),
+    ...suffix,
+  ];
+
+  final normalized = <SlotTaskAssignment>[];
+  var cursor = targetSlot.startAt;
+  for (final current in ordered) {
+    final previous = normalized.lastOrNull;
+    if (previous != null) {
+      cursor = previous.endAt;
+    }
+    final rebuilt = current.copyWith(
+      dailyPlanId: targetSlot.dailyPlanId,
+      slotId: targetSlot.id,
+      startAt: cursor,
+      endAt: cursor.add(Duration(minutes: current.durationMinutes)),
+    );
+    normalized.add(rebuilt);
+  }
+
+  for (final current in normalized) {
+    validateAssignment(
+      assignment: current,
+      slot: targetSlot,
+      existingAssignments: normalized,
+    );
+  }
+
+  return normalizeAssignmentsForSlot(normalized);
+}
+
 SlotTaskAssignment moveAssignmentToSlotEnd({
   required SlotTaskAssignment assignment,
   required FreeTimeSlot targetSlot,
   required List<SlotTaskAssignment> existingAssignments,
 }) {
-  final duration = assignment.durationMinutes;
-  final startAt = existingAssignments.isEmpty
-      ? targetSlot.startAt
-      : existingAssignments
-            .map((item) => item.endAt)
-            .reduce((left, right) => left.isAfter(right) ? left : right);
-  final endAt = startAt.add(Duration(minutes: duration));
-
-  final moved = assignment.copyWith(
-    dailyPlanId: targetSlot.dailyPlanId,
-    slotId: targetSlot.id,
-    startAt: startAt,
-    endAt: endAt,
-    sortOrder: existingAssignments.length,
-  );
-
-  validateAssignment(
-    assignment: moved,
-    slot: targetSlot,
+  return moveAssignmentToSlotPosition(
+    assignment: assignment,
+    targetSlot: targetSlot,
     existingAssignments: existingAssignments,
-  );
-  return moved;
+  ).last;
 }
 
 void validateAssignment({

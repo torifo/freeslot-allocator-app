@@ -140,8 +140,12 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
                           taskMasterData: taskMasterData,
                           existing: assignment,
                         ),
-                        onMoveAssignment: (assignment) =>
-                            _moveAssignment(assignment.id, slot.id),
+                        onMoveAssignment: (assignment, {beforeAssignmentId}) =>
+                            _moveAssignment(
+                              assignment.id,
+                              slot.id,
+                              beforeAssignmentId: beforeAssignmentId,
+                            ),
                         onDeleteAssignment: (assignment) =>
                             _deleteAssignment(assignment.id),
                       ),
@@ -196,13 +200,34 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
     final currentState = ref
         .read(dailyPlanControllerProvider)
         .maybeWhen(data: (value) => value, orElse: () => null);
-    final existingTarget = currentState?.planForDate(_selectedDate);
-    var replaceExisting = false;
-    if (existingTarget != null) {
-      replaceExisting = await _confirmReplaceExistingPlan();
-      if (!replaceExisting) {
-        return;
-      }
+    if (currentState == null) {
+      return;
+    }
+    final sourcePlan = currentState.planForDate(normalizedSource);
+    if (sourcePlan == null) {
+      _showMessage('複製元の DailyPlan が見つかりません。');
+      return;
+    }
+    final sourceSlots = currentState.slotsForPlan(sourcePlan.id);
+    if (sourceSlots.isEmpty) {
+      _showMessage('複製元の DailyPlan に自由時間枠がありません。');
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+
+    final options = await showDialog<_DuplicatePlanOptions>(
+      context: context,
+      builder: (context) => _DuplicatePlanDialog(
+        sourceDate: normalizedSource,
+        targetDate: _selectedDate,
+        sourceSlots: sourceSlots,
+        targetExists: currentState.planForDate(_selectedDate) != null,
+      ),
+    );
+    if (options == null) {
+      return;
     }
 
     await _runWithErrorHandling(() async {
@@ -211,7 +236,9 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
           .duplicatePlan(
             sourceDate: normalizedSource,
             targetDate: _selectedDate,
-            replaceExisting: replaceExisting,
+            sourceSlotIds: options.slotIds,
+            includeAssignments: options.includeAssignments,
+            replaceExisting: options.mergeMode == _DuplicateMergeMode.replace,
           );
     });
   }
@@ -273,13 +300,18 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
     });
   }
 
-  Future<void> _moveAssignment(String assignmentId, String targetSlotId) async {
+  Future<void> _moveAssignment(
+    String assignmentId,
+    String targetSlotId, {
+    String? beforeAssignmentId,
+  }) async {
     await _runWithErrorHandling(() async {
       await ref
           .read(dailyPlanControllerProvider.notifier)
           .moveAssignmentToSlot(
             assignmentId: assignmentId,
             targetSlotId: targetSlotId,
+            beforeAssignmentId: beforeAssignmentId,
           );
     });
   }
@@ -294,29 +326,6 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
       _showMessage(error.toString());
     }
     return false;
-  }
-
-  Future<bool> _confirmReplaceExistingPlan() async {
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('既存の計画を置き換えますか'),
-        content: const Text(
-          '選択中の日付にはすでに DailyPlan があります。自由時間枠と予定を複製元の内容で置き換えます。',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('キャンセル'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('置き換える'),
-          ),
-        ],
-      ),
-    );
-    return result ?? false;
   }
 
   void _showMessage(String message) {
@@ -415,7 +424,11 @@ class _SlotCard extends StatelessWidget {
   final VoidCallback onDeleteSlot;
   final VoidCallback onAddAssignment;
   final ValueChanged<SlotTaskAssignment> onEditAssignment;
-  final ValueChanged<SlotTaskAssignment> onMoveAssignment;
+  final void Function(
+    SlotTaskAssignment assignment, {
+    String? beforeAssignmentId,
+  })
+  onMoveAssignment;
   final ValueChanged<SlotTaskAssignment> onDeleteAssignment;
 
   @override
@@ -427,63 +440,73 @@ class _SlotCard extends StatelessWidget {
       (sum, item) => sum + item.durationMinutes,
     );
 
-    return DragTarget<SlotTaskAssignment>(
-      onWillAcceptWithDetails: (details) => details.data.slotId != slot.id,
-      onAcceptWithDetails: (details) => onMoveAssignment(details.data),
-      builder: (context, candidateData, rejectedData) => Card(
-        color: candidateData.isEmpty
-            ? null
-            : Theme.of(context).colorScheme.secondaryContainer,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          slot.label.isEmpty ? '自由時間枠' : slot.label,
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const SizedBox(height: 4),
-                        Text('$rangeLabel / ${slot.durationMinutes}分'),
-                        const SizedBox(height: 4),
-                        Text('割り当て済み $assignedMinutes分'),
-                      ],
-                    ),
-                  ),
-                  PopupMenuButton<String>(
-                    onSelected: (value) {
-                      if (value == 'edit') {
-                        onEditSlot();
-                      } else if (value == 'delete') {
-                        onDeleteSlot();
-                      }
-                    },
-                    itemBuilder: (context) => const [
-                      PopupMenuItem(value: 'edit', child: Text('枠を編集')),
-                      PopupMenuItem(value: 'delete', child: Text('枠を削除')),
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        slot.label.isEmpty ? '自由時間枠' : slot.label,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 4),
+                      Text('$rangeLabel / ${slot.durationMinutes}分'),
+                      const SizedBox(height: 4),
+                      Text('割り当て済み $assignedMinutes分'),
                     ],
                   ),
-                ],
+                ),
+                PopupMenuButton<String>(
+                  onSelected: (value) {
+                    if (value == 'edit') {
+                      onEditSlot();
+                    } else if (value == 'delete') {
+                      onDeleteSlot();
+                    }
+                  },
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(value: 'edit', child: Text('枠を編集')),
+                    PopupMenuItem(value: 'delete', child: Text('枠を削除')),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            FilledButton.tonalIcon(
+              onPressed: onAddAssignment,
+              icon: const Icon(Icons.playlist_add_outlined),
+              label: const Text('この枠に予定を追加'),
+            ),
+            const SizedBox(height: 12),
+            if (assignments.isEmpty) ...[
+              const Text('まだ予定は入っていません。'),
+              const SizedBox(height: 8),
+              _AssignmentDropZone(
+                onAccept: (assignment) => onMoveAssignment(assignment),
+                label: 'ここにドロップして先頭から配置',
               ),
-              const SizedBox(height: 12),
-              FilledButton.tonalIcon(
-                onPressed: onAddAssignment,
-                icon: const Icon(Icons.playlist_add_outlined),
-                label: const Text('この枠に予定を追加'),
-              ),
-              const SizedBox(height: 12),
-              if (assignments.isEmpty)
-                const Text('まだ予定は入っていません。')
-              else
-                ...assignments.map(
-                  (assignment) => LongPressDraggable<SlotTaskAssignment>(
+            ] else ...[
+              const Text('長押しでドラッグすると、各予定の手前か末尾に再配置できます。'),
+              const SizedBox(height: 8),
+              ...assignments.expand(
+                (assignment) => <Widget>[
+                  _AssignmentDropZone(
+                    onAccept: (dragged) => onMoveAssignment(
+                      dragged,
+                      beforeAssignmentId: assignment.id,
+                    ),
+                    label:
+                        '${DateFormat('HH:mm').format(assignment.startAt)} の前に挿入',
+                  ),
+                  LongPressDraggable<SlotTaskAssignment>(
                     data: assignment,
                     feedback: Material(
                       elevation: 4,
@@ -512,11 +535,207 @@ class _SlotCard extends StatelessWidget {
                       onDelete: () => onDeleteAssignment(assignment),
                     ),
                   ),
-                ),
+                ],
+              ),
+              _AssignmentDropZone(
+                onAccept: (assignment) => onMoveAssignment(assignment),
+                label: '末尾に移動',
+              ),
             ],
-          ),
+          ],
         ),
       ),
+    );
+  }
+}
+
+class _AssignmentDropZone extends StatelessWidget {
+  const _AssignmentDropZone({required this.onAccept, required this.label});
+
+  final ValueChanged<SlotTaskAssignment> onAccept;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return DragTarget<SlotTaskAssignment>(
+      onWillAcceptWithDetails: (details) => true,
+      onAcceptWithDetails: (details) => onAccept(details.data),
+      builder: (context, candidateData, rejectedData) {
+        final isActive = candidateData.isNotEmpty;
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          margin: const EdgeInsets.only(bottom: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: isActive ? colorScheme.secondaryContainer : null,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: isActive
+                  ? colorScheme.secondary
+                  : colorScheme.outlineVariant,
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                Icons.swap_vert_circle_outlined,
+                size: 18,
+                color: isActive ? colorScheme.onSecondaryContainer : null,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: isActive ? colorScheme.onSecondaryContainer : null,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+enum _DuplicateMergeMode { append, replace }
+
+class _DuplicatePlanOptions {
+  const _DuplicatePlanOptions({
+    required this.slotIds,
+    required this.includeAssignments,
+    required this.mergeMode,
+  });
+
+  final List<String> slotIds;
+  final bool includeAssignments;
+  final _DuplicateMergeMode mergeMode;
+}
+
+class _DuplicatePlanDialog extends StatefulWidget {
+  const _DuplicatePlanDialog({
+    required this.sourceDate,
+    required this.targetDate,
+    required this.sourceSlots,
+    required this.targetExists,
+  });
+
+  final DateTime sourceDate;
+  final DateTime targetDate;
+  final List<FreeTimeSlot> sourceSlots;
+  final bool targetExists;
+
+  @override
+  State<_DuplicatePlanDialog> createState() => _DuplicatePlanDialogState();
+}
+
+class _DuplicatePlanDialogState extends State<_DuplicatePlanDialog> {
+  late final Set<String> _selectedSlotIds;
+  var _includeAssignments = true;
+  var _mergeMode = _DuplicateMergeMode.append;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedSlotIds = widget.sourceSlots.map((slot) => slot.id).toSet();
+    _mergeMode = widget.targetExists
+        ? _DuplicateMergeMode.append
+        : _DuplicateMergeMode.replace;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('部分複製を設定'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${DateFormat('yyyy/MM/dd').format(widget.sourceDate)} から ${DateFormat('yyyy/MM/dd').format(widget.targetDate)} へ複製します。',
+            ),
+            const SizedBox(height: 12),
+            const Text('複製する自由時間枠'),
+            const SizedBox(height: 8),
+            ...widget.sourceSlots.map((slot) {
+              final range =
+                  '${DateFormat('MM/dd HH:mm').format(slot.startAt)} - ${DateFormat('MM/dd HH:mm').format(slot.endAt)}';
+              return CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _selectedSlotIds.contains(slot.id),
+                title: Text(slot.label.isEmpty ? '自由時間枠' : slot.label),
+                subtitle: Text(range),
+                onChanged: (value) {
+                  setState(() {
+                    if (value ?? false) {
+                      _selectedSlotIds.add(slot.id);
+                    } else {
+                      _selectedSlotIds.remove(slot.id);
+                    }
+                  });
+                },
+              );
+            }),
+            const SizedBox(height: 8),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('予定も含めて複製'),
+              value: _includeAssignments,
+              onChanged: (value) => setState(() => _includeAssignments = value),
+            ),
+            if (widget.targetExists) ...[
+              const SizedBox(height: 8),
+              const Text('複製先に既存計画があります'),
+              const SizedBox(height: 8),
+              SegmentedButton<_DuplicateMergeMode>(
+                segments: const <ButtonSegment<_DuplicateMergeMode>>[
+                  ButtonSegment<_DuplicateMergeMode>(
+                    value: _DuplicateMergeMode.append,
+                    label: Text('追加する'),
+                  ),
+                  ButtonSegment<_DuplicateMergeMode>(
+                    value: _DuplicateMergeMode.replace,
+                    label: Text('置き換える'),
+                  ),
+                ],
+                selected: <_DuplicateMergeMode>{_mergeMode},
+                onSelectionChanged: (value) {
+                  setState(() => _mergeMode = value.first);
+                },
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _mergeMode == _DuplicateMergeMode.append
+                    ? '既存の自由時間枠を残しつつ、選択分だけ追加します。'
+                    : '既存の自由時間枠と予定を削除して複製内容で置換します。',
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('キャンセル'),
+        ),
+        FilledButton(
+          onPressed: _selectedSlotIds.isEmpty
+              ? null
+              : () {
+                  Navigator.of(context).pop(
+                    _DuplicatePlanOptions(
+                      slotIds: _selectedSlotIds.toList(),
+                      includeAssignments: _includeAssignments,
+                      mergeMode: _mergeMode,
+                    ),
+                  );
+                },
+          child: const Text('複製'),
+        ),
+      ],
     );
   }
 }

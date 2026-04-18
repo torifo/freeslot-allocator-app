@@ -39,6 +39,8 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
   Future<DailyPlan> duplicatePlan({
     required DateTime sourceDate,
     required DateTime targetDate,
+    List<String>? sourceSlotIds,
+    bool includeAssignments = true,
     bool replaceExisting = false,
   }) async {
     final current = state.requireValue;
@@ -54,11 +56,6 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     }
 
     final existingTargetPlan = current.planForDate(normalizedTarget);
-    if (existingTargetPlan != null && !replaceExisting) {
-      throw const DailyPlanValidationException(
-        '複製先の DailyPlan がすでに存在します。置き換える場合のみ複製してください。',
-      );
-    }
 
     final now = DateTime.now();
     final dayOffset = normalizedTarget.difference(normalizedSource).inDays;
@@ -71,16 +68,36 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
           updatedAt: now,
         );
 
-    final sourceSlots = current.slotsForPlan(sourcePlan.id);
+    final selectedSourceSlotIds = sourceSlotIds?.toSet();
+    final sourceSlots = current
+        .slotsForPlan(sourcePlan.id)
+        .where(
+          (slot) =>
+              selectedSourceSlotIds == null ||
+              selectedSourceSlotIds.contains(slot.id),
+        )
+        .toList();
+    if (sourceSlots.isEmpty) {
+      throw const DailyPlanValidationException('複製する自由時間枠を1件以上選択してください。');
+    }
+
     final sourceAssignments = current.assignments
-        .where((item) => item.dailyPlanId == sourcePlan.id)
+        .where(
+          (item) =>
+              item.dailyPlanId == sourcePlan.id &&
+              sourceSlots.any((slot) => slot.id == item.slotId),
+        )
         .toList();
-    final slots = current.slots
-        .where((item) => item.dailyPlanId != targetPlan.id)
-        .toList();
-    final assignments = current.assignments
-        .where((item) => item.dailyPlanId != targetPlan.id)
-        .toList();
+    final slots = replaceExisting
+        ? current.slots
+              .where((item) => item.dailyPlanId != targetPlan.id)
+              .toList()
+        : List<FreeTimeSlot>.from(current.slots);
+    final assignments = replaceExisting
+        ? current.assignments
+              .where((item) => item.dailyPlanId != targetPlan.id)
+              .toList()
+        : List<SlotTaskAssignment>.from(current.assignments);
     final slotIdMap = <String, String>{};
 
     for (final slot in sourceSlots) {
@@ -97,24 +114,26 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
       );
     }
 
-    final sortedSourceAssignments =
-        List<SlotTaskAssignment>.from(sourceAssignments)..sort((a, b) {
-          final order = a.startAt.compareTo(b.startAt);
-          if (order != 0) {
-            return order;
-          }
-          return a.sortOrder.compareTo(b.sortOrder);
-        });
-    for (final assignment in sortedSourceAssignments) {
-      assignments.add(
-        assignment.copyWith(
-          id: 'assignment-${DateTime.now().microsecondsSinceEpoch}-${assignments.length}',
-          dailyPlanId: targetPlan.id,
-          slotId: slotIdMap[assignment.slotId] ?? assignment.slotId,
-          startAt: shiftDateTimeByDays(assignment.startAt, dayOffset),
-          endAt: shiftDateTimeByDays(assignment.endAt, dayOffset),
-        ),
-      );
+    if (includeAssignments) {
+      final sortedSourceAssignments =
+          List<SlotTaskAssignment>.from(sourceAssignments)..sort((a, b) {
+            final order = a.startAt.compareTo(b.startAt);
+            if (order != 0) {
+              return order;
+            }
+            return a.sortOrder.compareTo(b.sortOrder);
+          });
+      for (final assignment in sortedSourceAssignments) {
+        assignments.add(
+          assignment.copyWith(
+            id: 'assignment-${DateTime.now().microsecondsSinceEpoch}-${assignments.length}',
+            dailyPlanId: targetPlan.id,
+            slotId: slotIdMap[assignment.slotId] ?? assignment.slotId,
+            startAt: shiftDateTimeByDays(assignment.startAt, dayOffset),
+            endAt: shiftDateTimeByDays(assignment.endAt, dayOffset),
+          ),
+        );
+      }
     }
 
     final plans =
@@ -207,6 +226,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
   Future<void> moveAssignmentToSlot({
     required String assignmentId,
     required String targetSlotId,
+    String? beforeAssignmentId,
   }) async {
     final current = state.requireValue;
     final assignment = current.assignments
@@ -215,10 +235,6 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     if (assignment == null) {
       throw const DailyPlanValidationException('移動対象の予定が見つかりません。');
     }
-    if (assignment.slotId == targetSlotId) {
-      return;
-    }
-
     final targetSlot = current.slots
         .where((item) => item.id == targetSlotId)
         .firstOrNull;
@@ -227,15 +243,26 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     }
 
     final targetAssignments = current.assignmentsForSlot(targetSlot.id);
-    final moved = moveAssignmentToSlotEnd(
+    final rebuiltTargetAssignments = moveAssignmentToSlotPosition(
       assignment: assignment,
       targetSlot: targetSlot,
       existingAssignments: targetAssignments,
+      beforeAssignmentId: beforeAssignmentId,
     );
-
     final assignments = List<SlotTaskAssignment>.from(current.assignments);
-    final index = assignments.indexWhere((item) => item.id == assignment.id);
-    assignments[index] = moved;
+    final sourceAssignments = assignment.slotId == targetSlot.id
+        ? const <SlotTaskAssignment>[]
+        : normalizeAssignmentsForSlot(
+            current
+                .assignmentsForSlot(assignment.slotId)
+                .where((item) => item.id != assignment.id),
+          );
+    assignments.removeWhere(
+      (item) =>
+          item.slotId == targetSlot.id || item.slotId == assignment.slotId,
+    );
+    assignments.addAll(sourceAssignments);
+    assignments.addAll(rebuiltTargetAssignments);
 
     await _persist(
       current.copyWith(
