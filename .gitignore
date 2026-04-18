@@ -1,1 +1,7 @@
 AGENTS.md
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.idea/
+build/
+*.iml
