@@ -78,6 +78,38 @@ void main() {
         expect(targetAssignments.single.startAt, DateTime(2026, 4, 20, 20));
       },
     );
+
+    test(
+      'can duplicate only selected assignments within a chosen slot',
+      () async {
+        SharedPreferences.setMockInitialValues(<String, Object>{
+          'daily_plan_state_v1': _sampleState().encode(),
+        });
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+
+        await container.read(dailyPlanControllerProvider.future);
+        final notifier = container.read(dailyPlanControllerProvider.notifier);
+
+        await notifier.duplicatePlan(
+          sourceDate: DateTime(2026, 4, 18),
+          targetDate: DateTime(2026, 4, 21),
+          sourceSlotIds: const <String>['slot-source-1'],
+          sourceAssignmentIds: const <String>['assignment-source-2'],
+          includeAssignments: true,
+        );
+
+        final state = container.read(dailyPlanControllerProvider).requireValue;
+        final targetPlan = state.planForDate(DateTime(2026, 4, 21))!;
+        final targetAssignments = state.assignments
+            .where((item) => item.dailyPlanId == targetPlan.id)
+            .toList();
+
+        expect(targetAssignments.map((item) => item.taskTitle), <String>['散歩']);
+        expect(targetAssignments.single.startAt, DateTime(2026, 4, 21, 7, 30));
+        expect(targetAssignments.single.endAt, DateTime(2026, 4, 21, 8));
+      },
+    );
   });
 }
 
@@ -134,6 +166,17 @@ DailyPlanStateData _sampleState() {
       ),
       SlotTaskAssignment(
         id: 'assignment-source-2',
+        dailyPlanId: sourcePlan.id,
+        slotId: 'slot-source-1',
+        taskId: 'task-4',
+        taskTitle: '散歩',
+        taskKind: TaskKind.wantToDo,
+        startAt: DateTime(2026, 4, 18, 7, 30),
+        endAt: DateTime(2026, 4, 18, 8),
+        sortOrder: 1,
+      ),
+      SlotTaskAssignment(
+        id: 'assignment-source-3',
         dailyPlanId: sourcePlan.id,
         slotId: 'slot-source-2',
         taskId: 'task-2',
