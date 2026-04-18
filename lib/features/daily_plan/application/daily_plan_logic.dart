@@ -47,6 +47,39 @@ List<SlotTaskAssignment> normalizeAssignmentsForSlot(
       .toList();
 }
 
+DateTime shiftDateTimeByDays(DateTime value, int days) {
+  return value.add(Duration(days: days));
+}
+
+SlotTaskAssignment moveAssignmentToSlotEnd({
+  required SlotTaskAssignment assignment,
+  required FreeTimeSlot targetSlot,
+  required List<SlotTaskAssignment> existingAssignments,
+}) {
+  final duration = assignment.durationMinutes;
+  final startAt = existingAssignments.isEmpty
+      ? targetSlot.startAt
+      : existingAssignments
+            .map((item) => item.endAt)
+            .reduce((left, right) => left.isAfter(right) ? left : right);
+  final endAt = startAt.add(Duration(minutes: duration));
+
+  final moved = assignment.copyWith(
+    dailyPlanId: targetSlot.dailyPlanId,
+    slotId: targetSlot.id,
+    startAt: startAt,
+    endAt: endAt,
+    sortOrder: existingAssignments.length,
+  );
+
+  validateAssignment(
+    assignment: moved,
+    slot: targetSlot,
+    existingAssignments: existingAssignments,
+  );
+  return moved;
+}
+
 void validateAssignment({
   required SlotTaskAssignment assignment,
   required FreeTimeSlot slot,

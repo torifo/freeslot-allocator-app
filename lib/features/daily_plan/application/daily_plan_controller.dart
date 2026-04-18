@@ -36,6 +36,101 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     return plan;
   }
 
+  Future<DailyPlan> duplicatePlan({
+    required DateTime sourceDate,
+    required DateTime targetDate,
+    bool replaceExisting = false,
+  }) async {
+    final current = state.requireValue;
+    final normalizedSource = dateOnly(sourceDate);
+    final normalizedTarget = dateOnly(targetDate);
+    if (normalizedSource == normalizedTarget) {
+      throw const DailyPlanValidationException('同じ日付には複製できません。');
+    }
+
+    final sourcePlan = current.planForDate(normalizedSource);
+    if (sourcePlan == null) {
+      throw const DailyPlanValidationException('複製元の DailyPlan が見つかりません。');
+    }
+
+    final existingTargetPlan = current.planForDate(normalizedTarget);
+    if (existingTargetPlan != null && !replaceExisting) {
+      throw const DailyPlanValidationException(
+        '複製先の DailyPlan がすでに存在します。置き換える場合のみ複製してください。',
+      );
+    }
+
+    final now = DateTime.now();
+    final dayOffset = normalizedTarget.difference(normalizedSource).inDays;
+    final targetPlan =
+        existingTargetPlan?.copyWith(date: normalizedTarget, updatedAt: now) ??
+        DailyPlan(
+          id: 'plan-${now.microsecondsSinceEpoch}',
+          date: normalizedTarget,
+          createdAt: now,
+          updatedAt: now,
+        );
+
+    final sourceSlots = current.slotsForPlan(sourcePlan.id);
+    final sourceAssignments = current.assignments
+        .where((item) => item.dailyPlanId == sourcePlan.id)
+        .toList();
+    final slots = current.slots
+        .where((item) => item.dailyPlanId != targetPlan.id)
+        .toList();
+    final assignments = current.assignments
+        .where((item) => item.dailyPlanId != targetPlan.id)
+        .toList();
+    final slotIdMap = <String, String>{};
+
+    for (final slot in sourceSlots) {
+      final newSlotId =
+          'slot-${DateTime.now().microsecondsSinceEpoch}-${slotIdMap.length}';
+      slotIdMap[slot.id] = newSlotId;
+      slots.add(
+        slot.copyWith(
+          id: newSlotId,
+          dailyPlanId: targetPlan.id,
+          startAt: shiftDateTimeByDays(slot.startAt, dayOffset),
+          endAt: shiftDateTimeByDays(slot.endAt, dayOffset),
+        ),
+      );
+    }
+
+    final sortedSourceAssignments =
+        List<SlotTaskAssignment>.from(sourceAssignments)..sort((a, b) {
+          final order = a.startAt.compareTo(b.startAt);
+          if (order != 0) {
+            return order;
+          }
+          return a.sortOrder.compareTo(b.sortOrder);
+        });
+    for (final assignment in sortedSourceAssignments) {
+      assignments.add(
+        assignment.copyWith(
+          id: 'assignment-${DateTime.now().microsecondsSinceEpoch}-${assignments.length}',
+          dailyPlanId: targetPlan.id,
+          slotId: slotIdMap[assignment.slotId] ?? assignment.slotId,
+          startAt: shiftDateTimeByDays(assignment.startAt, dayOffset),
+          endAt: shiftDateTimeByDays(assignment.endAt, dayOffset),
+        ),
+      );
+    }
+
+    final plans =
+        current.plans.where((item) => item.id != targetPlan.id).toList()
+          ..add(targetPlan);
+
+    await _persist(
+      current.copyWith(
+        plans: _sortPlans(plans),
+        slots: sortSlots(slots),
+        assignments: _normalizeAllAssignments(assignments),
+      ),
+    );
+    return targetPlan;
+  }
+
   Future<void> upsertSlot(FreeTimeSlot slot) async {
     validateFreeTimeSlot(slot);
     final current = state.requireValue;
@@ -109,6 +204,53 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     );
   }
 
+  Future<void> moveAssignmentToSlot({
+    required String assignmentId,
+    required String targetSlotId,
+  }) async {
+    final current = state.requireValue;
+    final assignment = current.assignments
+        .where((item) => item.id == assignmentId)
+        .firstOrNull;
+    if (assignment == null) {
+      throw const DailyPlanValidationException('移動対象の予定が見つかりません。');
+    }
+    if (assignment.slotId == targetSlotId) {
+      return;
+    }
+
+    final targetSlot = current.slots
+        .where((item) => item.id == targetSlotId)
+        .firstOrNull;
+    if (targetSlot == null) {
+      throw const DailyPlanValidationException('移動先の自由時間枠が見つかりません。');
+    }
+
+    final targetAssignments = current.assignmentsForSlot(targetSlot.id);
+    final moved = moveAssignmentToSlotEnd(
+      assignment: assignment,
+      targetSlot: targetSlot,
+      existingAssignments: targetAssignments,
+    );
+
+    final assignments = List<SlotTaskAssignment>.from(current.assignments);
+    final index = assignments.indexWhere((item) => item.id == assignment.id);
+    assignments[index] = moved;
+
+    await _persist(
+      current.copyWith(
+        assignments: _normalizeMultipleSlots(assignments, <String>[
+          assignment.slotId,
+          targetSlot.id,
+        ]),
+        plans: _touchPlans(current.plans, <String>[
+          assignment.dailyPlanId,
+          targetSlot.dailyPlanId,
+        ]),
+      ),
+    );
+  }
+
   Future<void> deleteAssignment(String assignmentId) async {
     final current = state.requireValue;
     final assignment = current.assignments
@@ -142,10 +284,15 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
   }
 
   List<DailyPlan> _touchPlan(List<DailyPlan> plans, String planId) {
+    return _touchPlans(plans, <String>[planId]);
+  }
+
+  List<DailyPlan> _touchPlans(List<DailyPlan> plans, List<String> planIds) {
     final now = DateTime.now();
+    final targets = planIds.toSet();
     return _sortPlans(
       plans.map((plan) {
-        return plan.id == planId ? plan.copyWith(updatedAt: now) : plan;
+        return targets.contains(plan.id) ? plan.copyWith(updatedAt: now) : plan;
       }).toList(),
     );
   }
@@ -154,11 +301,45 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     List<SlotTaskAssignment> assignments,
     String slotId,
   ) {
-    final currentSlot = assignments.where((item) => item.slotId == slotId);
-    final otherSlots = assignments.where((item) => item.slotId != slotId);
-    return <SlotTaskAssignment>[
-      ...otherSlots,
-      ...normalizeAssignmentsForSlot(currentSlot),
-    ];
+    return _normalizeMultipleSlots(assignments, <String>[slotId]);
+  }
+
+  List<SlotTaskAssignment> _normalizeMultipleSlots(
+    List<SlotTaskAssignment> assignments,
+    List<String> slotIds,
+  ) {
+    final targets = slotIds.toSet();
+    final currentSlots = assignments.where(
+      (item) => targets.contains(item.slotId),
+    );
+    final otherSlots = assignments.where(
+      (item) => !targets.contains(item.slotId),
+    );
+    final normalized = <SlotTaskAssignment>[];
+    for (final slotId in targets) {
+      normalized.addAll(
+        normalizeAssignmentsForSlot(
+          currentSlots.where((item) => item.slotId == slotId),
+        ),
+      );
+    }
+    return <SlotTaskAssignment>[...otherSlots, ...normalized];
+  }
+
+  List<SlotTaskAssignment> _normalizeAllAssignments(
+    List<SlotTaskAssignment> assignments,
+  ) {
+    final bySlot = <String, List<SlotTaskAssignment>>{};
+    for (final assignment in assignments) {
+      bySlot
+          .putIfAbsent(assignment.slotId, () => <SlotTaskAssignment>[])
+          .add(assignment);
+    }
+
+    final normalized = <SlotTaskAssignment>[];
+    for (final entry in bySlot.entries) {
+      normalized.addAll(normalizeAssignmentsForSlot(entry.value));
+    }
+    return normalized;
   }
 }
