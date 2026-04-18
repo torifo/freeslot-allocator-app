@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
 import '../../daily_plan/application/daily_plan_controller.dart';
-import '../../daily_plan/domain/daily_plan_models.dart';
+import '../application/weekly_report_logic.dart';
 import '../../task_master/application/task_master_controller.dart';
 import '../../task_master/domain/task_models.dart';
 
@@ -27,32 +27,47 @@ class _WeeklyReportScreenState extends ConsumerState<WeeklyReportScreen> {
   Widget build(BuildContext context) {
     final state = ref.watch(taskMasterControllerProvider);
     final dailyPlanState = ref.watch(dailyPlanControllerProvider);
-    final weekStart = _weekStart(_anchorDate);
-    final weekEnd = weekStart.add(const Duration(days: 7));
+    final currentWeekStart = weekStart(_anchorDate);
+    final weekEnd = currentWeekStart.add(const Duration(days: 7));
 
     return Scaffold(
       appBar: AppBar(title: const Text('週次レポート')),
       body: state.when(
         data: (data) => dailyPlanState.when(
           data: (dailyPlanData) {
-            final totalEstimateMinutes = data.tasks.fold<int>(
-              0,
-              (sum, task) => sum + task.estimatedMinutes,
-            );
-            final weekAssignments = _assignmentsForRange(
-              dailyPlanData,
-              start: weekStart,
+            final currentCategories = data.shareCategories
+                ? data.mustDoCategories
+                : <TaskCategory>[
+                    ...data.mustDoCategories,
+                    ...data.wantToDoCategories,
+                  ];
+            final weekAssignments = assignmentsOverlappingRange(
+              dailyPlanData.assignments,
+              start: currentWeekStart,
               end: weekEnd,
             );
-            final plannedMinutes = weekAssignments.fold<int>(
-              0,
-              (sum, item) => sum + item.durationMinutes,
+            final totalEstimateMinutes = estimatedMinutesForAssignments(
+              weekAssignments,
+              data.tasks,
             );
-            final mustDoMinutes = weekAssignments
-                .where((item) => item.taskKind == TaskKind.mustDo)
-                .fold<int>(0, (sum, item) => sum + item.durationMinutes);
+            final plannedMinutes = totalAssignedMinutes(
+              weekAssignments,
+              start: currentWeekStart,
+              end: weekEnd,
+            );
+            final mustDoMinutes = totalAssignedMinutes(
+              weekAssignments.where((item) => item.taskKind == TaskKind.mustDo),
+              start: currentWeekStart,
+              end: weekEnd,
+            );
             final wantToDoMinutes = plannedMinutes - mustDoMinutes;
-            final categoryTotals = _categoryTotals(weekAssignments);
+            final resolvedCategoryTotals = categoryTotals(
+              weekAssignments,
+              start: currentWeekStart,
+              end: weekEnd,
+              tasks: data.tasks,
+              categories: currentCategories,
+            );
 
             return ListView(
               padding: const EdgeInsets.all(20),
@@ -69,7 +84,7 @@ class _WeeklyReportScreenState extends ConsumerState<WeeklyReportScreen> {
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          '${DateFormat('yyyy/MM/dd').format(weekStart)} から ${DateFormat('yyyy/MM/dd').format(weekEnd.subtract(const Duration(days: 1)))}',
+                          '${DateFormat('yyyy/MM/dd').format(currentWeekStart)} から ${DateFormat('yyyy/MM/dd').format(weekEnd.subtract(const Duration(days: 1)))}',
                         ),
                         const SizedBox(height: 12),
                         Wrap(
@@ -108,7 +123,7 @@ class _WeeklyReportScreenState extends ConsumerState<WeeklyReportScreen> {
                 Card(
                   child: ListTile(
                     title: const Text('TaskMaster 見積もり総量'),
-                    subtitle: const Text('登録済みタスクの見積もり時間'),
+                    subtitle: const Text('この週に割り当てた予定の見積もり合計'),
                     trailing: Text('$totalEstimateMinutes分'),
                   ),
                 ),
@@ -131,7 +146,7 @@ class _WeeklyReportScreenState extends ConsumerState<WeeklyReportScreen> {
                 const SizedBox(height: 16),
                 Text('カテゴリ別', style: Theme.of(context).textTheme.titleMedium),
                 const SizedBox(height: 8),
-                if (categoryTotals.isEmpty)
+                if (resolvedCategoryTotals.isEmpty)
                   const Card(
                     child: Padding(
                       padding: EdgeInsets.all(20),
@@ -139,7 +154,7 @@ class _WeeklyReportScreenState extends ConsumerState<WeeklyReportScreen> {
                     ),
                   )
                 else
-                  ...categoryTotals.entries.map(
+                  ...resolvedCategoryTotals.entries.map(
                     (entry) => Card(
                       child: ListTile(
                         title: Text(entry.key),
@@ -169,36 +184,5 @@ class _WeeklyReportScreenState extends ConsumerState<WeeklyReportScreen> {
     setState(() {
       _anchorDate = DateTime.now();
     });
-  }
-
-  List<SlotTaskAssignment> _assignmentsForRange(
-    DailyPlanStateData data, {
-    required DateTime start,
-    required DateTime end,
-  }) {
-    return data.assignments.where((item) {
-      return !item.startAt.isBefore(start) && item.startAt.isBefore(end);
-    }).toList()..sort((a, b) => a.startAt.compareTo(b.startAt));
-  }
-
-  Map<String, int> _categoryTotals(List<SlotTaskAssignment> assignments) {
-    final totals = <String, int>{};
-    for (final item in assignments) {
-      final label = item.categoryName ?? '未分類';
-      totals.update(
-        label,
-        (value) => value + item.durationMinutes,
-        ifAbsent: () => item.durationMinutes,
-      );
-    }
-
-    final entries = totals.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    return Map<String, int>.fromEntries(entries);
-  }
-
-  DateTime _weekStart(DateTime anchorDate) {
-    final date = DateTime(anchorDate.year, anchorDate.month, anchorDate.day);
-    return date.subtract(Duration(days: date.weekday - DateTime.monday));
   }
 }
