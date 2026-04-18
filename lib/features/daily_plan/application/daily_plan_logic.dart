@@ -18,6 +18,24 @@ void validateFreeTimeSlot(FreeTimeSlot slot) {
   }
 }
 
+void validateFreeTimeSlotAgainstPlan({
+  required FreeTimeSlot slot,
+  required Iterable<FreeTimeSlot> existingSlots,
+}) {
+  validateFreeTimeSlot(slot);
+  for (final current in existingSlots) {
+    if (current.id == slot.id) {
+      continue;
+    }
+    final overlaps =
+        slot.startAt.isBefore(current.endAt) &&
+        slot.endAt.isAfter(current.startAt);
+    if (overlaps) {
+      throw const DailyPlanValidationException('自由時間枠どうしが重複しています。');
+    }
+  }
+}
+
 List<FreeTimeSlot> sortSlots(Iterable<FreeTimeSlot> slots) {
   final items = slots.toList();
   items.sort((a, b) => a.startAt.compareTo(b.startAt));

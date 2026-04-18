@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:frelocator/features/daily_plan/application/daily_plan_controller.dart';
+import 'package:frelocator/features/daily_plan/application/daily_plan_logic.dart';
 import 'package:frelocator/features/daily_plan/domain/daily_plan_models.dart';
 import 'package:frelocator/features/task_master/domain/task_models.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -110,6 +111,56 @@ void main() {
         expect(targetAssignments.single.endAt, DateTime(2026, 4, 21, 8));
       },
     );
+
+    test(
+      'rejects duplicating a slot into an overlapping target slot',
+      () async {
+        SharedPreferences.setMockInitialValues(<String, Object>{
+          'daily_plan_state_v1': _sampleState().encode(),
+        });
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+
+        await container.read(dailyPlanControllerProvider.future);
+        final notifier = container.read(dailyPlanControllerProvider.notifier);
+
+        expect(
+          () => notifier.duplicatePlan(
+            sourceDate: DateTime(2026, 4, 18),
+            targetDate: DateTime(2026, 4, 20),
+            sourceSlotIds: const <String>['slot-source-overlap'],
+            includeAssignments: false,
+          ),
+          throwsA(isA<DailyPlanValidationException>()),
+        );
+      },
+    );
+  });
+
+  group('upsertSlot', () {
+    test('rejects overlapping slots within the same daily plan', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'daily_plan_state_v1': _sampleState().encode(),
+      });
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      await container.read(dailyPlanControllerProvider.future);
+      final notifier = container.read(dailyPlanControllerProvider.notifier);
+
+      expect(
+        () => notifier.upsertSlot(
+          FreeTimeSlot(
+            id: 'slot-overlap',
+            dailyPlanId: 'plan-target',
+            startAt: DateTime(2026, 4, 20, 9, 30),
+            endAt: DateTime(2026, 4, 20, 10, 30),
+            label: '重複枠',
+          ),
+        ),
+        throwsA(isA<DailyPlanValidationException>()),
+      );
+    });
   });
 }
 
@@ -143,6 +194,13 @@ DailyPlanStateData _sampleState() {
         startAt: DateTime(2026, 4, 18, 20),
         endAt: DateTime(2026, 4, 18, 21),
         label: '夜',
+      ),
+      FreeTimeSlot(
+        id: 'slot-source-overlap',
+        dailyPlanId: sourcePlan.id,
+        startAt: DateTime(2026, 4, 18, 9, 30),
+        endAt: DateTime(2026, 4, 18, 10, 30),
+        label: '重複候補',
       ),
       FreeTimeSlot(
         id: 'slot-target-1',

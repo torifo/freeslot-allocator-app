@@ -105,17 +105,18 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     final slotIdMap = <String, String>{};
 
     for (final slot in sourceSlots) {
-      final newSlotId =
-          'slot-${DateTime.now().microsecondsSinceEpoch}-${slotIdMap.length}';
-      slotIdMap[slot.id] = newSlotId;
-      slots.add(
-        slot.copyWith(
-          id: newSlotId,
-          dailyPlanId: targetPlan.id,
-          startAt: shiftDateTimeByDays(slot.startAt, dayOffset),
-          endAt: shiftDateTimeByDays(slot.endAt, dayOffset),
-        ),
+      final copiedSlot = slot.copyWith(
+        id: 'slot-${DateTime.now().microsecondsSinceEpoch}-${slotIdMap.length}',
+        dailyPlanId: targetPlan.id,
+        startAt: shiftDateTimeByDays(slot.startAt, dayOffset),
+        endAt: shiftDateTimeByDays(slot.endAt, dayOffset),
       );
+      validateFreeTimeSlotAgainstPlan(
+        slot: copiedSlot,
+        existingSlots: slots.where((item) => item.dailyPlanId == targetPlan.id),
+      );
+      slotIdMap[slot.id] = copiedSlot.id;
+      slots.add(copiedSlot);
     }
 
     if (includeAssignments) {
@@ -155,8 +156,13 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
   }
 
   Future<void> upsertSlot(FreeTimeSlot slot) async {
-    validateFreeTimeSlot(slot);
     final current = state.requireValue;
+    validateFreeTimeSlotAgainstPlan(
+      slot: slot,
+      existingSlots: current.slots.where(
+        (item) => item.dailyPlanId == slot.dailyPlanId,
+      ),
+    );
     final slots = List<FreeTimeSlot>.from(current.slots);
     final index = slots.indexWhere((item) => item.id == slot.id);
     if (index >= 0) {
