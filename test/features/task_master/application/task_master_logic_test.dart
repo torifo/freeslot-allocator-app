@@ -62,4 +62,16 @@ void main() {
       isFalse,
     );
   });
+
+  test('duplicate category names are rejected', () {
+    expect(
+      () => validateCategoryNameUniqueness(
+        category: const TaskCategory(id: 'want-hobby-2', name: '趣味'),
+        categories: const <TaskCategory>[
+          TaskCategory(id: 'want-hobby', name: '趣味'),
+        ],
+      ),
+      throwsA(isA<TaskMasterValidationException>()),
+    );
+  });
 }

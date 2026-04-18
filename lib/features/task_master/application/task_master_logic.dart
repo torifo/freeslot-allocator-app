@@ -1,5 +1,14 @@
 import '../domain/task_models.dart';
 
+class TaskMasterValidationException implements Exception {
+  const TaskMasterValidationException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 List<TaskCategory> mergeCategories({
   required List<TaskCategory> mustDoCategories,
   required List<TaskCategory> wantToDoCategories,
@@ -21,6 +30,18 @@ List<TaskCategory> mergeCategories({
       return mustDo.map((category) => category.copyWith()).toList();
     case CategoryMergeStrategy.keepWantToDo:
       return wantToDo.map((category) => category.copyWith()).toList();
+  }
+}
+
+void validateCategoryNameUniqueness({
+  required TaskCategory category,
+  required Iterable<TaskCategory> categories,
+}) {
+  final duplicated = categories.any(
+    (item) => item.id != category.id && item.name == category.name,
+  );
+  if (duplicated) {
+    throw const TaskMasterValidationException('同じ名前のカテゴリがすでに存在します。');
   }
 }
 

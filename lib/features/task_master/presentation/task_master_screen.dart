@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../application/task_master_controller.dart';
+import '../application/task_master_logic.dart';
 import '../domain/task_models.dart';
 
 class TaskMasterScreen extends ConsumerStatefulWidget {
@@ -134,9 +135,18 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
         initialTask: existing,
         state: state,
         onSave: (task) async {
-          await ref
-              .read(taskMasterControllerProvider.notifier)
-              .addOrUpdateTask(task);
+          try {
+            await ref
+                .read(taskMasterControllerProvider.notifier)
+                .addOrUpdateTask(task);
+          } on TaskMasterValidationException catch (error) {
+            if (context.mounted) {
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(SnackBar(content: Text(error.message)));
+            }
+            rethrow;
+          }
         },
       ),
     );
@@ -295,24 +305,28 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
               return;
             }
             final now = DateTime.now();
-            await widget.onSave(
-              TaskMaster(
-                id:
-                    widget.initialTask?.id ??
-                    now.microsecondsSinceEpoch.toString(),
-                title: title,
-                kind: _kind,
-                priority: _priority,
-                createdAt: widget.initialTask?.createdAt ?? now,
-                updatedAt: now,
-                memo: _memoController.text.trim(),
-                categoryId: _categoryId,
-                estimatedMinutes:
-                    int.tryParse(_estimatedController.text.trim()) ?? 0,
-              ),
-            );
-            if (context.mounted) {
-              Navigator.of(context).pop();
+            try {
+              await widget.onSave(
+                TaskMaster(
+                  id:
+                      widget.initialTask?.id ??
+                      now.microsecondsSinceEpoch.toString(),
+                  title: title,
+                  kind: _kind,
+                  priority: _priority,
+                  createdAt: widget.initialTask?.createdAt ?? now,
+                  updatedAt: now,
+                  memo: _memoController.text.trim(),
+                  categoryId: _categoryId,
+                  estimatedMinutes:
+                      int.tryParse(_estimatedController.text.trim()) ?? 0,
+                ),
+              );
+              if (context.mounted) {
+                Navigator.of(context).pop();
+              }
+            } on TaskMasterValidationException {
+              // Keep the dialog open so the user can correct the input.
             }
           },
           child: const Text('保存'),

@@ -48,6 +48,10 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
     final wantToDo = List<TaskCategory>.from(current.wantToDoCategories);
 
     void updateList(List<TaskCategory> categories) {
+      validateCategoryNameUniqueness(
+        category: category,
+        categories: categories,
+      );
       final index = categories.indexWhere((item) => item.id == category.id);
       if (index >= 0) {
         categories[index] = category;

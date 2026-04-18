@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../application/task_master_controller.dart';
+import '../application/task_master_logic.dart';
 import '../domain/task_models.dart';
 
 class CategorySettingsScreen extends ConsumerWidget {
@@ -167,19 +168,27 @@ class _CategorySection extends ConsumerWidget {
               if (name.isEmpty) {
                 return;
               }
-              await ref
-                  .read(taskMasterControllerProvider.notifier)
-                  .upsertCategory(
-                    kind: kind,
-                    category: TaskCategory(
-                      id:
-                          category?.id ??
-                          '${kind.storageKey}-${DateTime.now().microsecondsSinceEpoch}',
-                      name: name,
-                    ),
-                  );
-              if (context.mounted) {
-                Navigator.of(context).pop();
+              try {
+                await ref
+                    .read(taskMasterControllerProvider.notifier)
+                    .upsertCategory(
+                      kind: kind,
+                      category: TaskCategory(
+                        id:
+                            category?.id ??
+                            '${kind.storageKey}-${DateTime.now().microsecondsSinceEpoch}',
+                        name: name,
+                      ),
+                    );
+                if (context.mounted) {
+                  Navigator.of(context).pop();
+                }
+              } on TaskMasterValidationException catch (error) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text(error.message)));
+                }
               }
             },
             child: const Text('保存'),
