@@ -112,4 +112,51 @@ void main() {
     expect(normalized.map((item) => item.id), <String>['early', 'late']);
     expect(normalized.map((item) => item.sortOrder), <int>[0, 1]);
   });
+
+  test('moveAssignmentToSlotEnd appends the assignment to the target slot', () {
+    final targetSlot = FreeTimeSlot(
+      id: 'slot-2',
+      dailyPlanId: 'plan-1',
+      startAt: DateTime(2026, 4, 19, 9),
+      endAt: DateTime(2026, 4, 19, 11),
+    );
+    final existing = SlotTaskAssignment(
+      id: 'existing',
+      dailyPlanId: 'plan-1',
+      slotId: 'slot-2',
+      taskId: 'task-1',
+      taskTitle: '朝の支度',
+      taskKind: TaskKind.mustDo,
+      startAt: DateTime(2026, 4, 19, 9),
+      endAt: DateTime(2026, 4, 19, 9, 30),
+      sortOrder: 0,
+    );
+    final assignment = SlotTaskAssignment(
+      id: 'moved',
+      dailyPlanId: 'plan-1',
+      slotId: 'slot-1',
+      taskId: 'task-2',
+      taskTitle: '読書',
+      taskKind: TaskKind.wantToDo,
+      startAt: DateTime(2026, 4, 18, 21),
+      endAt: DateTime(2026, 4, 18, 21, 20),
+      sortOrder: 0,
+    );
+
+    final moved = moveAssignmentToSlotEnd(
+      assignment: assignment,
+      targetSlot: targetSlot,
+      existingAssignments: <SlotTaskAssignment>[existing],
+    );
+
+    expect(moved.slotId, 'slot-2');
+    expect(moved.startAt, DateTime(2026, 4, 19, 9, 30));
+    expect(moved.endAt, DateTime(2026, 4, 19, 9, 50));
+  });
+
+  test('shiftDateTimeByDays keeps the time while moving the date', () {
+    final shifted = shiftDateTimeByDays(DateTime(2026, 4, 18, 23, 45), 3);
+
+    expect(shifted, DateTime(2026, 4, 21, 23, 45));
+  });
 }
