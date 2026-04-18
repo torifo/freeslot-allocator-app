@@ -7,13 +7,28 @@ import '../../daily_plan/domain/daily_plan_models.dart';
 import '../../task_master/application/task_master_controller.dart';
 import '../../task_master/domain/task_models.dart';
 
-class WeeklyReportScreen extends ConsumerWidget {
+class WeeklyReportScreen extends ConsumerStatefulWidget {
   const WeeklyReportScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<WeeklyReportScreen> createState() => _WeeklyReportScreenState();
+}
+
+class _WeeklyReportScreenState extends ConsumerState<WeeklyReportScreen> {
+  late DateTime _anchorDate;
+
+  @override
+  void initState() {
+    super.initState();
+    _anchorDate = DateTime.now();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final state = ref.watch(taskMasterControllerProvider);
     final dailyPlanState = ref.watch(dailyPlanControllerProvider);
+    final weekStart = _weekStart(_anchorDate);
+    final weekEnd = weekStart.add(const Duration(days: 7));
 
     return Scaffold(
       appBar: AppBar(title: const Text('週次レポート')),
@@ -24,7 +39,11 @@ class WeeklyReportScreen extends ConsumerWidget {
               0,
               (sum, task) => sum + task.estimatedMinutes,
             );
-            final weekAssignments = _currentWeekAssignments(dailyPlanData);
+            final weekAssignments = _assignmentsForRange(
+              dailyPlanData,
+              start: weekStart,
+              end: weekEnd,
+            );
             final plannedMinutes = weekAssignments.fold<int>(
               0,
               (sum, item) => sum + item.durationMinutes,
@@ -33,26 +52,55 @@ class WeeklyReportScreen extends ConsumerWidget {
                 .where((item) => item.taskKind == TaskKind.mustDo)
                 .fold<int>(0, (sum, item) => sum + item.durationMinutes);
             final wantToDoMinutes = plannedMinutes - mustDoMinutes;
-
-            final categoryTotals = <String, int>{};
-            for (final item in weekAssignments) {
-              final label = item.categoryName ?? '未分類';
-              categoryTotals.update(
-                label,
-                (value) => value + item.durationMinutes,
-                ifAbsent: () => item.durationMinutes,
-              );
-            }
+            final categoryTotals = _categoryTotals(weekAssignments);
 
             return ListView(
               padding: const EdgeInsets.all(20),
               children: [
                 Card(
-                  child: ListTile(
-                    title: const Text('今週の割り当て時間'),
-                    subtitle: Text(
-                      '${DateFormat('MM/dd').format(_weekStart())} から ${DateFormat('MM/dd').format(_weekEnd())}',
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '集計期間',
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          '${DateFormat('yyyy/MM/dd').format(weekStart)} から ${DateFormat('yyyy/MM/dd').format(weekEnd.subtract(const Duration(days: 1)))}',
+                        ),
+                        const SizedBox(height: 12),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: () => _shiftWeek(-1),
+                              icon: const Icon(Icons.chevron_left),
+                              label: const Text('前の週'),
+                            ),
+                            FilledButton.tonal(
+                              onPressed: _resetToCurrentWeek,
+                              child: const Text('今週'),
+                            ),
+                            OutlinedButton.icon(
+                              onPressed: () => _shiftWeek(1),
+                              icon: const Icon(Icons.chevron_right),
+                              label: const Text('次の週'),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Card(
+                  child: ListTile(
+                    title: const Text('この週の割り当て時間'),
+                    subtitle: const Text('DailyPlan に入っている実割り当ての合計'),
                     trailing: Text('$plannedMinutes分'),
                   ),
                 ),
@@ -87,7 +135,7 @@ class WeeklyReportScreen extends ConsumerWidget {
                   const Card(
                     child: Padding(
                       padding: EdgeInsets.all(20),
-                      child: Text('今週の割り当てはまだありません。日次計画で予定を作成すると集計されます。'),
+                      child: Text('この週の割り当てはまだありません。日次計画で予定を作成すると集計されます。'),
                     ),
                   )
                 else
@@ -111,24 +159,46 @@ class WeeklyReportScreen extends ConsumerWidget {
     );
   }
 
-  List<SlotTaskAssignment> _currentWeekAssignments(DailyPlanStateData data) {
-    final start = _weekStart();
-    final end = _weekEnd();
+  void _shiftWeek(int value) {
+    setState(() {
+      _anchorDate = _anchorDate.add(Duration(days: 7 * value));
+    });
+  }
+
+  void _resetToCurrentWeek() {
+    setState(() {
+      _anchorDate = DateTime.now();
+    });
+  }
+
+  List<SlotTaskAssignment> _assignmentsForRange(
+    DailyPlanStateData data, {
+    required DateTime start,
+    required DateTime end,
+  }) {
     return data.assignments.where((item) {
       return !item.startAt.isBefore(start) && item.startAt.isBefore(end);
-    }).toList();
+    }).toList()..sort((a, b) => a.startAt.compareTo(b.startAt));
   }
 
-  DateTime _weekStart() {
-    final now = DateTime.now();
-    return DateTime(
-      now.year,
-      now.month,
-      now.day,
-    ).subtract(Duration(days: now.weekday - DateTime.monday));
+  Map<String, int> _categoryTotals(List<SlotTaskAssignment> assignments) {
+    final totals = <String, int>{};
+    for (final item in assignments) {
+      final label = item.categoryName ?? '未分類';
+      totals.update(
+        label,
+        (value) => value + item.durationMinutes,
+        ifAbsent: () => item.durationMinutes,
+      );
+    }
+
+    final entries = totals.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return Map<String, int>.fromEntries(entries);
   }
 
-  DateTime _weekEnd() {
-    return _weekStart().add(const Duration(days: 7));
+  DateTime _weekStart(DateTime anchorDate) {
+    final date = DateTime(anchorDate.year, anchorDate.month, anchorDate.day);
+    return date.subtract(Duration(days: date.weekday - DateTime.monday));
   }
 }
