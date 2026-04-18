@@ -40,6 +40,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     required DateTime sourceDate,
     required DateTime targetDate,
     List<String>? sourceSlotIds,
+    List<String>? sourceAssignmentIds,
     bool includeAssignments = true,
     bool replaceExisting = false,
   }) async {
@@ -81,11 +82,14 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
       throw const DailyPlanValidationException('複製する自由時間枠を1件以上選択してください。');
     }
 
+    final selectedSourceAssignmentIds = sourceAssignmentIds?.toSet();
     final sourceAssignments = current.assignments
         .where(
           (item) =>
               item.dailyPlanId == sourcePlan.id &&
-              sourceSlots.any((slot) => slot.id == item.slotId),
+              sourceSlots.any((slot) => slot.id == item.slotId) &&
+              (selectedSourceAssignmentIds == null ||
+                  selectedSourceAssignmentIds.contains(item.id)),
         )
         .toList();
     final slots = replaceExisting
