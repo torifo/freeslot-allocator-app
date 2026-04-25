@@ -10,6 +10,7 @@ class FrelocatorApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp.router(
       title: 'Frelocator',
+      locale: const Locale('ja'),
       theme: buildAppTheme(),
       routerConfig: appRouter,
     );

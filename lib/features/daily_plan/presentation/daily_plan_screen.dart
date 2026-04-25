@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
+import '../../../app/theme.dart';
+
 import '../../task_master/application/task_master_controller.dart';
 import '../../task_master/domain/task_models.dart';
 import '../application/daily_plan_controller.dart';
@@ -90,16 +92,7 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
                       : () => _openSlotDialog(plan: plan),
                 ),
                 const SizedBox(height: 16),
-                if (plan == null)
-                  const Card(
-                    child: Padding(
-                      padding: EdgeInsets.all(20),
-                      child: Text(
-                        'この日の DailyPlan はまだありません。先に「当日計画を準備」を押してから、自由時間枠を追加してください。',
-                      ),
-                    ),
-                  )
-                else if (slots.isEmpty)
+                if (plan == null) ...[
                   Card(
                     child: Padding(
                       padding: const EdgeInsets.all(20),
@@ -107,55 +100,54 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            '自由時間枠はまだありません。',
+                            'この日の DailyPlan はまだありません。',
                             style: Theme.of(context).textTheme.titleMedium,
                           ),
                           const SizedBox(height: 8),
-                          const Text('仕事後の 21:00-23:00 など、最初の枠を追加してください。'),
+                          const Text(
+                            '先に当日計画を準備し、その後モーダルから自由時間の開始・終了を選択して追加します。',
+                          ),
                           const SizedBox(height: 12),
                           FilledButton.tonalIcon(
-                            onPressed: () => _openSlotDialog(plan: plan),
-                            icon: const Icon(Icons.add_alarm_outlined),
-                            label: const Text('自由時間枠を追加'),
+                            onPressed: _createPlanForSelectedDate,
+                            icon: const Icon(Icons.calendar_month_outlined),
+                            label: const Text('当日計画を準備'),
                           ),
                         ],
                       ),
                     ),
-                  )
-                else
-                  ...slots.map(
-                    (slot) => Padding(
-                      padding: const EdgeInsets.only(bottom: 16),
-                      child: _SlotCard(
-                        slot: slot,
-                        assignments: dailyPlanData.assignmentsForSlot(slot.id),
-                        draggingAssignmentId: _draggingAssignmentId,
-                        onEditSlot: () =>
-                            _openSlotDialog(plan: plan, existing: slot),
-                        onDeleteSlot: () => _deleteSlot(slot.id),
-                        onAddAssignment: () => _openAssignmentDialog(
-                          slot: slot,
-                          taskMasterData: taskMasterData,
-                        ),
-                        onEditAssignment: (assignment) => _openAssignmentDialog(
-                          slot: slot,
-                          taskMasterData: taskMasterData,
-                          existing: assignment,
-                        ),
-                        onMoveAssignment: (assignment, {beforeAssignmentId}) =>
-                            _moveAssignment(
-                              assignment.id,
-                              slot.id,
-                              beforeAssignmentId: beforeAssignmentId,
-                            ),
-                        onDeleteAssignment: (assignment) =>
-                            _deleteAssignment(assignment.id),
-                        onDragStateChanged: (assignmentId) {
-                          setState(() => _draggingAssignmentId = assignmentId);
-                        },
-                      ),
-                    ),
                   ),
+                ],
+                _DailyTimelineSection(
+                  date: _selectedDate,
+                  slots: slots,
+                  assignmentsForSlot: (slotId) =>
+                      dailyPlanData.assignmentsForSlot(slotId),
+                  draggingAssignmentId: _draggingAssignmentId,
+                  onEditSlot: (slot) =>
+                      _openSlotDialog(plan: plan, existing: slot),
+                  onDeleteSlot: (slot) => _deleteSlot(slot.id),
+                  onAddAssignment: (slot) => _openAssignmentDialog(
+                    slot: slot,
+                    taskMasterData: taskMasterData,
+                  ),
+                  onEditAssignment: (slot, assignment) => _openAssignmentDialog(
+                    slot: slot,
+                    taskMasterData: taskMasterData,
+                    existing: assignment,
+                  ),
+                  onMoveAssignment: (slot, assignment, {beforeAssignmentId}) =>
+                      _moveAssignment(
+                        assignment.id,
+                        slot.id,
+                        beforeAssignmentId: beforeAssignmentId,
+                      ),
+                  onDeleteAssignment: (assignment) =>
+                      _deleteAssignment(assignment.id),
+                  onDragStateChanged: (assignmentId) {
+                    setState(() => _draggingAssignmentId = assignmentId);
+                  },
+                ),
               ],
             );
           },
@@ -255,14 +247,24 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
   }
 
   Future<void> _openSlotDialog({
-    required DailyPlan plan,
+    DailyPlan? plan,
     FreeTimeSlot? existing,
   }) async {
+    final needsPlan = existing == null && plan == null;
+    final resolvedPlan = existing == null
+        ? (plan ??
+              await ref
+                  .read(dailyPlanControllerProvider.notifier)
+                  .ensurePlanForDate(_selectedDate))
+        : plan;
+    if (needsPlan && !mounted) {
+      return;
+    }
     await showDialog<void>(
       context: context,
       builder: (context) => _SlotEditDialog(
-        planDate: plan.date,
-        planId: plan.id,
+        planDate: existing?.startAt ?? resolvedPlan!.date,
+        planId: existing?.dailyPlanId ?? resolvedPlan!.id,
         initialSlot: existing,
         onSave: (slot) async {
           return _runWithErrorHandling(() async {
@@ -367,50 +369,567 @@ class _DateSummaryCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(22),
+      decoration: BoxDecoration(
+        color: AppColors.deep,
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.deep.withValues(alpha: 0.28),
+            blurRadius: 20,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        children: [
+          Positioned(
+            right: -40,
+            top: -40,
+            child: Container(
+              width: 180,
+              height: 180,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: RadialGradient(
+                  colors: [
+                    AppColors.clay.withValues(alpha: 0.4),
+                    Colors.transparent,
+                  ],
+                  stops: const [0, 0.65],
+                ),
+              ),
+            ),
+          ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'DAILY PLAN',
+                        style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 2.4,
+                          color: AppColors.onDeepMt,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        DateFormat('M月d日 (E)', 'ja').format(date),
+                        style: japaneseSerifTextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.w500,
+                          color: AppColors.onDeep,
+                          letterSpacing: 0.4,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const Spacer(),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 11,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: plan != null
+                          ? AppColors.clay
+                          : AppColors.onDeepMt.withValues(alpha: 0.3),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      plan != null ? '作成済み' : '未作成',
+                      style: japaneseSerifTextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  _HeroPill(label: '自由時間枠', value: '$slotCount 件'),
+                  const SizedBox(width: 10),
+                  _HeroPill(label: '割り当て', value: '$assignedMinutes 分'),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  _HeroButton(
+                    label: plan == null ? '当日計画を作成' : '当日計画を再確認',
+                    primary: true,
+                    onTap: onCreatePlan,
+                  ),
+                  _HeroButton(label: '別日を複製', onTap: onDuplicatePlan),
+                  if (onAddSlot != null)
+                    _HeroButton(label: '＋ 自由時間枠', onTap: onAddSlot!),
+                ],
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HeroPill extends StatelessWidget {
+  const _HeroPill({required this.label, required this.value});
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 9,
+              letterSpacing: 0.6,
+              color: AppColors.onDeepMt,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: japaneseSerifTextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w500,
+              color: AppColors.onDeep,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HeroButton extends StatelessWidget {
+  const _HeroButton({
+    required this.label,
+    required this.onTap,
+    this.primary = false,
+  });
+  final String label;
+  final VoidCallback onTap;
+  final bool primary;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: primary
+              ? AppColors.clay
+              : Colors.white.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          label,
+          style: japaneseSerifTextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: Colors.white,
+            letterSpacing: 0.4,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DailyTimelineSection extends StatefulWidget {
+  const _DailyTimelineSection({
+    required this.date,
+    required this.slots,
+    required this.assignmentsForSlot,
+    required this.draggingAssignmentId,
+    required this.onEditSlot,
+    required this.onDeleteSlot,
+    required this.onAddAssignment,
+    required this.onEditAssignment,
+    required this.onMoveAssignment,
+    required this.onDeleteAssignment,
+    required this.onDragStateChanged,
+  });
+
+  final DateTime date;
+  final List<FreeTimeSlot> slots;
+  final List<SlotTaskAssignment> Function(String slotId) assignmentsForSlot;
+  final String? draggingAssignmentId;
+  final ValueChanged<FreeTimeSlot> onEditSlot;
+  final ValueChanged<FreeTimeSlot> onDeleteSlot;
+  final ValueChanged<FreeTimeSlot> onAddAssignment;
+  final void Function(FreeTimeSlot slot, SlotTaskAssignment assignment)
+  onEditAssignment;
+  final void Function(
+    FreeTimeSlot slot,
+    SlotTaskAssignment assignment, {
+    String? beforeAssignmentId,
+  })
+  onMoveAssignment;
+  final ValueChanged<SlotTaskAssignment> onDeleteAssignment;
+  final ValueChanged<String?> onDragStateChanged;
+
+  @override
+  State<_DailyTimelineSection> createState() => _DailyTimelineSectionState();
+}
+
+class _DailyTimelineSectionState extends State<_DailyTimelineSection> {
+  static const double _hourHeight = 72;
+  static const double _gutterWidth = 56;
+
+  @override
+  Widget build(BuildContext context) {
+    final timelineStart = _timelineStart(widget.date, widget.slots);
+    final timelineEnd = _timelineEnd(widget.date);
+    final totalMinutes = timelineEnd.difference(timelineStart).inMinutes;
+    final timelineHeight = (totalMinutes / 60) * _hourHeight;
+
     return Card(
+      clipBehavior: Clip.antiAlias,
       child: Padding(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            Text('自由時間タイムライン', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
             Text(
-              DateFormat('yyyy/MM/dd (E)').format(date),
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
-            const SizedBox(height: 8),
-            Text(plan == null ? '未作成の DailyPlan' : 'DailyPlan 作成済み'),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                Chip(label: Text('自由時間枠 $slotCount件')),
-                Chip(label: Text('割り当て $assignedMinutes分')),
-              ],
+              'Googleカレンダーのように時間軸で自由時間枠を確認できます。',
+              style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 16),
-            Wrap(
-              spacing: 12,
-              runSpacing: 12,
-              children: [
-                FilledButton.tonal(
-                  onPressed: onCreatePlan,
-                  child: Text(plan == null ? '当日計画を作成' : '当日計画を再確認'),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: SizedBox(
+                width: 760,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      width: _gutterWidth,
+                      height: timelineHeight,
+                      child: _TimelineGutter(
+                        start: timelineStart,
+                        end: timelineEnd,
+                        hourHeight: _hourHeight,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: SizedBox(
+                        height: timelineHeight,
+                        child: Stack(
+                          children: [
+                            Positioned.fill(
+                              child: _TimelineGrid(
+                                start: timelineStart,
+                                end: timelineEnd,
+                                hourHeight: _hourHeight,
+                              ),
+                            ),
+                            ...widget.slots.map((slot) {
+                              final top = _offsetForTime(
+                                slot.startAt,
+                                timelineStart,
+                                _hourHeight,
+                              );
+                              final height =
+                                  (slot.durationMinutes / 60) * _hourHeight;
+                              return Positioned(
+                                top: top,
+                                left: 0,
+                                right: 0,
+                                height: height.clamp(48, double.infinity),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                  ),
+                                  child: _TimelineSlotBlock(
+                                    slot: slot,
+                                    assignmentCount: widget
+                                        .assignmentsForSlot(slot.id)
+                                        .length,
+                                    onTap: () => widget.onEditSlot(slot),
+                                  ),
+                                ),
+                              );
+                            }),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-                OutlinedButton.icon(
-                  onPressed: onDuplicatePlan,
-                  icon: const Icon(Icons.content_copy_outlined),
-                  label: const Text('別日を複製'),
-                ),
-                if (onAddSlot != null)
-                  OutlinedButton.icon(
-                    onPressed: onAddSlot,
-                    icon: const Icon(Icons.add_alarm_outlined),
-                    label: const Text('自由時間枠を追加'),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'タイムラインは自由時間の見え方を確認するための表示です。自由時間枠の登録は上部のボタンからモーダルで行います。',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            if (widget.slots.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              Text('自由時間枠の詳細', style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 8),
+              ...widget.slots.map(
+                (slot) => Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: _SlotCard(
+                    slot: slot,
+                    assignments: widget.assignmentsForSlot(slot.id),
+                    draggingAssignmentId: widget.draggingAssignmentId,
+                    onEditSlot: () => widget.onEditSlot(slot),
+                    onDeleteSlot: () => widget.onDeleteSlot(slot),
+                    onAddAssignment: () => widget.onAddAssignment(slot),
+                    onEditAssignment: (assignment) =>
+                        widget.onEditAssignment(slot, assignment),
+                    onMoveAssignment: (assignment, {beforeAssignmentId}) =>
+                        widget.onMoveAssignment(
+                          slot,
+                          assignment,
+                          beforeAssignmentId: beforeAssignmentId,
+                        ),
+                    onDeleteAssignment: widget.onDeleteAssignment,
+                    onDragStateChanged: widget.onDragStateChanged,
                   ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  DateTime _timelineStart(DateTime selectedDate, List<FreeTimeSlot> slots) {
+    final now = DateTime.now();
+    final base = DateTime(
+      selectedDate.year,
+      selectedDate.month,
+      selectedDate.day,
+      now.hour,
+      now.minute,
+    );
+    final roundedMinute = now.minute == 0 ? 0 : (now.minute <= 30 ? 30 : 0);
+    final roundedHour = now.minute > 30 ? now.hour + 1 : now.hour;
+    final roundedCurrent = DateTime(
+      selectedDate.year,
+      selectedDate.month,
+      selectedDate.day,
+      roundedHour,
+      roundedMinute,
+    );
+    final earliest = slots.isEmpty
+        ? roundedCurrent
+        : slots
+              .map((slot) => slot.startAt)
+              .reduce(
+                (value, element) => value.isBefore(element) ? value : element,
+              );
+    final start = earliest.isBefore(base) ? roundedCurrent : earliest;
+    return DateTime(
+      start.year,
+      start.month,
+      start.day,
+      start.minute == 0
+          ? start.hour
+          : (start.minute <= 30 ? start.hour : start.hour + 1),
+      start.minute == 0 ? 0 : (start.minute <= 30 ? 30 : 0),
+    );
+  }
+
+  DateTime _timelineEnd(DateTime selectedDate) {
+    return DateTime(
+      selectedDate.year,
+      selectedDate.month,
+      selectedDate.day + 1,
+      10,
+    );
+  }
+
+  double _offsetForTime(DateTime value, DateTime start, double hourHeight) {
+    return value.difference(start).inMinutes / 60 * hourHeight;
+  }
+}
+
+class _TimelineGutter extends StatelessWidget {
+  const _TimelineGutter({
+    required this.start,
+    required this.end,
+    required this.hourHeight,
+  });
+
+  final DateTime start;
+  final DateTime end;
+  final double hourHeight;
+
+  @override
+  Widget build(BuildContext context) {
+    final hours = <DateTime>[];
+    var cursor = start;
+    while (!cursor.isAfter(end)) {
+      hours.add(cursor);
+      cursor = cursor.add(const Duration(hours: 1));
+    }
+
+    return Stack(
+      children: hours.map((hour) {
+        final top = hour.difference(start).inMinutes / 60 * hourHeight;
+        return Positioned(
+          top: top - 10,
+          left: 0,
+          right: 0,
+          child: Text(
+            DateFormat('HH:mm').format(hour),
+            textAlign: TextAlign.right,
+            style: Theme.of(context).textTheme.labelSmall,
+          ),
+        );
+      }).toList(),
+    );
+  }
+}
+
+class _TimelineGrid extends StatelessWidget {
+  const _TimelineGrid({
+    required this.start,
+    required this.end,
+    required this.hourHeight,
+  });
+
+  final DateTime start;
+  final DateTime end;
+  final double hourHeight;
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = <DateTime>[];
+    var cursor = start;
+    while (!cursor.isAfter(end)) {
+      lines.add(cursor);
+      cursor = cursor.add(const Duration(hours: 1));
+    }
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppColors.bg,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.line),
+      ),
+      child: Stack(
+        children: lines.map((hour) {
+          final top = hour.difference(start).inMinutes / 60 * hourHeight;
+          return Positioned(
+            top: top,
+            left: 0,
+            right: 0,
+            child: Container(height: 1, color: AppColors.line),
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
+class _TimelineSlotBlock extends StatelessWidget {
+  const _TimelineSlotBlock({
+    required this.slot,
+    required this.assignmentCount,
+    required this.onTap,
+  });
+
+  final FreeTimeSlot slot;
+  final int assignmentCount;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.cream,
+      borderRadius: BorderRadius.circular(12),
+      shadowColor: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: const Border(
+              left: BorderSide(color: AppColors.clay, width: 3),
+            ),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 10, 12, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        slot.label.isEmpty ? '自由時間枠' : slot.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: japaneseSerifTextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: AppColors.ink,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '${slot.durationMinutes}分',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: AppColors.ink3,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '${DateFormat('HH:mm').format(slot.startAt)} – ${DateFormat('HH:mm').format(slot.endAt)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11, color: AppColors.ink2),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '予定 $assignmentCount 件',
+                  style: const TextStyle(fontSize: 10, color: AppColors.ink3),
+                ),
               ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -461,6 +980,7 @@ class _SlotCard extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
 
     return Card(
+      margin: EdgeInsets.zero,
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -984,13 +1504,14 @@ class _SlotEditDialogState extends State<_SlotEditDialog> {
     super.initState();
     final initial = widget.initialSlot;
     _labelController = TextEditingController(text: initial?.label ?? '');
-    _startTime = TimeOfDay.fromDateTime(initial?.startAt ?? widget.planDate);
+    final initialStart = initial?.startAt ?? widget.planDate;
+    _startTime = TimeOfDay.fromDateTime(initialStart);
     final defaultEnd =
-        initial?.endAt ?? widget.planDate.add(const Duration(hours: 1));
+        initial?.endAt ?? initialStart.add(const Duration(hours: 1));
     _endTime = TimeOfDay.fromDateTime(defaultEnd);
-    _endNextDay = initial == null
-        ? false
-        : !dateOnly(initial.endAt).isAtSameMomentAs(dateOnly(initial.startAt));
+    _endNextDay = !dateOnly(
+      defaultEnd,
+    ).isAtSameMomentAs(dateOnly(initialStart));
   }
 
   @override
@@ -1001,6 +1522,11 @@ class _SlotEditDialogState extends State<_SlotEditDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final startAt = _combine(widget.planDate, _startTime);
+    final endAt = _combine(
+      widget.planDate.add(Duration(days: _endNextDay ? 1 : 0)),
+      _endTime,
+    );
     return AlertDialog(
       title: Text(widget.initialSlot == null ? '自由時間枠を追加' : '自由時間枠を編集'),
       content: SingleChildScrollView(
@@ -1012,13 +1538,32 @@ class _SlotEditDialogState extends State<_SlotEditDialog> {
               decoration: const InputDecoration(labelText: 'ラベル'),
             ),
             const SizedBox(height: 12),
-            _TimeRow(
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerLowest,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                '開始と終了はモーダル内で分単位に選択できます。\n'
+                '${DateFormat('MM/dd HH:mm').format(startAt)} - ${DateFormat('MM/dd HH:mm').format(endAt)}'
+                ' / ${endAt.difference(startAt).inMinutes}分',
+              ),
+            ),
+            const SizedBox(height: 12),
+            _TimelinePickerRow(
               label: '開始',
               value: _startTime,
+              suffix: '当日',
               onTap: () async {
-                final picked = await showTimePicker(
+                final picked = await showModalBottomSheet<TimeOfDay>(
                   context: context,
-                  initialTime: _startTime,
+                  isScrollControlled: true,
+                  builder: (context) => _PreciseTimePickerSheet(
+                    title: '開始時間を選択',
+                    initialValue: _startTime,
+                  ),
                 );
                 if (picked != null) {
                   setState(() => _startTime = picked);
@@ -1026,13 +1571,18 @@ class _SlotEditDialogState extends State<_SlotEditDialog> {
               },
             ),
             const SizedBox(height: 12),
-            _TimeRow(
+            _TimelinePickerRow(
               label: '終了',
               value: _endTime,
+              suffix: _endNextDay ? '翌日' : '当日',
               onTap: () async {
-                final picked = await showTimePicker(
+                final picked = await showModalBottomSheet<TimeOfDay>(
                   context: context,
-                  initialTime: _endTime,
+                  isScrollControlled: true,
+                  builder: (context) => _PreciseTimePickerSheet(
+                    title: '終了時間を選択',
+                    initialValue: _endTime,
+                  ),
                 );
                 if (picked != null) {
                   setState(() => _endTime = picked);
@@ -1055,11 +1605,6 @@ class _SlotEditDialogState extends State<_SlotEditDialog> {
         ),
         FilledButton(
           onPressed: () async {
-            final startAt = _combine(widget.planDate, _startTime);
-            final endAt = _combine(
-              widget.planDate.add(Duration(days: _endNextDay ? 1 : 0)),
-              _endTime,
-            );
             final saved = await widget.onSave(
               FreeTimeSlot(
                 id:
@@ -1083,6 +1628,240 @@ class _SlotEditDialogState extends State<_SlotEditDialog> {
 
   DateTime _combine(DateTime date, TimeOfDay time) {
     return DateTime(date.year, date.month, date.day, time.hour, time.minute);
+  }
+}
+
+class _TimelinePickerRow extends StatelessWidget {
+  const _TimelinePickerRow({
+    required this.label,
+    required this.value,
+    required this.suffix,
+    required this.onTap,
+  });
+
+  final String label;
+  final TimeOfDay value;
+  final String suffix;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: onTap,
+      child: Ink(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: Theme.of(context).colorScheme.outlineVariant,
+          ),
+        ),
+        child: Row(
+          children: [
+            Expanded(child: Text(label)),
+            Text(value.format(context)),
+            const SizedBox(width: 8),
+            Text(suffix, style: Theme.of(context).textTheme.bodySmall),
+            const SizedBox(width: 8),
+            const Icon(Icons.expand_more),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PreciseTimePickerSheet extends StatefulWidget {
+  const _PreciseTimePickerSheet({
+    required this.title,
+    required this.initialValue,
+  });
+
+  final String title;
+  final TimeOfDay initialValue;
+
+  @override
+  State<_PreciseTimePickerSheet> createState() =>
+      _PreciseTimePickerSheetState();
+}
+
+class _PreciseTimePickerSheetState extends State<_PreciseTimePickerSheet> {
+  late int _hour;
+  late int _minute;
+
+  @override
+  void initState() {
+    super.initState();
+    _hour = widget.initialValue.hour;
+    _minute = widget.initialValue.minute;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final selected = TimeOfDay(hour: _hour, minute: _minute);
+
+    return SafeArea(
+      child: SizedBox(
+        height: 420,
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      widget.title,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 14,
+                ),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerLowest,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Text(
+                  selected.format(context),
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.headlineSmall,
+                ),
+              ),
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _NumberPickerColumn(
+                        label: '時',
+                        value: _hour,
+                        values: List<int>.generate(24, (index) => index),
+                        onSelected: (value) => setState(() => _hour = value),
+                        formatLabel: (value) =>
+                            value.toString().padLeft(2, '0'),
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: _NumberPickerColumn(
+                        label: '分',
+                        value: _minute,
+                        values: List<int>.generate(60, (index) => index),
+                        onSelected: (value) => setState(() => _minute = value),
+                        formatLabel: (value) =>
+                            value.toString().padLeft(2, '0'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
+              child: Row(
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('キャンセル'),
+                  ),
+                  const Spacer(),
+                  FilledButton(
+                    onPressed: () => Navigator.of(context).pop(selected),
+                    child: const Text('選択'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _NumberPickerColumn extends StatelessWidget {
+  const _NumberPickerColumn({
+    required this.label,
+    required this.value,
+    required this.values,
+    required this.onSelected,
+    required this.formatLabel,
+  });
+
+  final String label;
+  final int value;
+  final List<int> values;
+  final ValueChanged<int> onSelected;
+  final String Function(int value) formatLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: Theme.of(context).textTheme.labelMedium),
+        const SizedBox(height: 8),
+        Expanded(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerLowest,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: Theme.of(context).colorScheme.outlineVariant,
+              ),
+            ),
+            child: ListView.builder(
+              itemCount: values.length,
+              itemBuilder: (context, index) {
+                final item = values[index];
+                final isSelected = item == value;
+                return Material(
+                  color: isSelected
+                      ? Theme.of(
+                          context,
+                        ).colorScheme.secondaryContainer.withValues(alpha: 0.9)
+                      : Colors.transparent,
+                  child: InkWell(
+                    onTap: () => onSelected(item),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
+                      child: Text(
+                        formatLabel(item),
+                        style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                          fontWeight: isSelected
+                              ? FontWeight.w700
+                              : FontWeight.w400,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      ],
+    );
   }
 }
 
