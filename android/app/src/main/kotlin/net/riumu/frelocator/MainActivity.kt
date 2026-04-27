@@ -1,4 +1,4 @@
-package com.example.frelocator
+package net.riumu.frelocator
 
 import io.flutter.embedding.android.FlutterActivity
 
