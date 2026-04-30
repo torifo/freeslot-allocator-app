@@ -30,6 +30,6 @@ flutter build web --base-href /subpath/
 
 ## Remaining non-web blockers
 
-- Android `applicationId` is still `com.example.frelocator`
-- Android release signing is still debug signing
-- macOS bundle identifier is still `com.example.frelocator`
+- Android release signing passwords must be kept safe with the local keystore
+- macOS distribution method still needs to be chosen
+  App Store or notarized direct distribution
