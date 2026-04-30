@@ -11,7 +11,7 @@
 
 ## Release keystore
 
-- Path: `~/keystores/frelocator-release.jks`
+- Path: local machine only, not committed
 - Alias: `frelocator`
 
 ## Release keystore fingerprints
