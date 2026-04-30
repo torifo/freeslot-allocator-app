@@ -172,18 +172,6 @@ class _TopBar extends StatelessWidget {
               ],
             ),
           ),
-          IconButton(
-            onPressed: () {},
-            style: IconButton.styleFrom(
-              backgroundColor: AppColors.cream,
-              side: const BorderSide(color: AppColors.line2),
-            ),
-            icon: const Icon(
-              Icons.notifications_outlined,
-              size: 18,
-              color: AppColors.ink2,
-            ),
-          ),
         ],
       ),
     );
