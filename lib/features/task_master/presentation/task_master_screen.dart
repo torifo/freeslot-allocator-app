@@ -42,61 +42,62 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
           final visibleTasks = _filter == null
               ? data.tasks
               : data.tasks.where((task) => task.kind == _filter).toList();
+          final sections = _filter == null
+              ? <TaskKind>[TaskKind.mustDo, TaskKind.wantToDo]
+              : <TaskKind>[_filter!];
 
           return ListView(
             padding: const EdgeInsets.all(20),
             children: [
-              Wrap(
-                spacing: 8,
-                children: [
-                  ChoiceChip(
-                    label: const Text('すべて'),
-                    selected: _filter == null,
-                    onSelected: (_) => setState(() => _filter = null),
-                  ),
-                  ...TaskKind.values.map(
-                    (kind) => ChoiceChip(
-                      label: Text(kind.label),
-                      selected: _filter == kind,
-                      onSelected: (_) => setState(() => _filter = kind),
-                    ),
-                  ),
-                ],
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final isCompact = constraints.maxWidth < 420;
+                  final chipWidth = isCompact
+                      ? (constraints.maxWidth - 8) / 2
+                      : null;
+                  return Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      _buildFilterChip(
+                        label: 'すべて',
+                        selected: _filter == null,
+                        width: chipWidth,
+                        onSelected: (_) => setState(() => _filter = null),
+                      ),
+                      ...TaskKind.values.map(
+                        (kind) => _buildFilterChip(
+                          label: kind.label,
+                          selected: _filter == kind,
+                          width: chipWidth,
+                          onSelected: (_) => setState(() => _filter = kind),
+                        ),
+                      ),
+                    ],
+                  );
+                },
               ),
               const SizedBox(height: 16),
-              ...visibleTasks.map(
-                (task) => Card(
-                  child: ListTile(
-                    title: Text(task.title),
-                    subtitle: Text(
-                      [
-                        task.kind.label,
-                        _categoryName(data, task) ?? '未分類',
-                        '優先度 ${task.priority}',
-                        if (task.estimatedMinutes > 0)
-                          '${task.estimatedMinutes}分',
-                        DateFormat('yyyy/MM/dd HH:mm').format(task.updatedAt),
-                      ].join(' / '),
-                    ),
-                    isThreeLine: task.memo.isNotEmpty,
-                    trailing: PopupMenuButton<String>(
-                      onSelected: (value) async {
-                        if (value == 'edit') {
-                          await _openTaskDialog(context, existing: task);
-                        } else if (value == 'delete') {
-                          await ref
-                              .read(taskMasterControllerProvider.notifier)
-                              .deleteTask(task.id);
-                        }
-                      },
-                      itemBuilder: (context) => const [
-                        PopupMenuItem(value: 'edit', child: Text('編集')),
-                        PopupMenuItem(value: 'delete', child: Text('削除')),
-                      ],
-                    ),
+              ...sections.map((kind) {
+                final sectionTasks = visibleTasks
+                    .where((task) => task.kind == kind)
+                    .toList();
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: _TaskSectionCard(
+                    title: kind.label,
+                    tasks: sectionTasks,
+                    categoryNameForTask: (task) => _categoryName(data, task),
+                    onEdit: (task) => _openTaskDialog(context, existing: task),
+                    onDelete: (task) => ref
+                        .read(taskMasterControllerProvider.notifier)
+                        .deleteTask(task.id),
+                    onReorder: (orderedIds) => ref
+                        .read(taskMasterControllerProvider.notifier)
+                        .reorderTasks(kind: kind, orderedIds: orderedIds),
                   ),
-                ),
-              ),
+                );
+              }),
               if (visibleTasks.isEmpty)
                 const Card(
                   child: Padding(
@@ -111,6 +112,23 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
         error: (error, stackTrace) => Center(child: Text(error.toString())),
       ),
     );
+  }
+
+  Widget _buildFilterChip({
+    required String label,
+    required bool selected,
+    required ValueChanged<bool> onSelected,
+    double? width,
+  }) {
+    final chip = ChoiceChip(
+      label: SizedBox(
+        width: width,
+        child: Text(label, textAlign: TextAlign.center),
+      ),
+      selected: selected,
+      onSelected: onSelected,
+    );
+    return width == null ? chip : SizedBox(width: width, child: chip);
   }
 
   String? _categoryName(TaskMasterStateData data, TaskMaster task) {
@@ -172,8 +190,8 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
   late final TextEditingController _titleController;
   late final TextEditingController _memoController;
   late final TextEditingController _estimatedController;
+  late final TextEditingController _priorityController;
   late TaskKind _kind;
-  late int _priority;
   String? _categoryId;
 
   @override
@@ -185,8 +203,10 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
     _estimatedController = TextEditingController(
       text: task?.estimatedMinutes.toString() ?? '',
     );
+    _priorityController = TextEditingController(
+      text: (task?.priority ?? 3).toString(),
+    );
     _kind = task?.kind ?? TaskKind.mustDo;
-    _priority = task?.priority ?? 3;
     _categoryId = task?.categoryId;
   }
 
@@ -195,6 +215,7 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
     _titleController.dispose();
     _memoController.dispose();
     _estimatedController.dispose();
+    _priorityController.dispose();
     super.dispose();
   }
 
@@ -260,22 +281,13 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
               onChanged: (value) => setState(() => _categoryId = value),
             ),
             const SizedBox(height: 12),
-            DropdownButtonFormField<int>(
-              initialValue: _priority,
-              decoration: const InputDecoration(labelText: '優先度'),
-              items: List<int>.generate(5, (index) => index + 1)
-                  .map(
-                    (priority) => DropdownMenuItem<int>(
-                      value: priority,
-                      child: Text('$priority'),
-                    ),
-                  )
-                  .toList(),
-              onChanged: (value) {
-                if (value != null) {
-                  setState(() => _priority = value);
-                }
-              },
+            TextField(
+              controller: _priorityController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: '優先度',
+                helperText: '上に並ぶほど優先度が高くなります。あとでドラッグでも調整できます。',
+              ),
             ),
             const SizedBox(height: 12),
             TextField(
@@ -304,6 +316,7 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
             if (title.isEmpty) {
               return;
             }
+            final priority = int.tryParse(_priorityController.text.trim()) ?? 3;
             final now = DateTime.now();
             try {
               await widget.onSave(
@@ -313,7 +326,7 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
                       now.microsecondsSinceEpoch.toString(),
                   title: title,
                   kind: _kind,
-                  priority: _priority,
+                  priority: priority < 1 ? 1 : priority,
                   createdAt: widget.initialTask?.createdAt ?? now,
                   updatedAt: now,
                   memo: _memoController.text.trim(),
@@ -332,6 +345,110 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
           child: const Text('保存'),
         ),
       ],
+    );
+  }
+}
+
+class _TaskSectionCard extends StatelessWidget {
+  const _TaskSectionCard({
+    required this.title,
+    required this.tasks,
+    required this.categoryNameForTask,
+    required this.onEdit,
+    required this.onDelete,
+    required this.onReorder,
+  });
+
+  final String title;
+  final List<TaskMaster> tasks;
+  final String? Function(TaskMaster task) categoryNameForTask;
+  final Future<void> Function(TaskMaster task) onEdit;
+  final Future<void> Function(TaskMaster task) onDelete;
+  final Future<void> Function(List<String> orderedIds) onReorder;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            const Text('上にあるタスクほど優先度が高くなります。ドラッグで並び替えできます。'),
+            const SizedBox(height: 12),
+            if (tasks.isEmpty)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 8),
+                child: Text('まだタスクがありません。'),
+              )
+            else
+              ReorderableListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                buildDefaultDragHandles: false,
+                itemCount: tasks.length,
+                onReorder: (oldIndex, newIndex) async {
+                  var adjustedNewIndex = newIndex;
+                  if (adjustedNewIndex > oldIndex) {
+                    adjustedNewIndex -= 1;
+                  }
+                  final reordered = List<TaskMaster>.from(tasks);
+                  final moved = reordered.removeAt(oldIndex);
+                  reordered.insert(adjustedNewIndex, moved);
+                  await onReorder(reordered.map((task) => task.id).toList());
+                },
+                itemBuilder: (context, index) {
+                  final task = tasks[index];
+                  return Card(
+                    key: ValueKey(task.id),
+                    margin: const EdgeInsets.only(bottom: 8),
+                    child: ListTile(
+                      contentPadding: const EdgeInsets.only(left: 12, right: 4),
+                      title: Text(task.title),
+                      subtitle: Text(
+                        [
+                          categoryNameForTask(task) ?? '未分類',
+                          '優先度 ${task.priority}',
+                          if (task.estimatedMinutes > 0)
+                            '${task.estimatedMinutes}分',
+                          DateFormat('yyyy/MM/dd HH:mm').format(task.updatedAt),
+                        ].join(' / '),
+                      ),
+                      isThreeLine: task.memo.isNotEmpty,
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          PopupMenuButton<String>(
+                            onSelected: (value) async {
+                              if (value == 'edit') {
+                                await onEdit(task);
+                              } else if (value == 'delete') {
+                                await onDelete(task);
+                              }
+                            },
+                            itemBuilder: (context) => const [
+                              PopupMenuItem(value: 'edit', child: Text('編集')),
+                              PopupMenuItem(value: 'delete', child: Text('削除')),
+                            ],
+                          ),
+                          ReorderableDelayedDragStartListener(
+                            index: index,
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 8),
+                              child: Icon(Icons.drag_handle),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

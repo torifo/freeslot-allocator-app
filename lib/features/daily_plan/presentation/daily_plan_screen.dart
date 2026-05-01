@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../app/theme.dart';
 
@@ -18,28 +19,41 @@ class DailyPlanScreen extends ConsumerStatefulWidget {
 }
 
 class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
+  static const _timelineViewModeKey = 'daily_plan_timeline_view_mode_v1';
+
   late DateTime _selectedDate;
   String? _draggingAssignmentId;
+  _TimelineViewMode _timelineViewMode = _TimelineViewMode.noonToNoon;
 
   @override
   void initState() {
     super.initState();
     _selectedDate = dateOnly(DateTime.now());
+    _loadTimelineViewMode();
   }
 
   @override
   Widget build(BuildContext context) {
     final dailyPlanState = ref.watch(dailyPlanControllerProvider);
     final taskMasterState = ref.watch(taskMasterControllerProvider);
+    final currentDailyPlan = dailyPlanState.maybeWhen(
+      data: (value) => value.planForDate(_selectedDate),
+      orElse: () => null,
+    );
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('日次計画'),
         actions: [
           IconButton(
+            onPressed: () => _createPlanForAnotherDate(),
+            icon: const Icon(Icons.post_add_outlined),
+            tooltip: '別日を作成',
+          ),
+          IconButton(
             onPressed: () => _duplicateFromAnotherDate(),
             icon: const Icon(Icons.content_copy_outlined),
-            tooltip: '別日を複製',
+            tooltip: '別日に複製',
           ),
           IconButton(
             onPressed: () => _pickDate(context),
@@ -50,10 +64,18 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () {
-          _createPlanForSelectedDate();
+          if (currentDailyPlan == null) {
+            _createPlanForSelectedDate();
+          } else {
+            _openSlotDialog(plan: currentDailyPlan);
+          }
         },
-        icon: const Icon(Icons.calendar_month_outlined),
-        label: const Text('当日計画を準備'),
+        icon: Icon(
+          currentDailyPlan == null
+              ? Icons.calendar_month_outlined
+              : Icons.add_alarm_outlined,
+        ),
+        label: Text(currentDailyPlan == null ? '当日計画を準備' : '自由時間枠を追加'),
       ),
       body: dailyPlanState.when(
         data: (dailyPlanData) => taskMasterState.when(
@@ -81,15 +103,20 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
                               (inner, item) => inner + item.durationMinutes,
                             ),
                   ),
-                  onCreatePlan: () {
-                    _createPlanForSelectedDate();
+                  primaryActionLabel: plan == null ? '当日計画を作成' : '自由時間枠を追加',
+                  onPrimaryAction: () {
+                    if (plan == null) {
+                      _createPlanForSelectedDate();
+                    } else {
+                      _openSlotDialog(plan: plan);
+                    }
+                  },
+                  onCreateAnotherPlan: () {
+                    _createPlanForAnotherDate();
                   },
                   onDuplicatePlan: () {
                     _duplicateFromAnotherDate();
                   },
-                  onAddSlot: plan == null
-                      ? null
-                      : () => _openSlotDialog(plan: plan),
                 ),
                 const SizedBox(height: 16),
                 if (plan == null) ...[
@@ -147,6 +174,8 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
                   onDragStateChanged: (assignmentId) {
                     setState(() => _draggingAssignmentId = assignmentId);
                   },
+                  timelineViewMode: _timelineViewMode,
+                  onTimelineViewModeChanged: _updateTimelineViewMode,
                 ),
               ],
             );
@@ -179,6 +208,29 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
           .read(dailyPlanControllerProvider.notifier)
           .ensurePlanForDate(_selectedDate);
     });
+  }
+
+  Future<void> _createPlanForAnotherDate() async {
+    final result = await showDatePicker(
+      context: context,
+      initialDate: _selectedDate,
+      firstDate: DateTime(2024),
+      lastDate: DateTime(2035),
+      helpText: '作成先の日付を選択',
+    );
+    if (result == null) {
+      return;
+    }
+    final selectedDate = dateOnly(result);
+    final succeeded = await _runWithErrorHandling(() async {
+      await ref
+          .read(dailyPlanControllerProvider.notifier)
+          .ensurePlanForDate(selectedDate);
+    });
+    if (!succeeded || !mounted) {
+      return;
+    }
+    setState(() => _selectedDate = selectedDate);
   }
 
   Future<void> _duplicateFromAnotherDate() async {
@@ -329,6 +381,23 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
     });
   }
 
+  Future<void> _loadTimelineViewMode() async {
+    final preferences = await SharedPreferences.getInstance();
+    final value = preferences.getString(_timelineViewModeKey);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _timelineViewMode = _TimelineViewModeX.fromStorageKey(value);
+    });
+  }
+
+  Future<void> _updateTimelineViewMode(_TimelineViewMode mode) async {
+    setState(() => _timelineViewMode = mode);
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(_timelineViewModeKey, mode.storageKey);
+  }
+
   Future<bool> _runWithErrorHandling(Future<void> Function() action) async {
     try {
       await action();
@@ -348,27 +417,60 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
   }
 }
 
+enum _TimelineViewMode { noonToNoon, midnightToMidnight }
+
+extension _TimelineViewModeX on _TimelineViewMode {
+  String get storageKey {
+    switch (this) {
+      case _TimelineViewMode.noonToNoon:
+        return 'noon_to_noon';
+      case _TimelineViewMode.midnightToMidnight:
+        return 'midnight_to_midnight';
+    }
+  }
+
+  String get label {
+    switch (this) {
+      case _TimelineViewMode.noonToNoon:
+        return '12:00-翌12:00';
+      case _TimelineViewMode.midnightToMidnight:
+        return '00:00-24:00';
+    }
+  }
+
+  static _TimelineViewMode fromStorageKey(String? value) {
+    return _TimelineViewMode.values.firstWhere(
+      (mode) => mode.storageKey == value,
+      orElse: () => _TimelineViewMode.noonToNoon,
+    );
+  }
+}
+
 class _DateSummaryCard extends StatelessWidget {
   const _DateSummaryCard({
     required this.date,
     required this.plan,
     required this.slotCount,
     required this.assignedMinutes,
-    required this.onCreatePlan,
+    required this.primaryActionLabel,
+    required this.onPrimaryAction,
+    required this.onCreateAnotherPlan,
     required this.onDuplicatePlan,
-    required this.onAddSlot,
   });
 
   final DateTime date;
   final DailyPlan? plan;
   final int slotCount;
   final int assignedMinutes;
-  final VoidCallback onCreatePlan;
+  final String primaryActionLabel;
+  final VoidCallback onPrimaryAction;
+  final VoidCallback onCreateAnotherPlan;
   final VoidCallback onDuplicatePlan;
-  final VoidCallback? onAddSlot;
 
   @override
   Widget build(BuildContext context) {
+    final hasConfiguredSlots = plan != null && slotCount > 0;
+
     return Container(
       padding: const EdgeInsets.all(22),
       decoration: BoxDecoration(
@@ -440,13 +542,13 @@ class _DateSummaryCard extends StatelessWidget {
                       vertical: 4,
                     ),
                     decoration: BoxDecoration(
-                      color: plan != null
+                      color: hasConfiguredSlots
                           ? AppColors.clay
                           : AppColors.onDeepMt.withValues(alpha: 0.3),
                       borderRadius: BorderRadius.circular(999),
                     ),
                     child: Text(
-                      plan != null ? '作成済み' : '未作成',
+                      hasConfiguredSlots ? '作成済み' : '未作成',
                       style: japaneseSerifTextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.w600,
@@ -471,13 +573,12 @@ class _DateSummaryCard extends StatelessWidget {
                 runSpacing: 10,
                 children: [
                   _HeroButton(
-                    label: plan == null ? '当日計画を作成' : '当日計画を再確認',
+                    label: primaryActionLabel,
                     primary: true,
-                    onTap: onCreatePlan,
+                    onTap: onPrimaryAction,
                   ),
-                  _HeroButton(label: '別日を複製', onTap: onDuplicatePlan),
-                  if (onAddSlot != null)
-                    _HeroButton(label: '＋ 自由時間枠', onTap: onAddSlot!),
+                  _HeroButton(label: '別日を作成', onTap: onCreateAnotherPlan),
+                  _HeroButton(label: '別日に複製', onTap: onDuplicatePlan),
                 ],
               ),
             ],
@@ -540,23 +641,30 @@ class _HeroButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        decoration: BoxDecoration(
-          color: primary
-              ? AppColors.clay
-              : Colors.white.withValues(alpha: 0.12),
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
           borderRadius: BorderRadius.circular(8),
-        ),
-        child: Text(
-          label,
-          style: japaneseSerifTextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            color: Colors.white,
-            letterSpacing: 0.4,
+          child: Ink(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            decoration: BoxDecoration(
+              color: primary
+                  ? AppColors.clay
+                  : Colors.white.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              label,
+              style: japaneseSerifTextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: Colors.white,
+                letterSpacing: 0.4,
+              ),
+            ),
           ),
         ),
       ),
@@ -577,6 +685,8 @@ class _DailyTimelineSection extends StatefulWidget {
     required this.onMoveAssignment,
     required this.onDeleteAssignment,
     required this.onDragStateChanged,
+    required this.timelineViewMode,
+    required this.onTimelineViewModeChanged,
   });
 
   final DateTime date;
@@ -596,6 +706,8 @@ class _DailyTimelineSection extends StatefulWidget {
   onMoveAssignment;
   final ValueChanged<SlotTaskAssignment> onDeleteAssignment;
   final ValueChanged<String?> onDragStateChanged;
+  final _TimelineViewMode timelineViewMode;
+  final ValueChanged<_TimelineViewMode> onTimelineViewModeChanged;
 
   @override
   State<_DailyTimelineSection> createState() => _DailyTimelineSectionState();
@@ -625,70 +737,95 @@ class _DailyTimelineSectionState extends State<_DailyTimelineSection> {
               'Googleカレンダーのように時間軸で自由時間枠を確認できます。',
               style: Theme.of(context).textTheme.bodySmall,
             ),
+            const SizedBox(height: 12),
+            SegmentedButton<_TimelineViewMode>(
+              segments: _TimelineViewMode.values
+                  .map(
+                    (mode) => ButtonSegment<_TimelineViewMode>(
+                      value: mode,
+                      label: Text(mode.label),
+                    ),
+                  )
+                  .toList(),
+              selected: <_TimelineViewMode>{widget.timelineViewMode},
+              onSelectionChanged: (selection) {
+                widget.onTimelineViewModeChanged(selection.first);
+              },
+            ),
             const SizedBox(height: 16),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: SizedBox(
-                width: 760,
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SizedBox(
-                      width: _gutterWidth,
-                      height: timelineHeight,
-                      child: _TimelineGutter(
-                        start: timelineStart,
-                        end: timelineEnd,
-                        hourHeight: _hourHeight,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: SizedBox(
-                        height: timelineHeight,
-                        child: Stack(
-                          children: [
-                            Positioned.fill(
-                              child: _TimelineGrid(
-                                start: timelineStart,
-                                end: timelineEnd,
-                                hourHeight: _hourHeight,
-                              ),
-                            ),
-                            ...widget.slots.map((slot) {
-                              final top = _offsetForTime(
-                                slot.startAt,
-                                timelineStart,
-                                _hourHeight,
-                              );
-                              final height =
-                                  (slot.durationMinutes / 60) * _hourHeight;
-                              return Positioned(
-                                top: top,
-                                left: 0,
-                                right: 0,
-                                height: height.clamp(48, double.infinity),
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                  ),
-                                  child: _TimelineSlotBlock(
-                                    slot: slot,
-                                    assignmentCount: widget
-                                        .assignmentsForSlot(slot.id)
-                                        .length,
-                                    onTap: () => widget.onEditSlot(slot),
-                                  ),
-                                ),
-                              );
-                            }),
-                          ],
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final availableWidth = constraints.maxWidth;
+                final timelineWidth = (availableWidth - _gutterWidth - 8).clamp(
+                  280.0,
+                  704.0,
+                );
+                final contentWidth = timelineWidth + _gutterWidth + 8;
+
+                return SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: SizedBox(
+                    width: contentWidth,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(
+                          width: _gutterWidth,
+                          height: timelineHeight,
+                          child: _TimelineGutter(
+                            start: timelineStart,
+                            end: timelineEnd,
+                            hourHeight: _hourHeight,
+                          ),
                         ),
-                      ),
+                        const SizedBox(width: 8),
+                        SizedBox(
+                          width: timelineWidth,
+                          height: timelineHeight,
+                          child: Stack(
+                            children: [
+                              Positioned.fill(
+                                child: _TimelineGrid(
+                                  start: timelineStart,
+                                  end: timelineEnd,
+                                  hourHeight: _hourHeight,
+                                ),
+                              ),
+                              ...widget.slots.map((slot) {
+                                final top = _offsetForTime(
+                                  slot.startAt,
+                                  timelineStart,
+                                  _hourHeight,
+                                );
+                                final height =
+                                    (slot.durationMinutes / 60) * _hourHeight;
+                                return Positioned(
+                                  top: top,
+                                  left: 0,
+                                  right: 0,
+                                  height: height.clamp(48, double.infinity),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                    ),
+                                    child: _TimelineSlotBlock(
+                                      slot: slot,
+                                      assignmentCount: widget
+                                          .assignmentsForSlot(slot.id)
+                                          .length,
+                                      onTap: () => widget.onEditSlot(slot),
+                                    ),
+                                  ),
+                                );
+                              }),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-              ),
+                  ),
+                );
+              },
             ),
             const SizedBox(height: 12),
             Text(
@@ -730,49 +867,39 @@ class _DailyTimelineSectionState extends State<_DailyTimelineSection> {
   }
 
   DateTime _timelineStart(DateTime selectedDate, List<FreeTimeSlot> slots) {
-    final now = DateTime.now();
-    final base = DateTime(
-      selectedDate.year,
-      selectedDate.month,
-      selectedDate.day,
-      now.hour,
-      now.minute,
-    );
-    final roundedMinute = now.minute == 0 ? 0 : (now.minute <= 30 ? 30 : 0);
-    final roundedHour = now.minute > 30 ? now.hour + 1 : now.hour;
-    final roundedCurrent = DateTime(
-      selectedDate.year,
-      selectedDate.month,
-      selectedDate.day,
-      roundedHour,
-      roundedMinute,
-    );
-    final earliest = slots.isEmpty
-        ? roundedCurrent
-        : slots
-              .map((slot) => slot.startAt)
-              .reduce(
-                (value, element) => value.isBefore(element) ? value : element,
-              );
-    final start = earliest.isBefore(base) ? roundedCurrent : earliest;
-    return DateTime(
-      start.year,
-      start.month,
-      start.day,
-      start.minute == 0
-          ? start.hour
-          : (start.minute <= 30 ? start.hour : start.hour + 1),
-      start.minute == 0 ? 0 : (start.minute <= 30 ? 30 : 0),
-    );
+    switch (widget.timelineViewMode) {
+      case _TimelineViewMode.noonToNoon:
+        return DateTime(
+          selectedDate.year,
+          selectedDate.month,
+          selectedDate.day,
+          12,
+        );
+      case _TimelineViewMode.midnightToMidnight:
+        return DateTime(
+          selectedDate.year,
+          selectedDate.month,
+          selectedDate.day,
+        );
+    }
   }
 
   DateTime _timelineEnd(DateTime selectedDate) {
-    return DateTime(
-      selectedDate.year,
-      selectedDate.month,
-      selectedDate.day + 1,
-      10,
-    );
+    switch (widget.timelineViewMode) {
+      case _TimelineViewMode.noonToNoon:
+        return DateTime(
+          selectedDate.year,
+          selectedDate.month,
+          selectedDate.day + 1,
+          12,
+        );
+      case _TimelineViewMode.midnightToMidnight:
+        return DateTime(
+          selectedDate.year,
+          selectedDate.month,
+          selectedDate.day + 1,
+        );
+    }
   }
 
   double _offsetForTime(DateTime value, DateTime start, double hourHeight) {
@@ -801,20 +928,31 @@ class _TimelineGutter extends StatelessWidget {
     }
 
     return Stack(
-      children: hours.map((hour) {
-        final top = hour.difference(start).inMinutes / 60 * hourHeight;
-        return Positioned(
-          top: top - 10,
-          left: 0,
-          right: 0,
-          child: Text(
-            DateFormat('HH:mm').format(hour),
-            textAlign: TextAlign.right,
-            style: Theme.of(context).textTheme.labelSmall,
+      children: [
+        for (var index = 0; index < hours.length; index += 1)
+          Positioned(
+            top: _labelTopForIndex(index, hours.length),
+            left: 0,
+            right: 0,
+            child: Text(
+              DateFormat('HH:mm').format(hours[index]),
+              textAlign: TextAlign.right,
+              style: Theme.of(context).textTheme.labelSmall,
+            ),
           ),
-        );
-      }).toList(),
+      ],
     );
+  }
+
+  double _labelTopForIndex(int index, int count) {
+    final base = index * hourHeight - 10;
+    if (index == 0) {
+      return 14;
+    }
+    if (index == count - 1) {
+      return base - 14;
+    }
+    return base;
   }
 }
 
@@ -845,15 +983,23 @@ class _TimelineGrid extends StatelessWidget {
         border: Border.all(color: AppColors.line),
       ),
       child: Stack(
-        children: lines.map((hour) {
-          final top = hour.difference(start).inMinutes / 60 * hourHeight;
-          return Positioned(
-            top: top,
-            left: 0,
+        children: [
+          ...lines.map((hour) {
+            final top = hour.difference(start).inMinutes / 60 * hourHeight;
+            return Positioned(
+              top: top,
+              left: 0,
+              right: 0,
+              child: Container(height: 1, color: AppColors.line),
+            );
+          }),
+          const Positioned(
+            top: 0,
+            bottom: 0,
             right: 0,
-            child: Container(height: 1, color: AppColors.line),
-          );
-        }).toList(),
+            child: ColoredBox(color: AppColors.line, child: SizedBox(width: 1)),
+          ),
+        ],
       ),
     );
   }

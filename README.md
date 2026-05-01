@@ -1,12 +1,31 @@
 # FRELOCATOR
 
-FRELOCATOR is a Flutter app for planning free time with three connected layers:
+FRELOCATOR is a local-first Flutter planner for turning personal free time into concrete, reviewable plans.
+
+It is built around three connected layers:
 
 - `TaskMaster` for maintaining tasks you want or need to do
 - `DailyPlan` for assigning those tasks into actual free-time slots
 - `WeeklyReport` for reviewing how time was allocated during a week
 
-The app is currently designed as a local-first personal planning tool. Data is stored on the device with `shared_preferences`. There is no cloud sync, notification delivery, or external calendar integration yet.
+The app currently stores data on the device with `shared_preferences`. There is no cloud sync, notification delivery, account system, or external calendar integration yet.
+
+## Current Status
+
+The core planning loop is implemented and release builds are being checked for:
+
+- `macOS`
+- `Web`
+- `Android`
+
+Recent local verification has covered:
+
+- `flutter analyze`
+- `flutter test`
+- `flutter build macos`
+- `flutter build web`
+- `flutter build apk --release`
+- `flutter build appbundle`
 
 ## What This App Is For
 
@@ -53,23 +72,6 @@ The current implementation already includes the core planning loop.
 - no Google login
 - no backend API
 
-## Supported Targets
-
-The repository is currently being verified for:
-
-- `macOS`
-- `Web`
-- `Android`
-
-Recent local verification has covered:
-
-- `flutter analyze`
-- `flutter test`
-- `flutter build macos`
-- `flutter build web`
-- `flutter build apk --release`
-- `flutter build appbundle`
-
 ## Tech Stack
 
 - `Flutter`
@@ -84,6 +86,14 @@ Main application code lives under `lib/features/`:
 - `task_master/`
 - `daily_plan/`
 - `weekly_report/`
+
+Routing is currently centered around these screens:
+
+- `/`
+- `/tasks`
+- `/categories`
+- `/daily-plan`
+- `/weekly-report`
 
 ## Project Structure
 
@@ -101,6 +111,8 @@ web/
 android/
 macos/
 ```
+
+Flutter scaffold folders for `ios/`, `linux/`, and `windows/` also exist, but the main verification focus is currently macOS, Web, and Android.
 
 ## Getting Started
 
@@ -123,6 +135,12 @@ Run by platform:
 flutter run -d macos
 flutter run -d chrome
 flutter run -d <android_device_id>
+```
+
+Alternative web debug flow when Chrome integration is unstable:
+
+```bash
+flutter run -d web-server --web-hostname=127.0.0.1 --web-port=8080
 ```
 
 Build release artifacts:
@@ -159,6 +177,11 @@ Current release-related status:
 - macOS bundle ID: `net.riumu.frelocator`
 - Web target prepared for `app.frelocator.riumu.net`
 - Android release signing is wired through local `android/key.properties`
+
+Public web support pages prepared in the repository:
+
+- `/privacy.html`
+- `/support.html`
 
 ## Repository Notes
 

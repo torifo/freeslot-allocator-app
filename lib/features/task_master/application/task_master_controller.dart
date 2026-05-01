@@ -39,6 +39,41 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
     await _persist(current.copyWith(tasks: tasks));
   }
 
+  Future<void> reorderTasks({
+    required TaskKind kind,
+    required List<String> orderedIds,
+  }) async {
+    final current = state.requireValue;
+    final tasksOfKind = current.tasks
+        .where((task) => task.kind == kind)
+        .toList();
+    if (tasksOfKind.length <= 1) {
+      return;
+    }
+
+    final taskById = <String, TaskMaster>{
+      for (final task in tasksOfKind) task.id: task,
+    };
+    final orderedTasks = <TaskMaster>[
+      for (final id in orderedIds)
+        if (taskById.containsKey(id)) taskById[id]!,
+      for (final task in tasksOfKind)
+        if (!orderedIds.contains(task.id)) task,
+    ];
+    final now = DateTime.now();
+    final reorderedTasks = <TaskMaster>[
+      for (var index = 0; index < orderedTasks.length; index += 1)
+        orderedTasks[index].copyWith(
+          priority: orderedTasks.length - index,
+          updatedAt: now,
+        ),
+    ];
+    final others = current.tasks.where((task) => task.kind != kind).toList();
+    await _persist(
+      current.copyWith(tasks: _sortTasks([...others, ...reorderedTasks])),
+    );
+  }
+
   Future<void> upsertCategory({
     required TaskKind kind,
     required TaskCategory category,
@@ -126,6 +161,10 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
   List<TaskMaster> _sortTasks(List<TaskMaster> tasks) {
     final next = List<TaskMaster>.from(tasks);
     next.sort((a, b) {
+      final kindCompare = a.kind.index.compareTo(b.kind.index);
+      if (kindCompare != 0) {
+        return kindCompare;
+      }
       final priorityCompare = b.priority.compareTo(a.priority);
       if (priorityCompare != 0) {
         return priorityCompare;
