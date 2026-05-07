@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -187,6 +188,7 @@ class _TaskEditDialog extends StatefulWidget {
 }
 
 class _TaskEditDialogState extends State<_TaskEditDialog> {
+  final _formKey = GlobalKey<FormState>();
   late final TextEditingController _titleController;
   late final TextEditingController _memoController;
   late final TextEditingController _estimatedController;
@@ -226,83 +228,102 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
     return AlertDialog(
       title: Text(widget.initialTask == null ? 'タスク追加' : 'タスク編集'),
       content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: _titleController,
-              decoration: const InputDecoration(labelText: 'タイトル'),
-            ),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<TaskKind>(
-              initialValue: _kind,
-              decoration: const InputDecoration(labelText: '区分'),
-              items: TaskKind.values
-                  .map(
-                    (kind) => DropdownMenuItem<TaskKind>(
-                      value: kind,
-                      child: Text(kind.label),
-                    ),
-                  )
-                  .toList(),
-              onChanged: (value) {
-                if (value == null) {
-                  return;
-                }
-                setState(() {
-                  _kind = value;
-                  final allowedIds = widget.state
-                      .categoriesFor(_kind)
-                      .map((category) => category.id)
-                      .toSet();
-                  if (_categoryId != null &&
-                      !allowedIds.contains(_categoryId)) {
-                    _categoryId = null;
-                  }
-                });
-              },
-            ),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<String?>(
-              initialValue: _categoryId,
-              decoration: const InputDecoration(labelText: 'カテゴリ'),
-              items: [
-                const DropdownMenuItem<String?>(
-                  value: null,
-                  child: Text('未分類'),
+        child: SizedBox(
+          width: 420,
+          child: Form(
+            key: _formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: _titleController,
+                  autofocus: true,
+                  keyboardType: TextInputType.text,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(labelText: 'タイトル'),
+                  validator: (value) {
+                    if (value == null || value.trim().isEmpty) {
+                      return 'タイトルを入力してください。';
+                    }
+                    return null;
+                  },
                 ),
-                ...categories.map(
-                  (category) => DropdownMenuItem<String?>(
-                    value: category.id,
-                    child: Text(category.name),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<TaskKind>(
+                  initialValue: _kind,
+                  decoration: const InputDecoration(labelText: '区分'),
+                  items: TaskKind.values
+                      .map(
+                        (kind) => DropdownMenuItem<TaskKind>(
+                          value: kind,
+                          child: Text(kind.label),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    if (value == null) {
+                      return;
+                    }
+                    setState(() {
+                      _kind = value;
+                      final allowedIds = widget.state
+                          .categoriesFor(_kind)
+                          .map((category) => category.id)
+                          .toSet();
+                      if (_categoryId != null &&
+                          !allowedIds.contains(_categoryId)) {
+                        _categoryId = null;
+                      }
+                    });
+                  },
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String?>(
+                  initialValue: _categoryId,
+                  decoration: const InputDecoration(labelText: 'カテゴリ'),
+                  items: [
+                    const DropdownMenuItem<String?>(
+                      value: null,
+                      child: Text('未分類'),
+                    ),
+                    ...categories.map(
+                      (category) => DropdownMenuItem<String?>(
+                        value: category.id,
+                        child: Text(category.name),
+                      ),
+                    ),
+                  ],
+                  onChanged: (value) => setState(() => _categoryId = value),
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _priorityController,
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(
+                    labelText: '優先度',
+                    helperText: '上に並ぶほど優先度が高くなります。あとでドラッグでも調整できます。',
                   ),
                 ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _estimatedController,
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(labelText: '見積もり時間（分）'),
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _memoController,
+                  keyboardType: TextInputType.multiline,
+                  textInputAction: TextInputAction.newline,
+                  minLines: 3,
+                  maxLines: 4,
+                  decoration: const InputDecoration(labelText: 'メモ'),
+                ),
               ],
-              onChanged: (value) => setState(() => _categoryId = value),
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _priorityController,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                labelText: '優先度',
-                helperText: '上に並ぶほど優先度が高くなります。あとでドラッグでも調整できます。',
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _estimatedController,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: '見積もり時間（分）'),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _memoController,
-              minLines: 3,
-              maxLines: 4,
-              decoration: const InputDecoration(labelText: 'メモ'),
-            ),
-          ],
+          ),
         ),
       ),
       actions: [
@@ -312,10 +333,10 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
         ),
         FilledButton(
           onPressed: () async {
-            final title = _titleController.text.trim();
-            if (title.isEmpty) {
+            if (!_formKey.currentState!.validate()) {
               return;
             }
+            final title = _titleController.text.trim();
             final priority = int.tryParse(_priorityController.text.trim()) ?? 3;
             final now = DateTime.now();
             try {
@@ -368,6 +389,14 @@ class _TaskSectionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDesktopLike = switch (defaultTargetPlatform) {
+      TargetPlatform.macOS ||
+      TargetPlatform.windows ||
+      TargetPlatform.linux => true,
+      TargetPlatform.android ||
+      TargetPlatform.iOS ||
+      TargetPlatform.fuchsia => false,
+    };
     return Card(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
@@ -401,6 +430,13 @@ class _TaskSectionCard extends StatelessWidget {
                 },
                 itemBuilder: (context, index) {
                   final task = tasks[index];
+                  final dragIcon = Tooltip(
+                    message: isDesktopLike ? 'ドラッグして並び替え' : '長押しして並び替え',
+                    child: const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 8),
+                      child: Icon(Icons.drag_handle),
+                    ),
+                  );
                   return Card(
                     key: ValueKey(task.id),
                     margin: const EdgeInsets.only(bottom: 8),
@@ -433,13 +469,16 @@ class _TaskSectionCard extends StatelessWidget {
                               PopupMenuItem(value: 'delete', child: Text('削除')),
                             ],
                           ),
-                          ReorderableDelayedDragStartListener(
-                            index: index,
-                            child: const Padding(
-                              padding: EdgeInsets.symmetric(horizontal: 8),
-                              child: Icon(Icons.drag_handle),
+                          if (isDesktopLike)
+                            ReorderableDragStartListener(
+                              index: index,
+                              child: dragIcon,
+                            )
+                          else
+                            ReorderableDelayedDragStartListener(
+                              index: index,
+                              child: dragIcon,
                             ),
-                          ),
                         ],
                       ),
                     ),
