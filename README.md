@@ -1,5 +1,12 @@
 # FRELOCATOR
 
+<!-- tech-stack:start (auto-generated) -->
+<p align="center">
+  <img src="https://img.shields.io/badge/Flutter-02569B?style=for-the-badge&logo=flutter&logoColor=white" alt="Flutter">
+  <img src="https://img.shields.io/badge/Dart-0175C2?style=for-the-badge&logo=dart&logoColor=white" alt="Dart">
+</p>
+<!-- tech-stack:end -->
+
 FRELOCATOR は、個人の自由時間を具体的な計画に落とし込み、あとから振り返れる形にするためのローカルファーストな Flutter アプリです。
 
 アプリは 3 つの画面レイヤーを中心に構成しています。
