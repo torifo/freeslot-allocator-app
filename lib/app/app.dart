@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'router.dart';
 import 'theme.dart';
@@ -11,6 +12,8 @@ class FrelocatorApp extends StatelessWidget {
     return MaterialApp.router(
       title: 'Frelocator',
       locale: const Locale('ja'),
+      supportedLocales: const [Locale('ja')],
+      localizationsDelegates: GlobalMaterialLocalizations.delegates,
       theme: buildAppTheme(),
       scrollBehavior: const _AppScrollBehavior(),
       routerConfig: appRouter,
