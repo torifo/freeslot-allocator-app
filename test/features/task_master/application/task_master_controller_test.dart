@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:frelocator/features/task_master/application/task_master_controller.dart';
+import 'package:frelocator/features/task_master/application/task_master_logic.dart';
+import 'package:frelocator/features/task_master/data/task_master_repository.dart';
 import 'package:frelocator/features/task_master/domain/task_models.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -41,6 +43,93 @@ void main() {
       },
     );
   });
+
+  group('persistence failures', () {
+    test('leaves the published state unchanged when saving throws', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final container = ProviderContainer(
+        overrides: [
+          taskMasterRepositoryProvider.overrideWithValue(
+            _FailingTaskMasterRepository(_sampleState()),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(taskMasterControllerProvider.future);
+      final notifier = container.read(taskMasterControllerProvider.notifier);
+      final before = container.read(taskMasterControllerProvider).requireValue;
+
+      await expectLater(
+        notifier.deleteTask('must-1'),
+        throwsA(isA<StateError>()),
+      );
+
+      final after = container.read(taskMasterControllerProvider).requireValue;
+      expect(identical(after, before), isTrue);
+      expect(after.tasks.map((task) => task.id), contains('must-1'));
+    });
+  });
+
+  group('mutations before the state is ready', () {
+    test('report a Japanese validation error instead of crashing', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final container = ProviderContainer(
+        overrides: [
+          taskMasterRepositoryProvider.overrideWithValue(
+            _UnloadableTaskMasterRepository(),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final notifier = container.read(taskMasterControllerProvider.notifier);
+
+      // While the initial load is still in flight.
+      await expectLater(
+        notifier.deleteTask('must-1'),
+        throwsA(
+          isA<TaskMasterValidationException>().having(
+            (error) => error.message,
+            'message',
+            'データの読み込みが完了していません。',
+          ),
+        ),
+      );
+
+      await expectLater(
+        container.read(taskMasterControllerProvider.future),
+        throwsA(isA<StateError>()),
+      );
+
+      // And once the load has failed.
+      await expectLater(
+        notifier.deleteTask('must-1'),
+        throwsA(isA<TaskMasterValidationException>()),
+      );
+    });
+  });
+}
+
+class _UnloadableTaskMasterRepository extends TaskMasterRepository {
+  @override
+  Future<TaskMasterStateData> load() async {
+    throw StateError('storage unavailable');
+  }
+}
+
+class _FailingTaskMasterRepository extends TaskMasterRepository {
+  _FailingTaskMasterRepository(this._state);
+
+  final TaskMasterStateData _state;
+
+  @override
+  Future<TaskMasterStateData> load() async => _state;
+
+  @override
+  Future<void> save(TaskMasterStateData state) async {
+    throw StateError('storage unavailable');
+  }
 }
 
 TaskMasterStateData _sampleState() {

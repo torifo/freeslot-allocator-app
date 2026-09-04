@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:frelocator/features/daily_plan/application/daily_plan_controller.dart';
+import 'package:frelocator/features/daily_plan/data/daily_plan_repository.dart';
 import 'package:frelocator/features/daily_plan/application/daily_plan_logic.dart';
 import 'package:frelocator/features/daily_plan/domain/daily_plan_models.dart';
 import 'package:frelocator/features/task_master/domain/task_models.dart';
@@ -162,6 +163,101 @@ void main() {
       );
     });
   });
+
+  group('persistence failures', () {
+    test('leaves the published state unchanged when saving throws', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final container = ProviderContainer(
+        overrides: [
+          dailyPlanRepositoryProvider.overrideWithValue(
+            _FailingDailyPlanRepository(_sampleState()),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(dailyPlanControllerProvider.future);
+      final notifier = container.read(dailyPlanControllerProvider.notifier);
+      final before = container.read(dailyPlanControllerProvider).requireValue;
+
+      await expectLater(
+        notifier.upsertSlot(
+          FreeTimeSlot(
+            id: 'slot-new',
+            dailyPlanId: 'plan-target',
+            startAt: DateTime(2026, 4, 20, 14),
+            endAt: DateTime(2026, 4, 20, 15),
+            label: '追加枠',
+          ),
+        ),
+        throwsA(isA<StateError>()),
+      );
+
+      final after = container.read(dailyPlanControllerProvider).requireValue;
+      expect(identical(after, before), isTrue);
+      expect(after.slots.map((item) => item.id), isNot(contains('slot-new')));
+    });
+  });
+
+  group('mutations before the state is ready', () {
+    test('report a Japanese validation error instead of crashing', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final container = ProviderContainer(
+        overrides: [
+          dailyPlanRepositoryProvider.overrideWithValue(
+            _UnloadableDailyPlanRepository(),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final notifier = container.read(dailyPlanControllerProvider.notifier);
+
+      // While the initial load is still in flight.
+      await expectLater(
+        notifier.deleteSlot('slot-1'),
+        throwsA(
+          isA<DailyPlanValidationException>().having(
+            (error) => error.message,
+            'message',
+            'データの読み込みが完了していません。',
+          ),
+        ),
+      );
+
+      await expectLater(
+        container.read(dailyPlanControllerProvider.future),
+        throwsA(isA<StateError>()),
+      );
+
+      // And once the load has failed.
+      await expectLater(
+        notifier.deleteSlot('slot-1'),
+        throwsA(isA<DailyPlanValidationException>()),
+      );
+    });
+  });
+}
+
+class _UnloadableDailyPlanRepository extends DailyPlanRepository {
+  @override
+  Future<DailyPlanStateData> load() async {
+    throw StateError('storage unavailable');
+  }
+}
+
+class _FailingDailyPlanRepository extends DailyPlanRepository {
+  _FailingDailyPlanRepository(this._state);
+
+  final DailyPlanStateData _state;
+
+  @override
+  Future<DailyPlanStateData> load() async => _state;
+
+  @override
+  Future<void> save(DailyPlanStateData state) async {
+    throw StateError('storage unavailable');
+  }
 }
 
 DailyPlanStateData _sampleState() {

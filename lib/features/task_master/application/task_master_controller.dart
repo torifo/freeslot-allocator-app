@@ -18,8 +18,18 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
     return _repository.load();
   }
 
+  /// Returns the loaded state, or throws a user-facing validation error when a
+  /// mutation is attempted while the state is still loading or has failed.
+  TaskMasterStateData get _current {
+    final snapshot = state;
+    if (!snapshot.hasValue) {
+      throw const TaskMasterValidationException('データの読み込みが完了していません。');
+    }
+    return snapshot.value as TaskMasterStateData;
+  }
+
   Future<void> addOrUpdateTask(TaskMaster task) async {
-    final current = state.requireValue;
+    final current = _current;
     final sanitizedTask = sanitizeTaskAgainstCategories(task, current);
     final index = current.tasks.indexWhere((item) => item.id == task.id);
     final tasks = List<TaskMaster>.from(current.tasks);
@@ -34,7 +44,7 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
   }
 
   Future<void> deleteTask(String id) async {
-    final current = state.requireValue;
+    final current = _current;
     final tasks = current.tasks.where((task) => task.id != id).toList();
     await _persist(current.copyWith(tasks: tasks));
   }
@@ -43,7 +53,7 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
     required TaskKind kind,
     required List<String> orderedIds,
   }) async {
-    final current = state.requireValue;
+    final current = _current;
     final tasksOfKind = current.tasks
         .where((task) => task.kind == kind)
         .toList();
@@ -78,7 +88,7 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
     required TaskKind kind,
     required TaskCategory category,
   }) async {
-    final current = state.requireValue;
+    final current = _current;
     final mustDo = List<TaskCategory>.from(current.mustDoCategories);
     final wantToDo = List<TaskCategory>.from(current.wantToDoCategories);
 
@@ -116,7 +126,7 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
     required TaskKind kind,
     required String categoryId,
   }) async {
-    final current = state.requireValue;
+    final current = _current;
     final updated = deleteCategoryFromState(
       current,
       kind: kind,
@@ -129,7 +139,7 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
     required bool enabled,
     CategoryMergeStrategy strategy = CategoryMergeStrategy.keepLonger,
   }) async {
-    final current = state.requireValue;
+    final current = _current;
     if (enabled == current.shareCategories) {
       return;
     }
@@ -153,9 +163,18 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
     );
   }
 
+  /// Publishes the new state immediately so consecutive mutations build on
+  /// the latest value, then writes to storage. If the save fails the previous
+  /// state is restored so the UI never shows data that was not persisted.
   Future<void> _persist(TaskMasterStateData next) async {
+    final previous = state;
     state = AsyncData(next);
-    await _repository.save(next);
+    try {
+      await _repository.save(next);
+    } catch (_) {
+      state = previous;
+      rethrow;
+    }
   }
 
   List<TaskMaster> _sortTasks(List<TaskMaster> tasks) {

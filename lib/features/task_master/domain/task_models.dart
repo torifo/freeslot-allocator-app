@@ -138,13 +138,39 @@ extension CategoryMergeStrategyX on CategoryMergeStrategy {
   }
 }
 
+/// Decodes a JSON list, skipping entries that cannot be parsed instead of
+/// failing the whole load. A single corrupt record must not make the app
+/// unusable at startup.
+List<T> _decodeList<T>(
+  dynamic raw,
+  T Function(Map<String, dynamic> json) parse,
+) {
+  if (raw is! List) {
+    return <T>[];
+  }
+  final items = <T>[];
+  for (final dynamic entry in raw) {
+    if (entry is! Map<String, dynamic>) {
+      continue;
+    }
+    try {
+      items.add(parse(entry));
+    } catch (_) {
+      continue;
+    }
+  }
+  return items;
+}
+
 class TaskMasterStateData {
-  const TaskMasterStateData({
-    required this.tasks,
-    required this.mustDoCategories,
-    required this.wantToDoCategories,
+  TaskMasterStateData({
+    required List<TaskMaster> tasks,
+    required List<TaskCategory> mustDoCategories,
+    required List<TaskCategory> wantToDoCategories,
     required this.shareCategories,
-  });
+  }) : tasks = List<TaskMaster>.unmodifiable(tasks),
+       mustDoCategories = List<TaskCategory>.unmodifiable(mustDoCategories),
+       wantToDoCategories = List<TaskCategory>.unmodifiable(wantToDoCategories);
 
   final List<TaskMaster> tasks;
   final List<TaskCategory> mustDoCategories;
@@ -201,32 +227,30 @@ class TaskMasterStateData {
 
   factory TaskMasterStateData.fromJson(Map<String, dynamic> json) {
     return TaskMasterStateData(
-      tasks: (json['tasks'] as List<dynamic>? ?? <dynamic>[])
-          .map(
-            (dynamic item) => TaskMaster.fromJson(item as Map<String, dynamic>),
-          )
-          .toList(),
-      mustDoCategories:
-          (json['mustDoCategories'] as List<dynamic>? ?? <dynamic>[])
-              .map(
-                (dynamic item) =>
-                    TaskCategory.fromJson(item as Map<String, dynamic>),
-              )
-              .toList(),
-      wantToDoCategories:
-          (json['wantToDoCategories'] as List<dynamic>? ?? <dynamic>[])
-              .map(
-                (dynamic item) =>
-                    TaskCategory.fromJson(item as Map<String, dynamic>),
-              )
-              .toList(),
+      tasks: _decodeList<TaskMaster>(json['tasks'], TaskMaster.fromJson),
+      mustDoCategories: _decodeList<TaskCategory>(
+        json['mustDoCategories'],
+        TaskCategory.fromJson,
+      ),
+      wantToDoCategories: _decodeList<TaskCategory>(
+        json['wantToDoCategories'],
+        TaskCategory.fromJson,
+      ),
       shareCategories: json['shareCategories'] as bool? ?? false,
     );
   }
 
+  /// Decodes persisted state, falling back to the default state when the stored
+  /// payload is not valid JSON or is not a JSON object.
   factory TaskMasterStateData.decode(String source) {
-    return TaskMasterStateData.fromJson(
-      jsonDecode(source) as Map<String, dynamic>,
-    );
+    try {
+      final decoded = jsonDecode(source);
+      if (decoded is! Map<String, dynamic>) {
+        return TaskMasterStateData.initial();
+      }
+      return TaskMasterStateData.fromJson(decoded);
+    } on FormatException {
+      return TaskMasterStateData.initial();
+    }
   }
 }

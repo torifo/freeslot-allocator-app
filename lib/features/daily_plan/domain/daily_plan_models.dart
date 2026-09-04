@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import '../../task_master/domain/task_models.dart';
 
@@ -64,7 +65,7 @@ class FreeTimeSlot {
   final DateTime endAt;
   final String label;
 
-  int get durationMinutes => endAt.difference(startAt).inMinutes;
+  int get durationMinutes => max(0, endAt.difference(startAt).inMinutes);
 
   FreeTimeSlot copyWith({
     String? id,
@@ -130,7 +131,7 @@ class SlotTaskAssignment {
   final String? categoryName;
   final String memo;
 
-  int get durationMinutes => endAt.difference(startAt).inMinutes;
+  int get durationMinutes => max(0, endAt.difference(startAt).inMinutes);
 
   SlotTaskAssignment copyWith({
     String? id,
@@ -199,19 +200,45 @@ class SlotTaskAssignment {
   }
 }
 
+/// Decodes a JSON list, skipping entries that cannot be parsed instead of
+/// failing the whole load. A single corrupt record must not make the app
+/// unusable at startup.
+List<T> _decodeList<T>(
+  dynamic raw,
+  T Function(Map<String, dynamic> json) parse,
+) {
+  if (raw is! List) {
+    return <T>[];
+  }
+  final items = <T>[];
+  for (final dynamic entry in raw) {
+    if (entry is! Map<String, dynamic>) {
+      continue;
+    }
+    try {
+      items.add(parse(entry));
+    } catch (_) {
+      continue;
+    }
+  }
+  return items;
+}
+
 class DailyPlanStateData {
-  const DailyPlanStateData({
-    required this.plans,
-    required this.slots,
-    required this.assignments,
-  });
+  DailyPlanStateData({
+    required List<DailyPlan> plans,
+    required List<FreeTimeSlot> slots,
+    required List<SlotTaskAssignment> assignments,
+  }) : plans = List<DailyPlan>.unmodifiable(plans),
+       slots = List<FreeTimeSlot>.unmodifiable(slots),
+       assignments = List<SlotTaskAssignment>.unmodifiable(assignments);
 
   final List<DailyPlan> plans;
   final List<FreeTimeSlot> slots;
   final List<SlotTaskAssignment> assignments;
 
   factory DailyPlanStateData.initial() {
-    return const DailyPlanStateData(
+    return DailyPlanStateData(
       plans: <DailyPlan>[],
       slots: <FreeTimeSlot>[],
       assignments: <SlotTaskAssignment>[],
@@ -263,29 +290,26 @@ class DailyPlanStateData {
 
   factory DailyPlanStateData.fromJson(Map<String, dynamic> json) {
     return DailyPlanStateData(
-      plans: (json['plans'] as List<dynamic>? ?? <dynamic>[])
-          .map(
-            (dynamic item) => DailyPlan.fromJson(item as Map<String, dynamic>),
-          )
-          .toList(),
-      slots: (json['slots'] as List<dynamic>? ?? <dynamic>[])
-          .map(
-            (dynamic item) =>
-                FreeTimeSlot.fromJson(item as Map<String, dynamic>),
-          )
-          .toList(),
-      assignments: (json['assignments'] as List<dynamic>? ?? <dynamic>[])
-          .map(
-            (dynamic item) =>
-                SlotTaskAssignment.fromJson(item as Map<String, dynamic>),
-          )
-          .toList(),
+      plans: _decodeList<DailyPlan>(json['plans'], DailyPlan.fromJson),
+      slots: _decodeList<FreeTimeSlot>(json['slots'], FreeTimeSlot.fromJson),
+      assignments: _decodeList<SlotTaskAssignment>(
+        json['assignments'],
+        SlotTaskAssignment.fromJson,
+      ),
     );
   }
 
+  /// Decodes persisted state, falling back to an empty state when the stored
+  /// payload is not valid JSON or is not a JSON object.
   factory DailyPlanStateData.decode(String source) {
-    return DailyPlanStateData.fromJson(
-      jsonDecode(source) as Map<String, dynamic>,
-    );
+    try {
+      final decoded = jsonDecode(source);
+      if (decoded is! Map<String, dynamic>) {
+        return DailyPlanStateData.initial();
+      }
+      return DailyPlanStateData.fromJson(decoded);
+    } on FormatException {
+      return DailyPlanStateData.initial();
+    }
   }
 }

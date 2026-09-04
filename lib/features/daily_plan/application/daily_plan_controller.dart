@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/id_generator.dart';
 import '../data/daily_plan_repository.dart';
 import '../domain/daily_plan_models.dart';
 import 'daily_plan_logic.dart';
@@ -17,8 +18,18 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     return _repository.load();
   }
 
+  /// Returns the loaded state, or throws a user-facing validation error when a
+  /// mutation is attempted while the state is still loading or has failed.
+  DailyPlanStateData get _current {
+    final snapshot = state;
+    if (!snapshot.hasValue) {
+      throw const DailyPlanValidationException('データの読み込みが完了していません。');
+    }
+    return snapshot.value as DailyPlanStateData;
+  }
+
   Future<DailyPlan> ensurePlanForDate(DateTime value) async {
-    final current = state.requireValue;
+    final current = _current;
     final existing = current.planForDate(value);
     if (existing != null) {
       return existing;
@@ -26,7 +37,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
 
     final now = DateTime.now();
     final plan = DailyPlan(
-      id: 'plan-${now.microsecondsSinceEpoch}',
+      id: generateId('plan'),
       date: dateOnly(value),
       createdAt: now,
       updatedAt: now,
@@ -44,7 +55,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     bool includeAssignments = true,
     bool replaceExisting = false,
   }) async {
-    final current = state.requireValue;
+    final current = _current;
     final normalizedSource = dateOnly(sourceDate);
     final normalizedTarget = dateOnly(targetDate);
     if (normalizedSource == normalizedTarget) {
@@ -63,7 +74,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     final targetPlan =
         existingTargetPlan?.copyWith(date: normalizedTarget, updatedAt: now) ??
         DailyPlan(
-          id: 'plan-${now.microsecondsSinceEpoch}',
+          id: generateId('plan'),
           date: normalizedTarget,
           createdAt: now,
           updatedAt: now,
@@ -106,7 +117,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
 
     for (final slot in sourceSlots) {
       final copiedSlot = slot.copyWith(
-        id: 'slot-${DateTime.now().microsecondsSinceEpoch}-${slotIdMap.length}',
+        id: generateId('slot'),
         dailyPlanId: targetPlan.id,
         startAt: shiftDateTimeByDays(slot.startAt, dayOffset),
         endAt: shiftDateTimeByDays(slot.endAt, dayOffset),
@@ -131,7 +142,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
       for (final assignment in sortedSourceAssignments) {
         assignments.add(
           assignment.copyWith(
-            id: 'assignment-${DateTime.now().microsecondsSinceEpoch}-${assignments.length}',
+            id: generateId('assignment'),
             dailyPlanId: targetPlan.id,
             slotId: slotIdMap[assignment.slotId] ?? assignment.slotId,
             startAt: shiftDateTimeByDays(assignment.startAt, dayOffset),
@@ -156,7 +167,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
   }
 
   Future<void> upsertSlot(FreeTimeSlot slot) async {
-    final current = state.requireValue;
+    final current = _current;
     validateFreeTimeSlotAgainstPlan(
       slot: slot,
       existingSlots: current.slots.where(
@@ -180,7 +191,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
   }
 
   Future<void> deleteSlot(String slotId) async {
-    final current = state.requireValue;
+    final current = _current;
     final slot = current.slots.where((item) => item.id == slotId).firstOrNull;
     if (slot == null) {
       return;
@@ -201,7 +212,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
   }
 
   Future<void> upsertAssignment(SlotTaskAssignment assignment) async {
-    final current = state.requireValue;
+    final current = _current;
     final slot = current.slots
         .where((item) => item.id == assignment.slotId)
         .firstOrNull;
@@ -238,7 +249,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     required String targetSlotId,
     String? beforeAssignmentId,
   }) async {
-    final current = state.requireValue;
+    final current = _current;
     final assignment = current.assignments
         .where((item) => item.id == assignmentId)
         .firstOrNull;
@@ -289,7 +300,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
   }
 
   Future<void> deleteAssignment(String assignmentId) async {
-    final current = state.requireValue;
+    final current = _current;
     final assignment = current.assignments
         .where((item) => item.id == assignmentId)
         .firstOrNull;
@@ -309,9 +320,18 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     );
   }
 
+  /// Publishes the new state immediately so consecutive mutations build on
+  /// the latest value, then writes to storage. If the save fails the previous
+  /// state is restored so the UI never shows data that was not persisted.
   Future<void> _persist(DailyPlanStateData next) async {
+    final previous = state;
     state = AsyncData(next);
-    await _repository.save(next);
+    try {
+      await _repository.save(next);
+    } catch (_) {
+      state = previous;
+      rethrow;
+    }
   }
 
   List<DailyPlan> _sortPlans(List<DailyPlan> plans) {

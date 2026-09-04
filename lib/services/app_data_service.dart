@@ -13,10 +13,7 @@ final appDataServiceProvider = Provider<AppDataService>((ref) {
 });
 
 class AppDataService {
-  const AppDataService({
-    required this.taskRepo,
-    required this.dailyPlanRepo,
-  });
+  const AppDataService({required this.taskRepo, required this.dailyPlanRepo});
 
   final TaskMasterRepository taskRepo;
   final DailyPlanRepository dailyPlanRepo;
