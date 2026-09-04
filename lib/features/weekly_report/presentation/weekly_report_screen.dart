@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
+import '../../../core/error_view.dart';
 import '../../daily_plan/application/daily_plan_controller.dart';
 import '../application/weekly_report_logic.dart';
 import '../../task_master/application/task_master_controller.dart';
@@ -166,10 +167,14 @@ class _WeeklyReportScreenState extends ConsumerState<WeeklyReportScreen> {
             );
           },
           loading: () => const Center(child: CircularProgressIndicator()),
-          error: (error, stackTrace) => Center(child: Text(error.toString())),
+          error: (error, stackTrace) => ErrorView(
+            onRetry: () => ref.invalidate(dailyPlanControllerProvider),
+          ),
         ),
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, stackTrace) => Center(child: Text(error.toString())),
+        error: (error, stackTrace) => ErrorView(
+          onRetry: () => ref.invalidate(taskMasterControllerProvider),
+        ),
       ),
     );
   }

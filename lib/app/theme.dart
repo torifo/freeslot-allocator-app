@@ -159,7 +159,8 @@ ThemeData buildAppTheme() {
       backgroundColor: AppColors.cream,
       surfaceTintColor: Colors.transparent,
       elevation: 0,
-      height: 68,
+      // No fixed height: the bar grows with the platform text scale instead of
+      // clipping labels at large font sizes.
       indicatorColor: AppColors.claySoft,
       iconTheme: WidgetStateProperty.resolveWith((states) {
         if (states.contains(WidgetState.selected)) {

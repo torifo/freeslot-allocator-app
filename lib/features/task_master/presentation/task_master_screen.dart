@@ -4,6 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
+import '../../../core/confirm_dialog.dart';
+import '../../../core/error_view.dart';
+import '../../../core/id_generator.dart';
 import '../application/task_master_controller.dart';
 import '../application/task_master_logic.dart';
 import '../domain/task_models.dart';
@@ -90,9 +93,7 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
                     tasks: sectionTasks,
                     categoryNameForTask: (task) => _categoryName(data, task),
                     onEdit: (task) => _openTaskDialog(context, existing: task),
-                    onDelete: (task) => ref
-                        .read(taskMasterControllerProvider.notifier)
-                        .deleteTask(task.id),
+                    onDelete: (task) => _confirmDeleteTask(context, task),
                     onReorder: (orderedIds) => ref
                         .read(taskMasterControllerProvider.notifier)
                         .reorderTasks(kind: kind, orderedIds: orderedIds),
@@ -110,9 +111,19 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
           );
         },
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, stackTrace) => Center(child: Text(error.toString())),
+        error: (error, stackTrace) => ErrorView(
+          onRetry: () => ref.invalidate(taskMasterControllerProvider),
+        ),
       ),
     );
+  }
+
+  Future<void> _confirmDeleteTask(BuildContext context, TaskMaster task) async {
+    final confirmed = await confirmDelete(context, name: task.title);
+    if (!confirmed) {
+      return;
+    }
+    await ref.read(taskMasterControllerProvider.notifier).deleteTask(task.id);
   }
 
   Widget _buildFilterChip({
@@ -147,7 +158,12 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
     BuildContext context, {
     TaskMaster? existing,
   }) async {
-    final state = ref.read(taskMasterControllerProvider).requireValue;
+    final state = ref
+        .read(taskMasterControllerProvider)
+        .maybeWhen(data: (value) => value, orElse: () => null);
+    if (state == null) {
+      return;
+    }
     await showDialog<void>(
       context: context,
       builder: (context) => _TaskEditDialog(
@@ -163,6 +179,13 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
               ScaffoldMessenger.of(
                 context,
               ).showSnackBar(SnackBar(content: Text(error.message)));
+            }
+            rethrow;
+          } catch (_) {
+            if (context.mounted) {
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(const SnackBar(content: Text(saveFailureMessage)));
             }
             rethrow;
           }
@@ -195,6 +218,7 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
   late final TextEditingController _priorityController;
   late TaskKind _kind;
   String? _categoryId;
+  bool _isSaving = false;
 
   @override
   void initState() {
@@ -221,149 +245,159 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
     super.dispose();
   }
 
+  Future<void> _submit() async {
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
+    final title = _titleController.text.trim();
+    final priority = int.tryParse(_priorityController.text.trim()) ?? 3;
+    final now = DateTime.now();
+    setState(() => _isSaving = true);
+    try {
+      await widget.onSave(
+        TaskMaster(
+          id: widget.initialTask?.id ?? generateId('task'),
+          title: title,
+          kind: _kind,
+          priority: priority < 1 ? 1 : priority,
+          createdAt: widget.initialTask?.createdAt ?? now,
+          updatedAt: now,
+          memo: _memoController.text.trim(),
+          categoryId: _categoryId,
+          estimatedMinutes: int.tryParse(_estimatedController.text.trim()) ?? 0,
+        ),
+      );
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+    } catch (_) {
+      // Keep the dialog open so the user can correct the input. The message
+      // was already surfaced by the caller.
+    } finally {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final categories = widget.state.categoriesFor(_kind);
 
     return AlertDialog(
+      scrollable: true,
       title: Text(widget.initialTask == null ? 'タスク追加' : 'タスク編集'),
-      content: SingleChildScrollView(
-        child: SizedBox(
-          width: 420,
-          child: Form(
-            key: _formKey,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextFormField(
-                  controller: _titleController,
-                  autofocus: true,
-                  keyboardType: TextInputType.text,
-                  textInputAction: TextInputAction.next,
-                  decoration: const InputDecoration(labelText: 'タイトル'),
-                  validator: (value) {
-                    if (value == null || value.trim().isEmpty) {
-                      return 'タイトルを入力してください。';
-                    }
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 12),
-                DropdownButtonFormField<TaskKind>(
-                  initialValue: _kind,
-                  decoration: const InputDecoration(labelText: '区分'),
-                  items: TaskKind.values
-                      .map(
-                        (kind) => DropdownMenuItem<TaskKind>(
-                          value: kind,
-                          child: Text(kind.label),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (value) {
-                    if (value == null) {
-                      return;
-                    }
-                    setState(() {
-                      _kind = value;
-                      final allowedIds = widget.state
-                          .categoriesFor(_kind)
-                          .map((category) => category.id)
-                          .toSet();
-                      if (_categoryId != null &&
-                          !allowedIds.contains(_categoryId)) {
-                        _categoryId = null;
-                      }
-                    });
-                  },
-                ),
-                const SizedBox(height: 12),
-                DropdownButtonFormField<String?>(
-                  initialValue: _categoryId,
-                  decoration: const InputDecoration(labelText: 'カテゴリ'),
-                  items: [
-                    const DropdownMenuItem<String?>(
-                      value: null,
-                      child: Text('未分類'),
-                    ),
-                    ...categories.map(
-                      (category) => DropdownMenuItem<String?>(
-                        value: category.id,
-                        child: Text(category.name),
+      content: SizedBox(
+        width: 420,
+        child: Form(
+          key: _formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextFormField(
+                controller: _titleController,
+                autofocus: true,
+                keyboardType: TextInputType.text,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(labelText: 'タイトル'),
+                validator: (value) {
+                  if (value == null || value.trim().isEmpty) {
+                    return 'タイトルを入力してください。';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<TaskKind>(
+                initialValue: _kind,
+                decoration: const InputDecoration(labelText: '区分'),
+                items: TaskKind.values
+                    .map(
+                      (kind) => DropdownMenuItem<TaskKind>(
+                        value: kind,
+                        child: Text(kind.label),
                       ),
-                    ),
-                  ],
-                  onChanged: (value) => setState(() => _categoryId = value),
-                ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: _priorityController,
-                  keyboardType: TextInputType.number,
-                  textInputAction: TextInputAction.next,
-                  decoration: const InputDecoration(
-                    labelText: '優先度',
-                    helperText: '上に並ぶほど優先度が高くなります。あとでドラッグでも調整できます。',
+                    )
+                    .toList(),
+                onChanged: (value) {
+                  if (value == null) {
+                    return;
+                  }
+                  setState(() {
+                    _kind = value;
+                    final allowedIds = widget.state
+                        .categoriesFor(_kind)
+                        .map((category) => category.id)
+                        .toSet();
+                    if (_categoryId != null &&
+                        !allowedIds.contains(_categoryId)) {
+                      _categoryId = null;
+                    }
+                  });
+                },
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String?>(
+                initialValue: _categoryId,
+                decoration: const InputDecoration(labelText: 'カテゴリ'),
+                items: [
+                  const DropdownMenuItem<String?>(
+                    value: null,
+                    child: Text('未分類'),
                   ),
+                  ...categories.map(
+                    (category) => DropdownMenuItem<String?>(
+                      value: category.id,
+                      child: Text(category.name),
+                    ),
+                  ),
+                ],
+                onChanged: (value) => setState(() => _categoryId = value),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _priorityController,
+                keyboardType: TextInputType.number,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  labelText: '優先度',
+                  helperText: '上に並ぶほど優先度が高くなります。あとでドラッグでも調整できます。',
                 ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: _estimatedController,
-                  keyboardType: TextInputType.number,
-                  textInputAction: TextInputAction.next,
-                  decoration: const InputDecoration(labelText: '見積もり時間（分）'),
-                ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: _memoController,
-                  keyboardType: TextInputType.multiline,
-                  textInputAction: TextInputAction.newline,
-                  minLines: 3,
-                  maxLines: 4,
-                  decoration: const InputDecoration(labelText: 'メモ'),
-                ),
-              ],
-            ),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _estimatedController,
+                keyboardType: TextInputType.number,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(labelText: '見積もり時間（分）'),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _memoController,
+                keyboardType: TextInputType.multiline,
+                textInputAction: TextInputAction.newline,
+                minLines: 3,
+                maxLines: 4,
+                decoration: const InputDecoration(labelText: 'メモ'),
+              ),
+            ],
           ),
         ),
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: _isSaving ? null : () => Navigator.of(context).pop(),
           child: const Text('キャンセル'),
         ),
         FilledButton(
-          onPressed: () async {
-            if (!_formKey.currentState!.validate()) {
-              return;
-            }
-            final title = _titleController.text.trim();
-            final priority = int.tryParse(_priorityController.text.trim()) ?? 3;
-            final now = DateTime.now();
-            try {
-              await widget.onSave(
-                TaskMaster(
-                  id:
-                      widget.initialTask?.id ??
-                      now.microsecondsSinceEpoch.toString(),
-                  title: title,
-                  kind: _kind,
-                  priority: priority < 1 ? 1 : priority,
-                  createdAt: widget.initialTask?.createdAt ?? now,
-                  updatedAt: now,
-                  memo: _memoController.text.trim(),
-                  categoryId: _categoryId,
-                  estimatedMinutes:
-                      int.tryParse(_estimatedController.text.trim()) ?? 0,
-                ),
-              );
-              if (context.mounted) {
-                Navigator.of(context).pop();
-              }
-            } on TaskMasterValidationException {
-              // Keep the dialog open so the user can correct the input.
-            }
-          },
-          child: const Text('保存'),
+          onPressed: _isSaving ? null : _submit,
+          child: _isSaving
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('保存'),
         ),
       ],
     );
@@ -418,14 +452,12 @@ class _TaskSectionCard extends StatelessWidget {
                 physics: const NeverScrollableScrollPhysics(),
                 buildDefaultDragHandles: false,
                 itemCount: tasks.length,
-                onReorder: (oldIndex, newIndex) async {
-                  var adjustedNewIndex = newIndex;
-                  if (adjustedNewIndex > oldIndex) {
-                    adjustedNewIndex -= 1;
-                  }
+                // onReorderItem already reports newIndex relative to the list
+                // with the dragged item removed, so no manual adjustment.
+                onReorderItem: (oldIndex, newIndex) async {
                   final reordered = List<TaskMaster>.from(tasks);
                   final moved = reordered.removeAt(oldIndex);
-                  reordered.insert(adjustedNewIndex, moved);
+                  reordered.insert(newIndex, moved);
                   await onReorder(reordered.map((task) => task.id).toList());
                 },
                 itemBuilder: (context, index) {

@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/confirm_dialog.dart';
+import '../../../core/error_view.dart';
+import '../../../core/id_generator.dart';
 import '../application/task_master_controller.dart';
 import '../application/task_master_logic.dart';
 import '../domain/task_models.dart';
@@ -69,7 +72,9 @@ class CategorySettingsScreen extends ConsumerWidget {
           ],
         ),
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, stackTrace) => Center(child: Text(error.toString())),
+        error: (error, stackTrace) => ErrorView(
+          onRetry: () => ref.invalidate(taskMasterControllerProvider),
+        ),
       ),
     );
   }
@@ -100,12 +105,15 @@ class _CategorySection extends ConsumerWidget {
                   child: Text(
                     title,
                     style: Theme.of(context).textTheme.titleMedium,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                FilledButton.tonalIcon(
-                  onPressed: () => _openCategoryDialog(context, ref),
-                  icon: const Icon(Icons.add),
-                  label: const Text('追加'),
+                Flexible(
+                  child: FilledButton.tonalIcon(
+                    onPressed: () => _openCategoryDialog(context, ref),
+                    icon: const Icon(Icons.add),
+                    label: const Text('追加', overflow: TextOverflow.ellipsis),
+                  ),
                 ),
               ],
             ),
@@ -120,10 +128,18 @@ class _CategorySection extends ConsumerWidget {
                     IconButton(
                       onPressed: () =>
                           _openCategoryDialog(context, ref, category: category),
+                      tooltip: 'カテゴリを編集',
                       icon: const Icon(Icons.edit_outlined),
                     ),
                     IconButton(
                       onPressed: () async {
+                        final confirmed = await confirmDelete(
+                          context,
+                          name: category.name,
+                        );
+                        if (!confirmed) {
+                          return;
+                        }
                         await ref
                             .read(taskMasterControllerProvider.notifier)
                             .deleteCategory(
@@ -131,6 +147,7 @@ class _CategorySection extends ConsumerWidget {
                               categoryId: category.id,
                             );
                       },
+                      tooltip: 'カテゴリを削除',
                       icon: const Icon(Icons.delete_outline),
                     ),
                   ],
@@ -148,55 +165,118 @@ class _CategorySection extends ConsumerWidget {
     WidgetRef ref, {
     TaskCategory? category,
   }) async {
-    final controller = TextEditingController(text: category?.name ?? '');
     await showDialog<void>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(category == null ? 'カテゴリ追加' : 'カテゴリ編集'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(labelText: 'カテゴリ名'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('キャンセル'),
-          ),
-          FilledButton(
-            onPressed: () async {
-              final name = controller.text.trim();
-              if (name.isEmpty) {
-                return;
-              }
-              try {
-                await ref
-                    .read(taskMasterControllerProvider.notifier)
-                    .upsertCategory(
-                      kind: kind,
-                      category: TaskCategory(
-                        id:
-                            category?.id ??
-                            '${kind.storageKey}-${DateTime.now().microsecondsSinceEpoch}',
-                        name: name,
-                      ),
-                    );
-                if (context.mounted) {
-                  Navigator.of(context).pop();
-                }
-              } on TaskMasterValidationException catch (error) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(
-                    context,
-                  ).showSnackBar(SnackBar(content: Text(error.message)));
-                }
-              }
-            },
-            child: const Text('保存'),
-          ),
-        ],
+      builder: (context) => _CategoryEditDialog(
+        kind: kind,
+        category: category,
+        onSave: (saved) => ref
+            .read(taskMasterControllerProvider.notifier)
+            .upsertCategory(kind: kind, category: saved),
       ),
     );
-    controller.dispose();
+  }
+}
+
+class _CategoryEditDialog extends StatefulWidget {
+  const _CategoryEditDialog({
+    required this.kind,
+    required this.onSave,
+    this.category,
+  });
+
+  final TaskKind kind;
+  final TaskCategory? category;
+  final Future<void> Function(TaskCategory category) onSave;
+
+  @override
+  State<_CategoryEditDialog> createState() => _CategoryEditDialogState();
+}
+
+class _CategoryEditDialogState extends State<_CategoryEditDialog> {
+  late final TextEditingController _controller;
+  String? _errorText;
+  bool _isSaving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.category?.name ?? '');
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final name = _controller.text.trim();
+    if (name.isEmpty) {
+      setState(() => _errorText = 'カテゴリ名を入力してください');
+      return;
+    }
+
+    setState(() {
+      _errorText = null;
+      _isSaving = true;
+    });
+    try {
+      await widget.onSave(
+        TaskCategory(
+          id: widget.category?.id ?? generateId(widget.kind.storageKey),
+          name: name,
+        ),
+      );
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+    } on TaskMasterValidationException catch (error) {
+      if (mounted) {
+        setState(() => _errorText = error.message);
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text(saveFailureMessage)));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      scrollable: true,
+      title: Text(widget.category == null ? 'カテゴリ追加' : 'カテゴリ編集'),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        enabled: !_isSaving,
+        onSubmitted: (_) => _isSaving ? null : _submit(),
+        decoration: InputDecoration(labelText: 'カテゴリ名', errorText: _errorText),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _isSaving ? null : () => Navigator.of(context).pop(),
+          child: const Text('キャンセル'),
+        ),
+        FilledButton(
+          onPressed: _isSaving ? null : _submit,
+          child: _isSaving
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('保存'),
+        ),
+      ],
+    );
   }
 }
 
@@ -213,6 +293,7 @@ class _MergeStrategyDialogState extends State<_MergeStrategyDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      scrollable: true,
       title: const Text('共有化の基準を選択'),
       content: DropdownButtonFormField<CategoryMergeStrategy>(
         initialValue: _value,

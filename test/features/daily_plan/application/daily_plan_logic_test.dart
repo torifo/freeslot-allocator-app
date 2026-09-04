@@ -221,4 +221,83 @@ void main() {
 
     expect(shifted, DateTime(2026, 4, 21, 23, 45));
   });
+
+  group('resolveTimelineWindow', () {
+    FreeTimeSlot slot(DateTime start, DateTime end) => FreeTimeSlot(
+      id: 'slot-${start.millisecondsSinceEpoch}',
+      dailyPlanId: 'plan-1',
+      startAt: start,
+      endAt: end,
+    );
+
+    final defaultStart = DateTime(2026, 4, 18, 12);
+    final defaultEnd = DateTime(2026, 4, 19, 12);
+
+    test('keeps the default window when there are no slots', () {
+      final window = resolveTimelineWindow(
+        defaultStart: defaultStart,
+        defaultEnd: defaultEnd,
+        slots: const <FreeTimeSlot>[],
+      );
+
+      expect(window.start, defaultStart);
+      expect(window.end, defaultEnd);
+    });
+
+    test('extends the start down to the hour of an earlier morning slot', () {
+      final window = resolveTimelineWindow(
+        defaultStart: defaultStart,
+        defaultEnd: defaultEnd,
+        slots: [slot(DateTime(2026, 4, 18, 9, 30), DateTime(2026, 4, 18, 11))],
+      );
+
+      expect(window.start, DateTime(2026, 4, 18, 9));
+      expect(window.end, defaultEnd);
+    });
+
+    test('extends the end up to the hour after a late slot', () {
+      final window = resolveTimelineWindow(
+        defaultStart: defaultStart,
+        defaultEnd: defaultEnd,
+        slots: [slot(DateTime(2026, 4, 19, 11), DateTime(2026, 4, 19, 13, 15))],
+      );
+
+      expect(window.start, defaultStart);
+      expect(window.end, DateTime(2026, 4, 19, 14));
+    });
+
+    test('does not round up an end that already sits on the hour', () {
+      final window = resolveTimelineWindow(
+        defaultStart: defaultStart,
+        defaultEnd: defaultEnd,
+        slots: [slot(DateTime(2026, 4, 19, 11), DateTime(2026, 4, 19, 13))],
+      );
+
+      expect(window.end, DateTime(2026, 4, 19, 13));
+    });
+
+    test('also covers assignments that fall outside the slot list', () {
+      final window = resolveTimelineWindow(
+        defaultStart: defaultStart,
+        defaultEnd: defaultEnd,
+        slots: const <FreeTimeSlot>[],
+        assignments: [
+          SlotTaskAssignment(
+            id: 'a1',
+            dailyPlanId: 'plan-1',
+            slotId: 'slot-1',
+            taskId: 'task-1',
+            taskTitle: '朝の作業',
+            taskKind: TaskKind.mustDo,
+            startAt: DateTime(2026, 4, 18, 8, 45),
+            endAt: DateTime(2026, 4, 18, 9, 30),
+            sortOrder: 0,
+          ),
+        ],
+      );
+
+      expect(window.start, DateTime(2026, 4, 18, 8));
+      expect(window.end, defaultEnd);
+    });
+  });
 }

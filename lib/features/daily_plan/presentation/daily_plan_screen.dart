@@ -4,6 +4,9 @@ import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../app/theme.dart';
+import '../../../core/confirm_dialog.dart';
+import '../../../core/error_view.dart';
+import '../../../core/id_generator.dart';
 
 import '../../task_master/application/task_master_controller.dart';
 import '../../task_master/domain/task_models.dart';
@@ -86,7 +89,9 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
                 : dailyPlanData.slotsForPlan(plan.id);
 
             return ListView(
-              padding: const EdgeInsets.all(20),
+              // Bottom room for the extended FAB so the last slot stays
+              // reachable.
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 88),
               children: [
                 _DateSummaryCard(
                   date: _selectedDate,
@@ -153,7 +158,7 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
                   draggingAssignmentId: _draggingAssignmentId,
                   onEditSlot: (slot) =>
                       _openSlotDialog(plan: plan, existing: slot),
-                  onDeleteSlot: (slot) => _deleteSlot(slot.id),
+                  onDeleteSlot: _confirmDeleteSlot,
                   onAddAssignment: (slot) => _openAssignmentDialog(
                     slot: slot,
                     taskMasterData: taskMasterData,
@@ -181,10 +186,14 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
             );
           },
           loading: () => const Center(child: CircularProgressIndicator()),
-          error: (error, stackTrace) => Center(child: Text(error.toString())),
+          error: (error, stackTrace) => ErrorView(
+            onRetry: () => ref.invalidate(taskMasterControllerProvider),
+          ),
         ),
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, stackTrace) => Center(child: Text(error.toString())),
+        error: (error, stackTrace) => ErrorView(
+          onRetry: () => ref.invalidate(dailyPlanControllerProvider),
+        ),
       ),
     );
   }
@@ -196,7 +205,7 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
       firstDate: DateTime(2024),
       lastDate: DateTime(2035),
     );
-    if (result == null) {
+    if (result == null || !mounted) {
       return;
     }
     setState(() => _selectedDate = dateOnly(result));
@@ -351,6 +360,25 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
     );
   }
 
+  Future<void> _confirmDeleteSlot(FreeTimeSlot slot) async {
+    final assignmentCount = ref
+        .read(dailyPlanControllerProvider)
+        .value
+        ?.assignmentsForSlot(slot.id)
+        .length;
+    final confirmed = await confirmDelete(
+      context,
+      name: slot.label.isEmpty ? '自由時間枠' : slot.label,
+      description: (assignmentCount ?? 0) > 0
+          ? 'この枠に登録した$assignmentCount件の予定もあわせて削除されます。'
+          : 'この枠に登録した予定もあわせて削除されます。',
+    );
+    if (!confirmed) {
+      return;
+    }
+    await _deleteSlot(slot.id);
+  }
+
   Future<void> _deleteSlot(String slotId) async {
     await _runWithErrorHandling(() async {
       await ref.read(dailyPlanControllerProvider.notifier).deleteSlot(slotId);
@@ -404,13 +432,16 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
       return true;
     } on DailyPlanValidationException catch (error) {
       _showMessage(error.message);
-    } catch (error) {
-      _showMessage(error.toString());
+    } catch (_) {
+      _showMessage(saveFailureMessage);
     }
     return false;
   }
 
   void _showMessage(String message) {
+    if (!mounted) {
+      return;
+    }
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
@@ -648,21 +679,25 @@ class _HeroButton extends StatelessWidget {
         child: InkWell(
           onTap: onTap,
           borderRadius: BorderRadius.circular(8),
-          child: Ink(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            decoration: BoxDecoration(
-              color: primary
-                  ? AppColors.clay
-                  : Colors.white.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              label,
-              style: japaneseSerifTextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: Colors.white,
-                letterSpacing: 0.4,
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 48),
+            alignment: Alignment.center,
+            child: Ink(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: primary
+                    ? AppColors.clay
+                    : Colors.white.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                label,
+                style: japaneseSerifTextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white,
+                  letterSpacing: 0.4,
+                ),
               ),
             ),
           ),
@@ -719,8 +754,16 @@ class _DailyTimelineSectionState extends State<_DailyTimelineSection> {
 
   @override
   Widget build(BuildContext context) {
-    final timelineStart = _timelineStart(widget.date, widget.slots);
-    final timelineEnd = _timelineEnd(widget.date);
+    final window = resolveTimelineWindow(
+      defaultStart: _defaultTimelineStart(widget.date),
+      defaultEnd: _defaultTimelineEnd(widget.date),
+      slots: widget.slots,
+      assignments: widget.slots.expand(
+        (slot) => widget.assignmentsForSlot(slot.id),
+      ),
+    );
+    final timelineStart = window.start;
+    final timelineEnd = window.end;
     final totalMinutes = timelineEnd.difference(timelineStart).inMinutes;
     final timelineHeight = (totalMinutes / 60) * _hourHeight;
 
@@ -866,7 +909,7 @@ class _DailyTimelineSectionState extends State<_DailyTimelineSection> {
     );
   }
 
-  DateTime _timelineStart(DateTime selectedDate, List<FreeTimeSlot> slots) {
+  DateTime _defaultTimelineStart(DateTime selectedDate) {
     switch (widget.timelineViewMode) {
       case _TimelineViewMode.noonToNoon:
         return DateTime(
@@ -884,7 +927,7 @@ class _DailyTimelineSectionState extends State<_DailyTimelineSection> {
     }
   }
 
-  DateTime _timelineEnd(DateTime selectedDate) {
+  DateTime _defaultTimelineEnd(DateTime selectedDate) {
     switch (widget.timelineViewMode) {
       case _TimelineViewMode.noonToNoon:
         return DateTime(
@@ -1203,8 +1246,9 @@ class _SlotCard extends StatelessWidget {
                 ),
               ],
               const SizedBox(height: 8),
-              ...assignments.expand(
-                (assignment) => <Widget>[
+              ...assignments.indexed.expand((entry) {
+                final (index, assignment) = entry;
+                return <Widget>[
                   _AssignmentDropZone(
                     onAccept: (dragged) => onMoveAssignment(
                       dragged,
@@ -1213,6 +1257,10 @@ class _SlotCard extends StatelessWidget {
                     label:
                         '${DateFormat('HH:mm').format(assignment.startAt)} の前に挿入',
                     isDragging: isDragging,
+                    noOpAssignmentIds: <String>{
+                      assignment.id,
+                      if (index > 0) assignments[index - 1].id,
+                    },
                   ),
                   LongPressDraggable<SlotTaskAssignment>(
                     data: assignment,
@@ -1267,12 +1315,13 @@ class _SlotCard extends StatelessWidget {
                       highlighted: draggingAssignmentId == assignment.id,
                     ),
                   ),
-                ],
-              ),
+                ];
+              }),
               _AssignmentDropZone(
                 onAccept: (assignment) => onMoveAssignment(assignment),
                 label: '末尾に移動',
                 isDragging: isDragging,
+                noOpAssignmentIds: <String>{assignments.last.id},
               ),
             ],
           ],
@@ -1287,17 +1336,22 @@ class _AssignmentDropZone extends StatelessWidget {
     required this.onAccept,
     required this.label,
     required this.isDragging,
+    this.noOpAssignmentIds = const <String>{},
   });
 
   final ValueChanged<SlotTaskAssignment> onAccept;
   final String label;
   final bool isDragging;
 
+  /// Assignments whose drop here would not change the order.
+  final Set<String> noOpAssignmentIds;
+
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     return DragTarget<SlotTaskAssignment>(
-      onWillAcceptWithDetails: (details) => true,
+      onWillAcceptWithDetails: (details) =>
+          !noOpAssignmentIds.contains(details.data.id),
       onAcceptWithDetails: (details) => onAccept(details.data),
       builder: (context, candidateData, rejectedData) {
         final isActive = candidateData.isNotEmpty;
@@ -1414,129 +1468,128 @@ class _DuplicatePlanDialogState extends State<_DuplicatePlanDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      scrollable: true,
       title: const Text('部分複製を設定'),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              '${DateFormat('yyyy/MM/dd').format(widget.sourceDate)} から ${DateFormat('yyyy/MM/dd').format(widget.targetDate)} へ複製します。',
-            ),
-            const SizedBox(height: 12),
-            const Text('複製する自由時間枠'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '${DateFormat('yyyy/MM/dd').format(widget.sourceDate)} から ${DateFormat('yyyy/MM/dd').format(widget.targetDate)} へ複製します。',
+          ),
+          const SizedBox(height: 12),
+          const Text('複製する自由時間枠'),
+          const SizedBox(height: 8),
+          ...widget.sourceSlots.map((slot) {
+            final range =
+                '${DateFormat('MM/dd HH:mm').format(slot.startAt)} - ${DateFormat('MM/dd HH:mm').format(slot.endAt)}';
+            final slotAssignments =
+                widget.sourceAssignmentsBySlot[slot.id] ??
+                const <SlotTaskAssignment>[];
+            return CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              value: _selectedSlotIds.contains(slot.id),
+              title: Text(slot.label.isEmpty ? '自由時間枠' : slot.label),
+              subtitle: Text(range),
+              onChanged: (value) {
+                setState(() {
+                  if (value ?? false) {
+                    _selectedSlotIds.add(slot.id);
+                    _selectedAssignmentIds.addAll(
+                      slotAssignments.map((item) => item.id),
+                    );
+                  } else {
+                    _selectedSlotIds.remove(slot.id);
+                    _selectedAssignmentIds.removeAll(
+                      slotAssignments.map((item) => item.id),
+                    );
+                  }
+                });
+              },
+            );
+          }),
+          if (_selectedSlotIds.isNotEmpty && _includeAssignments) ...[
             const SizedBox(height: 8),
-            ...widget.sourceSlots.map((slot) {
-              final range =
-                  '${DateFormat('MM/dd HH:mm').format(slot.startAt)} - ${DateFormat('MM/dd HH:mm').format(slot.endAt)}';
+            const Text('複製する予定'),
+            const SizedBox(height: 8),
+            ...widget.sourceSlots.expand((slot) {
               final slotAssignments =
                   widget.sourceAssignmentsBySlot[slot.id] ??
                   const <SlotTaskAssignment>[];
-              return CheckboxListTile(
-                contentPadding: EdgeInsets.zero,
-                value: _selectedSlotIds.contains(slot.id),
-                title: Text(slot.label.isEmpty ? '自由時間枠' : slot.label),
-                subtitle: Text(range),
-                onChanged: (value) {
-                  setState(() {
-                    if (value ?? false) {
-                      _selectedSlotIds.add(slot.id);
-                      _selectedAssignmentIds.addAll(
-                        slotAssignments.map((item) => item.id),
-                      );
-                    } else {
-                      _selectedSlotIds.remove(slot.id);
-                      _selectedAssignmentIds.removeAll(
-                        slotAssignments.map((item) => item.id),
-                      );
-                    }
-                  });
-                },
-              );
-            }),
-            if (_selectedSlotIds.isNotEmpty && _includeAssignments) ...[
-              const SizedBox(height: 8),
-              const Text('複製する予定'),
-              const SizedBox(height: 8),
-              ...widget.sourceSlots.expand((slot) {
-                final slotAssignments =
-                    widget.sourceAssignmentsBySlot[slot.id] ??
-                    const <SlotTaskAssignment>[];
-                if (!_selectedSlotIds.contains(slot.id) ||
-                    slotAssignments.isEmpty) {
-                  return const <Widget>[];
-                }
-                return <Widget>[
-                  Padding(
-                    padding: const EdgeInsets.only(left: 16, bottom: 4),
-                    child: Text(
-                      slot.label.isEmpty ? '自由時間枠' : slot.label,
-                      style: Theme.of(context).textTheme.labelMedium,
-                    ),
+              if (!_selectedSlotIds.contains(slot.id) ||
+                  slotAssignments.isEmpty) {
+                return const <Widget>[];
+              }
+              return <Widget>[
+                Padding(
+                  padding: const EdgeInsets.only(left: 16, bottom: 4),
+                  child: Text(
+                    slot.label.isEmpty ? '自由時間枠' : slot.label,
+                    style: Theme.of(context).textTheme.labelMedium,
                   ),
-                  ...slotAssignments.map((assignment) {
-                    return Padding(
-                      padding: const EdgeInsets.only(left: 16),
-                      child: CheckboxListTile(
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        controlAffinity: ListTileControlAffinity.leading,
-                        value: _selectedAssignmentIds.contains(assignment.id),
-                        title: Text(assignment.taskTitle),
-                        subtitle: Text(
-                          '${DateFormat('HH:mm').format(assignment.startAt)} - ${DateFormat('HH:mm').format(assignment.endAt)}',
-                        ),
-                        onChanged: (value) {
-                          setState(() {
-                            if (value ?? false) {
-                              _selectedAssignmentIds.add(assignment.id);
-                            } else {
-                              _selectedAssignmentIds.remove(assignment.id);
-                            }
-                          });
-                        },
+                ),
+                ...slotAssignments.map((assignment) {
+                  return Padding(
+                    padding: const EdgeInsets.only(left: 16),
+                    child: CheckboxListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      value: _selectedAssignmentIds.contains(assignment.id),
+                      title: Text(assignment.taskTitle),
+                      subtitle: Text(
+                        '${DateFormat('HH:mm').format(assignment.startAt)} - ${DateFormat('HH:mm').format(assignment.endAt)}',
                       ),
-                    );
-                  }),
-                ];
-              }),
-            ],
-            const SizedBox(height: 8),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('予定も含めて複製'),
-              value: _includeAssignments,
-              onChanged: (value) => setState(() => _includeAssignments = value),
-            ),
-            if (widget.targetExists) ...[
-              const SizedBox(height: 8),
-              const Text('複製先に既存計画があります'),
-              const SizedBox(height: 8),
-              SegmentedButton<_DuplicateMergeMode>(
-                segments: const <ButtonSegment<_DuplicateMergeMode>>[
-                  ButtonSegment<_DuplicateMergeMode>(
-                    value: _DuplicateMergeMode.append,
-                    label: Text('追加する'),
-                  ),
-                  ButtonSegment<_DuplicateMergeMode>(
-                    value: _DuplicateMergeMode.replace,
-                    label: Text('置き換える'),
-                  ),
-                ],
-                selected: <_DuplicateMergeMode>{_mergeMode},
-                onSelectionChanged: (value) {
-                  setState(() => _mergeMode = value.first);
-                },
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _mergeMode == _DuplicateMergeMode.append
-                    ? '既存の自由時間枠を残しつつ、選択分だけ追加します。'
-                    : '既存の自由時間枠と予定を削除して複製内容で置換します。',
-              ),
-            ],
+                      onChanged: (value) {
+                        setState(() {
+                          if (value ?? false) {
+                            _selectedAssignmentIds.add(assignment.id);
+                          } else {
+                            _selectedAssignmentIds.remove(assignment.id);
+                          }
+                        });
+                      },
+                    ),
+                  );
+                }),
+              ];
+            }),
           ],
-        ),
+          const SizedBox(height: 8),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('予定も含めて複製'),
+            value: _includeAssignments,
+            onChanged: (value) => setState(() => _includeAssignments = value),
+          ),
+          if (widget.targetExists) ...[
+            const SizedBox(height: 8),
+            const Text('複製先に既存計画があります'),
+            const SizedBox(height: 8),
+            SegmentedButton<_DuplicateMergeMode>(
+              segments: const <ButtonSegment<_DuplicateMergeMode>>[
+                ButtonSegment<_DuplicateMergeMode>(
+                  value: _DuplicateMergeMode.append,
+                  label: Text('追加する'),
+                ),
+                ButtonSegment<_DuplicateMergeMode>(
+                  value: _DuplicateMergeMode.replace,
+                  label: Text('置き換える'),
+                ),
+              ],
+              selected: <_DuplicateMergeMode>{_mergeMode},
+              onSelectionChanged: (value) {
+                setState(() => _mergeMode = value.first);
+              },
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _mergeMode == _DuplicateMergeMode.append
+                  ? '既存の自由時間枠を残しつつ、選択分だけ追加します。'
+                  : '既存の自由時間枠と予定を削除して複製内容で置換します。',
+            ),
+          ],
+        ],
       ),
       actions: [
         TextButton(
@@ -1644,6 +1697,7 @@ class _SlotEditDialogState extends State<_SlotEditDialog> {
   late TimeOfDay _startTime;
   late TimeOfDay _endTime;
   late bool _endNextDay;
+  bool _isSaving = false;
 
   @override
   void initState() {
@@ -1674,99 +1728,112 @@ class _SlotEditDialogState extends State<_SlotEditDialog> {
       _endTime,
     );
     return AlertDialog(
+      scrollable: true,
       title: Text(widget.initialSlot == null ? '自由時間枠を追加' : '自由時間枠を編集'),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: _labelController,
-              decoration: const InputDecoration(labelText: 'ラベル'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: _labelController,
+            decoration: const InputDecoration(labelText: 'ラベル'),
+          ),
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerLowest,
+              borderRadius: BorderRadius.circular(12),
             ),
-            const SizedBox(height: 12),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surfaceContainerLowest,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                '開始と終了はモーダル内で分単位に選択できます。\n'
-                '${DateFormat('MM/dd HH:mm').format(startAt)} - ${DateFormat('MM/dd HH:mm').format(endAt)}'
-                ' / ${endAt.difference(startAt).inMinutes}分',
-              ),
+            child: Text(
+              '開始と終了はモーダル内で分単位に選択できます。\n'
+              '${DateFormat('MM/dd HH:mm').format(startAt)} - ${DateFormat('MM/dd HH:mm').format(endAt)}'
+              ' / ${endAt.difference(startAt).inMinutes}分',
             ),
-            const SizedBox(height: 12),
-            _TimelinePickerRow(
-              label: '開始',
-              value: _startTime,
-              suffix: '当日',
-              onTap: () async {
-                final picked = await showModalBottomSheet<TimeOfDay>(
-                  context: context,
-                  isScrollControlled: true,
-                  builder: (context) => _PreciseTimePickerSheet(
-                    title: '開始時間を選択',
-                    initialValue: _startTime,
-                  ),
-                );
-                if (picked != null) {
-                  setState(() => _startTime = picked);
-                }
-              },
-            ),
-            const SizedBox(height: 12),
-            _TimelinePickerRow(
-              label: '終了',
-              value: _endTime,
-              suffix: _endNextDay ? '翌日' : '当日',
-              onTap: () async {
-                final picked = await showModalBottomSheet<TimeOfDay>(
-                  context: context,
-                  isScrollControlled: true,
-                  builder: (context) => _PreciseTimePickerSheet(
-                    title: '終了時間を選択',
-                    initialValue: _endTime,
-                  ),
-                );
-                if (picked != null) {
-                  setState(() => _endTime = picked);
-                }
-              },
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('終了は翌日'),
-              value: _endNextDay,
-              onChanged: (value) => setState(() => _endNextDay = value),
-            ),
-          ],
-        ),
+          ),
+          const SizedBox(height: 12),
+          _TimelinePickerRow(
+            label: '開始',
+            value: _startTime,
+            suffix: '当日',
+            onTap: () async {
+              final picked = await showModalBottomSheet<TimeOfDay>(
+                context: context,
+                isScrollControlled: true,
+                builder: (context) => _PreciseTimePickerSheet(
+                  title: '開始時間を選択',
+                  initialValue: _startTime,
+                ),
+              );
+              if (picked != null) {
+                setState(() => _startTime = picked);
+              }
+            },
+          ),
+          const SizedBox(height: 12),
+          _TimelinePickerRow(
+            label: '終了',
+            value: _endTime,
+            suffix: _endNextDay ? '翌日' : '当日',
+            onTap: () async {
+              final picked = await showModalBottomSheet<TimeOfDay>(
+                context: context,
+                isScrollControlled: true,
+                builder: (context) => _PreciseTimePickerSheet(
+                  title: '終了時間を選択',
+                  initialValue: _endTime,
+                ),
+              );
+              if (picked != null) {
+                setState(() => _endTime = picked);
+              }
+            },
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('終了は翌日'),
+            value: _endNextDay,
+            onChanged: (value) => setState(() => _endNextDay = value),
+          ),
+        ],
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: _isSaving ? null : () => Navigator.of(context).pop(),
           child: const Text('キャンセル'),
         ),
         FilledButton(
-          onPressed: () async {
-            final saved = await widget.onSave(
-              FreeTimeSlot(
-                id:
-                    widget.initialSlot?.id ??
-                    'slot-${DateTime.now().microsecondsSinceEpoch}',
-                dailyPlanId: widget.initialSlot?.dailyPlanId ?? widget.planId,
-                startAt: startAt,
-                endAt: endAt,
-                label: _labelController.text.trim(),
-              ),
-            );
-            if (saved && context.mounted) {
-              Navigator.of(context).pop();
-            }
-          },
-          child: const Text('保存'),
+          onPressed: _isSaving
+              ? null
+              : () async {
+                  setState(() => _isSaving = true);
+                  try {
+                    final saved = await widget.onSave(
+                      FreeTimeSlot(
+                        id: widget.initialSlot?.id ?? generateId('slot'),
+                        dailyPlanId:
+                            widget.initialSlot?.dailyPlanId ?? widget.planId,
+                        startAt: startAt,
+                        endAt: endAt,
+                        label: _labelController.text.trim(),
+                      ),
+                    );
+                    if (saved && context.mounted) {
+                      Navigator.of(context).pop();
+                    }
+                  } finally {
+                    if (mounted) {
+                      setState(() => _isSaving = false);
+                    }
+                  }
+                },
+          child: _isSaving
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('保存'),
         ),
       ],
     );
@@ -1848,9 +1915,12 @@ class _PreciseTimePickerSheetState extends State<_PreciseTimePickerSheet> {
     final selected = TimeOfDay(hour: _hour, minute: _minute);
 
     return SafeArea(
-      child: SizedBox(
-        height: 420,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.8,
+        ),
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
@@ -1889,33 +1959,37 @@ class _PreciseTimePickerSheetState extends State<_PreciseTimePickerSheet> {
                 ),
               ),
             ),
-            Expanded(
+            Flexible(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 20),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: _NumberPickerColumn(
-                        label: '時',
-                        value: _hour,
-                        values: List<int>.generate(24, (index) => index),
-                        onSelected: (value) => setState(() => _hour = value),
-                        formatLabel: (value) =>
-                            value.toString().padLeft(2, '0'),
+                child: SizedBox(
+                  height: 240,
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: _NumberPickerColumn(
+                          label: '時',
+                          value: _hour,
+                          values: List<int>.generate(24, (index) => index),
+                          onSelected: (value) => setState(() => _hour = value),
+                          formatLabel: (value) =>
+                              value.toString().padLeft(2, '0'),
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: _NumberPickerColumn(
-                        label: '分',
-                        value: _minute,
-                        values: List<int>.generate(60, (index) => index),
-                        onSelected: (value) => setState(() => _minute = value),
-                        formatLabel: (value) =>
-                            value.toString().padLeft(2, '0'),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: _NumberPickerColumn(
+                          label: '分',
+                          value: _minute,
+                          values: List<int>.generate(60, (index) => index),
+                          onSelected: (value) =>
+                              setState(() => _minute = value),
+                          formatLabel: (value) =>
+                              value.toString().padLeft(2, '0'),
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -2036,6 +2110,7 @@ class _AssignmentEditDialogState extends State<_AssignmentEditDialog> {
   late TimeOfDay _endTime;
   late bool _startNextDay;
   late bool _endNextDay;
+  bool _isSaving = false;
 
   @override
   void initState() {
@@ -2081,113 +2156,112 @@ class _AssignmentEditDialogState extends State<_AssignmentEditDialog> {
     final selectedTask = tasks.where((task) => task.id == _taskId).firstOrNull;
 
     return AlertDialog(
+      scrollable: true,
       title: Text(widget.initialAssignment == null ? '予定を追加' : '予定を編集'),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (tasks.isEmpty)
-              const Padding(
-                padding: EdgeInsets.only(bottom: 12),
-                child: Text('TaskMaster にタスクがありません。先にタスクを作成してください。'),
-              )
-            else
-              DropdownButtonFormField<String>(
-                initialValue: _taskId.isEmpty ? null : _taskId,
-                decoration: const InputDecoration(labelText: '元タスク'),
-                items: tasks
-                    .map(
-                      (task) => DropdownMenuItem<String>(
-                        value: task.id,
-                        child: Text(task.title),
-                      ),
-                    )
-                    .toList(),
-                onChanged: (value) {
-                  if (value == null) {
-                    return;
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (tasks.isEmpty)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 12),
+              child: Text('TaskMaster にタスクがありません。先にタスクを作成してください。'),
+            )
+          else
+            DropdownButtonFormField<String>(
+              initialValue: _taskId.isEmpty ? null : _taskId,
+              decoration: const InputDecoration(labelText: '元タスク'),
+              items: tasks
+                  .map(
+                    (task) => DropdownMenuItem<String>(
+                      value: task.id,
+                      child: Text(task.title),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (value) {
+                if (value == null) {
+                  return;
+                }
+                final task = tasks
+                    .where((item) => item.id == value)
+                    .firstOrNull;
+                setState(() {
+                  _taskId = value;
+                  if (task != null) {
+                    _titleController.text = task.title;
                   }
-                  final task = tasks
-                      .where((item) => item.id == value)
-                      .firstOrNull;
-                  setState(() {
-                    _taskId = value;
-                    if (task != null) {
-                      _titleController.text = task.title;
-                    }
-                  });
-                },
-              ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _titleController,
-              decoration: const InputDecoration(labelText: '当日の表示名'),
-            ),
-            const SizedBox(height: 12),
-            _TimeRow(
-              label: '開始',
-              value: _startTime,
-              onTap: () async {
-                final picked = await showTimePicker(
-                  context: context,
-                  initialTime: _startTime,
-                );
-                if (picked != null) {
-                  setState(() => _startTime = picked);
-                }
+                });
               },
             ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('開始は翌日'),
-              value: _startNextDay,
-              onChanged: (value) => setState(() => _startNextDay = value),
-            ),
-            _TimeRow(
-              label: '終了',
-              value: _endTime,
-              onTap: () async {
-                final picked = await showTimePicker(
-                  context: context,
-                  initialTime: _endTime,
-                );
-                if (picked != null) {
-                  setState(() => _endTime = picked);
-                }
-              },
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('終了は翌日'),
-              value: _endNextDay,
-              onChanged: (value) => setState(() => _endNextDay = value),
-            ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _titleController,
+            decoration: const InputDecoration(labelText: '当日の表示名'),
+          ),
+          const SizedBox(height: 12),
+          _TimeRow(
+            label: '開始',
+            value: _startTime,
+            onTap: () async {
+              final picked = await showTimePicker(
+                context: context,
+                initialTime: _startTime,
+              );
+              if (picked != null) {
+                setState(() => _startTime = picked);
+              }
+            },
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('開始は翌日'),
+            value: _startNextDay,
+            onChanged: (value) => setState(() => _startNextDay = value),
+          ),
+          _TimeRow(
+            label: '終了',
+            value: _endTime,
+            onTap: () async {
+              final picked = await showTimePicker(
+                context: context,
+                initialTime: _endTime,
+              );
+              if (picked != null) {
+                setState(() => _endTime = picked);
+              }
+            },
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('終了は翌日'),
+            value: _endNextDay,
+            onChanged: (value) => setState(() => _endNextDay = value),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _memoController,
+            minLines: 2,
+            maxLines: 3,
+            decoration: const InputDecoration(labelText: 'メモ'),
+          ),
+          if (selectedTask != null) ...[
             const SizedBox(height: 12),
-            TextField(
-              controller: _memoController,
-              minLines: 2,
-              maxLines: 3,
-              decoration: const InputDecoration(labelText: 'メモ'),
-            ),
-            if (selectedTask != null) ...[
-              const SizedBox(height: 12),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'カテゴリ: ${_categoryName(selectedTask) ?? '未分類'} / 見積もり ${selectedTask.estimatedMinutes}分',
-                ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'カテゴリ: ${_categoryName(selectedTask) ?? '未分類'} / 見積もり ${selectedTask.estimatedMinutes}分',
               ),
-            ],
+            ),
           ],
-        ),
+        ],
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: _isSaving ? null : () => Navigator.of(context).pop(),
           child: const Text('キャンセル'),
         ),
         FilledButton(
-          onPressed: tasks.isEmpty
+          onPressed: tasks.isEmpty || _isSaving
               ? null
               : () async {
                   final task = tasks
@@ -2209,31 +2283,45 @@ class _AssignmentEditDialogState extends State<_AssignmentEditDialog> {
                     ),
                     _endTime,
                   );
-                  final saved = await widget.onSave(
-                    SlotTaskAssignment(
-                      id:
-                          widget.initialAssignment?.id ??
-                          'assignment-${DateTime.now().microsecondsSinceEpoch}',
-                      dailyPlanId: widget.slot.dailyPlanId,
-                      slotId: widget.slot.id,
-                      taskId: task.id,
-                      taskTitle: _titleController.text.trim().isEmpty
-                          ? task.title
-                          : _titleController.text.trim(),
-                      taskKind: task.kind,
-                      startAt: startAt,
-                      endAt: endAt,
-                      sortOrder: widget.initialAssignment?.sortOrder ?? 0,
-                      categoryId: task.categoryId,
-                      categoryName: _categoryName(task),
-                      memo: _memoController.text.trim(),
-                    ),
-                  );
+                  setState(() => _isSaving = true);
+                  final bool saved;
+                  try {
+                    saved = await widget.onSave(
+                      SlotTaskAssignment(
+                        id:
+                            widget.initialAssignment?.id ??
+                            generateId('assignment'),
+                        dailyPlanId: widget.slot.dailyPlanId,
+                        slotId: widget.slot.id,
+                        taskId: task.id,
+                        taskTitle: _titleController.text.trim().isEmpty
+                            ? task.title
+                            : _titleController.text.trim(),
+                        taskKind: task.kind,
+                        startAt: startAt,
+                        endAt: endAt,
+                        sortOrder: widget.initialAssignment?.sortOrder ?? 0,
+                        categoryId: task.categoryId,
+                        categoryName: _categoryName(task),
+                        memo: _memoController.text.trim(),
+                      ),
+                    );
+                  } finally {
+                    if (mounted) {
+                      setState(() => _isSaving = false);
+                    }
+                  }
                   if (saved && context.mounted) {
                     Navigator.of(context).pop();
                   }
                 },
-          child: const Text('保存'),
+          child: _isSaving
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('保存'),
         ),
       ],
     );

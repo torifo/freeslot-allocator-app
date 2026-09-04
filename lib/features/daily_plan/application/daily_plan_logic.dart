@@ -166,3 +166,63 @@ void validateAssignment({
     }
   }
 }
+
+/// The time range rendered by the daily plan timeline.
+class TimelineWindow {
+  const TimelineWindow({required this.start, required this.end});
+
+  final DateTime start;
+  final DateTime end;
+
+  @override
+  bool operator ==(Object other) =>
+      other is TimelineWindow && other.start == start && other.end == end;
+
+  @override
+  int get hashCode => Object.hash(start, end);
+
+  @override
+  String toString() => 'TimelineWindow($start, $end)';
+}
+
+DateTime _floorToHour(DateTime value) =>
+    DateTime(value.year, value.month, value.day, value.hour);
+
+DateTime _ceilToHour(DateTime value) {
+  final floored = _floorToHour(value);
+  return floored == value ? floored : floored.add(const Duration(hours: 1));
+}
+
+/// Expands the view mode's default window so that every slot (and every
+/// assignment inside it) stays fully visible. Slots starting before the
+/// default start would otherwise render above the clipped timeline card, and
+/// slots ending after the default end would be cut off.
+TimelineWindow resolveTimelineWindow({
+  required DateTime defaultStart,
+  required DateTime defaultEnd,
+  required Iterable<FreeTimeSlot> slots,
+  Iterable<SlotTaskAssignment> assignments = const <SlotTaskAssignment>[],
+}) {
+  var start = defaultStart;
+  var end = defaultEnd;
+
+  void include(DateTime from, DateTime to) {
+    final flooredStart = _floorToHour(from);
+    final ceiledEnd = _ceilToHour(to);
+    if (flooredStart.isBefore(start)) {
+      start = flooredStart;
+    }
+    if (ceiledEnd.isAfter(end)) {
+      end = ceiledEnd;
+    }
+  }
+
+  for (final slot in slots) {
+    include(slot.startAt, slot.endAt);
+  }
+  for (final assignment in assignments) {
+    include(assignment.startAt, assignment.endAt);
+  }
+
+  return TimelineWindow(start: start, end: end);
+}

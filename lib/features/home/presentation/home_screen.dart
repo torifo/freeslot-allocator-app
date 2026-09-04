@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../../app/theme.dart';
+import '../../../core/error_view.dart';
 import '../../daily_plan/application/daily_plan_controller.dart';
 import '../../daily_plan/domain/daily_plan_models.dart';
 import '../../task_master/application/task_master_controller.dart';
@@ -26,10 +27,14 @@ class HomeScreen extends ConsumerWidget {
             ? _WideHome(taskData: taskData, planData: planData)
             : _NarrowHome(taskData: taskData, planData: planData),
         loading: () => const _LoadingScaffold(),
-        error: (e, _) => _ErrorScaffold(message: e.toString()),
+        error: (e, _) => _ErrorScaffold(
+          onRetry: () => ref.invalidate(dailyPlanControllerProvider),
+        ),
       ),
       loading: () => const _LoadingScaffold(),
-      error: (e, _) => _ErrorScaffold(message: e.toString()),
+      error: (e, _) => _ErrorScaffold(
+        onRetry: () => ref.invalidate(taskMasterControllerProvider),
+      ),
     );
   }
 }
@@ -55,12 +60,16 @@ class _NarrowHome extends StatelessWidget {
       body: SafeArea(
         child: Column(
           children: [
-            _TopBar(date: DateTime.now()),
+            _TopBar(date: today),
             Expanded(
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
                 children: [
-                  _HeroCard(freeMinutes: freeMin, hasPlan: plan != null),
+                  _HeroCard(
+                    date: today,
+                    freeMinutes: freeMin,
+                    hasPlan: plan != null,
+                  ),
                   const SizedBox(height: 20),
                   _StatGrid(taskData: taskData, planData: planData),
                   const SizedBox(height: 20),
@@ -96,13 +105,13 @@ class _WideHome extends StatelessWidget {
         child: Row(
           children: [
             // ── Sidebar ──────────────────────────────────────
-            _Sidebar(taskData: taskData),
+            _Sidebar(taskData: taskData, today: today),
 
             // ── Main content ─────────────────────────────────
             Expanded(
               child: Column(
                 children: [
-                  _WideHeader(date: DateTime.now()),
+                  _WideHeader(date: today),
                   Expanded(
                     child: SingleChildScrollView(
                       padding: const EdgeInsets.fromLTRB(32, 24, 32, 32),
@@ -110,6 +119,7 @@ class _WideHome extends StatelessWidget {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           _HeroCard(
+                            date: today,
                             freeMinutes: freeMin,
                             hasPlan: plan != null,
                           ),
@@ -248,8 +258,9 @@ class _WideHeader extends StatelessWidget {
 
 // ── Sidebar (PC) ──────────────────────────────────────────────
 class _Sidebar extends StatelessWidget {
-  const _Sidebar({required this.taskData});
+  const _Sidebar({required this.taskData, required this.today});
   final TaskMasterStateData taskData;
+  final DateTime today;
 
   @override
   Widget build(BuildContext context) {
@@ -378,7 +389,9 @@ class _Sidebar extends StatelessWidget {
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: List.generate(7, (i) {
-                      final isToday = i == 4;
+                      // The mini week card is Monday-first, so index 0 is
+                      // Monday and DateTime.monday == 1.
+                      final isToday = i == today.weekday - 1;
                       final height = 10.0 + (i % 3) * 10;
                       return Expanded(
                         child: Padding(
@@ -457,7 +470,9 @@ class _SidebarNavButton extends StatelessWidget {
         child: InkWell(
           borderRadius: BorderRadius.circular(7),
           onTap: () => context.go(item.route),
-          child: Padding(
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 48),
+            alignment: Alignment.centerLeft,
             padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 8),
             child: Row(
               children: [
@@ -505,7 +520,12 @@ class _SidebarNavButton extends StatelessWidget {
 
 // ── Hero card ─────────────────────────────────────────────────
 class _HeroCard extends StatelessWidget {
-  const _HeroCard({required this.freeMinutes, required this.hasPlan});
+  const _HeroCard({
+    required this.date,
+    required this.freeMinutes,
+    required this.hasPlan,
+  });
+  final DateTime date;
   final int freeMinutes;
   final bool hasPlan;
 
@@ -513,7 +533,6 @@ class _HeroCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final h = freeMinutes ~/ 60;
     final m = freeMinutes % 60;
-    final now = DateTime.now();
 
     return Container(
       padding: const EdgeInsets.all(22),
@@ -590,7 +609,7 @@ class _HeroCard extends StatelessWidget {
                       borderRadius: BorderRadius.circular(999),
                     ),
                     child: Text(
-                      DateFormat('M月d日', 'ja').format(now),
+                      DateFormat('M月d日', 'ja').format(date),
                       style: japaneseSerifTextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.w600,
@@ -900,7 +919,9 @@ class _ActionRow extends StatelessWidget {
       children: [
         InkWell(
           onTap: () => context.go(action.route),
-          child: Padding(
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 48),
+            alignment: Alignment.centerLeft,
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
             child: Row(
               children: [
@@ -967,8 +988,9 @@ class _BottomNav extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final textScale = MediaQuery.textScalerOf(context).scale(1).clamp(1.0, 1.4);
     return Container(
-      height: 70,
+      height: 70 * textScale,
       decoration: const BoxDecoration(
         color: AppColors.cream,
         border: Border(top: BorderSide(color: AppColors.line2)),
@@ -990,22 +1012,33 @@ class _BottomNav extends StatelessWidget {
           Expanded(
             child: Center(
               child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
                 onTap: () => context.go('/daily-plan'),
-                child: Container(
-                  width: 46,
-                  height: 46,
-                  decoration: BoxDecoration(
-                    color: AppColors.clay,
-                    borderRadius: BorderRadius.circular(13),
-                    boxShadow: [
-                      BoxShadow(
-                        color: AppColors.clay.withValues(alpha: 0.4),
-                        blurRadius: 12,
-                        offset: const Offset(0, 3),
+                child: SizedBox(
+                  width: 48,
+                  height: 48,
+                  child: Center(
+                    child: Container(
+                      width: 46,
+                      height: 46,
+                      decoration: BoxDecoration(
+                        color: AppColors.clay,
+                        borderRadius: BorderRadius.circular(13),
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppColors.clay.withValues(alpha: 0.4),
+                            blurRadius: 12,
+                            offset: const Offset(0, 3),
+                          ),
+                        ],
                       ),
-                    ],
+                      child: const Icon(
+                        Icons.add,
+                        color: Colors.white,
+                        size: 22,
+                      ),
+                    ),
                   ),
-                  child: const Icon(Icons.add, color: Colors.white, size: 22),
                 ),
               ),
             ),
@@ -1044,7 +1077,8 @@ class _NavBtn extends StatelessWidget {
     return Expanded(
       child: InkWell(
         onTap: onTap,
-        child: Padding(
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 48),
           padding: const EdgeInsets.only(bottom: 12),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -1080,15 +1114,13 @@ class _LoadingScaffold extends StatelessWidget {
 }
 
 class _ErrorScaffold extends StatelessWidget {
-  const _ErrorScaffold({required this.message});
-  final String message;
+  const _ErrorScaffold({required this.onRetry});
+  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) => Scaffold(
     backgroundColor: AppColors.bg,
-    body: Center(
-      child: Text(message, style: const TextStyle(color: AppColors.ink)),
-    ),
+    body: ErrorView(onRetry: onRetry),
   );
 }
 
