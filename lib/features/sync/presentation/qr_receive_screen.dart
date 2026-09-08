@@ -26,7 +26,8 @@ class QrReceiveScreen extends ConsumerStatefulWidget {
   ConsumerState<QrReceiveScreen> createState() => _QrReceiveScreenState();
 }
 
-class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen> {
+class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen>
+    with WidgetsBindingObserver {
   final QrFrameSet _frames = QrFrameSet();
   final SyncProgressController _progress = SyncProgressController();
 
@@ -43,6 +44,11 @@ class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen> {
   /// under a permission error (I-9).
   bool _cameraFailed = false;
 
+  /// Bumped on every retry so the scanner subtree is built fresh: reusing the
+  /// old element would leave the plugin sitting on the camera it already
+  /// failed to open.
+  int _scanAttempt = 0;
+
   /// The other way of getting the data across, named for the platform the user
   /// is actually holding rather than for both at once.
   String get _fallbackAction =>
@@ -51,14 +57,41 @@ class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _progress.start(SyncKind.qr);
     _progress.stage(SyncStage.scanning);
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _progress.dispose();
     super.dispose();
+  }
+
+  /// Coming back from the settings app is the usual way a camera permission
+  /// gets granted, so the screen tries again by itself rather than making the
+  /// user find the button.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _cameraFailed) {
+      _retryCamera();
+    }
+  }
+
+  /// Puts the camera back in play after it refused to start (I-2).
+  ///
+  /// The panel is started over rather than left saying 失敗: the user asked for
+  /// another attempt, and a stale failure under a live preview reads as if the
+  /// retry did nothing.
+  void _retryCamera() {
+    if (!_cameraFailed) return;
+    setState(() {
+      _cameraFailed = false;
+      _scanAttempt += 1;
+    });
+    _progress.start(SyncKind.qr);
+    _progress.stage(SyncStage.scanning);
   }
 
   Future<void> _ingest(List<String> codes) async {
@@ -211,7 +244,10 @@ class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen> {
                 : 'この端末にはカメラがないため QR では受け取れません。'
                   '$_fallbackActionか LAN 同期を使ってください。',
           ),
-          if (scanner.isAvailable && !_done && !_cameraFailed) ...<Widget>[
+          // Rendered while the camera is failing too: the explanation of what
+          // went wrong belongs where the preview would have been, next to the
+          // button that tries again (I-2).
+          if (scanner.isAvailable && !_done) ...<Widget>[
             const SizedBox(height: 12),
             SizedBox(
               // A fixed slice of the screen rather than a square: the panel
@@ -221,15 +257,28 @@ class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen> {
                   .clamp(160.0, 420.0),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(8),
-                child: scanner.build(
-                  onCodes: _ingest,
-                  // The hub flips frames every 200–1000 ms; the plugin's default
-                  // 250 ms throttle would drop whole frames of that animation.
-                  speed: QrScanSpeed.unrestricted,
-                  errorBuilder: _cameraError,
+                child: KeyedSubtree(
+                  key: ValueKey<int>(_scanAttempt),
+                  child: scanner.build(
+                    onCodes: _ingest,
+                    // The hub flips frames every 200–1000 ms; the plugin's
+                    // default 250 ms throttle would drop whole frames of that
+                    // animation.
+                    speed: QrScanSpeed.unrestricted,
+                    errorBuilder: _cameraError,
+                  ),
                 ),
               ),
             ),
+            if (_cameraFailed)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: FilledButton.icon(
+                  onPressed: _retryCamera,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('もう一度試す'),
+                ),
+              ),
           ],
           SyncProgressPanel(
             controller: _progress,

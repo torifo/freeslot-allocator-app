@@ -519,9 +519,15 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.widget<FilledButton>(save).onPressed, isNull);
 
+    // A pasted address with a stray space is trimmed, not refused (I-3).
+    await tester.enterText(portField, '47999');
+    await tester.enterText(hostField, '192.168.1.99 ');
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilledButton>(save).onPressed, isNotNull);
+
     // Neither an address nor a host name: it can only fail later, at a point
     // where the error would blame the network (C-2).
-    await tester.enterText(hostField, '192.168.1.99 ');
+    await tester.enterText(hostField, '999.999.999.999');
     await tester.pumpAndSettle();
     expect(tester.widget<FilledButton>(save).onPressed, isNull);
 

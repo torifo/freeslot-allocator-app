@@ -446,7 +446,7 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
           // Validated in the dialog rather than swallowed on the way out: an
           // empty host or a port outside 1..65535 cannot be dialled at all, and
           // silently keeping the old value would look like the edit was saved.
-          final hostError = _hostError(host.text);
+          final hostError = hostValidationError(host.text);
           final parsed = int.tryParse(port.text.trim());
           final portError = parsed == null || parsed < 1 || parsed > 65535
               ? 'ポートは 1〜65535 の数字です'
@@ -502,7 +502,7 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
     final newHost = host.text.trim();
     final newPort = int.tryParse(port.text.trim());
     if (ok != true) return;
-    if (_hostError(newHost) != null ||
+    if (hostValidationError(newHost) != null ||
         newPort == null ||
         newPort < 1 ||
         newPort > 65535) {
@@ -520,23 +520,45 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
   }
 }
 
-/// An IPv4 address, or a host name of the shape a LAN actually hands out.
+/// An IPv4 or IPv6 address, or a host name of the shape a LAN actually hands
+/// out — the value is dialled directly, so anything else can only fail later,
+/// at a point where the error says 「PC に接続できません」 and blames the network.
 ///
-/// Deliberately narrow: this value is dialled directly, and a string with a
-/// space or a slash in it can only ever fail later, at a point where the error
-/// says 「PC に接続できません」 and blames the network.
+/// Surrounding whitespace is trimmed rather than rejected: it is what a paste
+/// from a terminal or a chat message carries, and telling the user off for it
+/// when the fix is obvious helps nobody (I-3).
 final RegExp _ipv4 = RegExp(
   r'^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$',
 );
+
+/// Anything made only of digits and dots is meant to be an IPv4 address, so it
+/// is held to [_ipv4] rather than being waved through as a host name — the
+/// hostname grammar happily accepts `999.999.999.999` and `192.168` (I-4).
+final RegExp _dottedDigits = RegExp(r'^[\d.]+$');
 final RegExp _hostname = RegExp(
   r'^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$',
 );
 
-String? _hostError(String raw) {
+/// Deliberately loose: the shapes IPv6 takes (`::1`, `fe80::1%en0`-less
+/// literals, an embedded IPv4 tail) are more than a regexp should arbitrate
+/// here, and the socket rejects a wrong one with a clear error anyway.
+final RegExp _ipv6ish = RegExp(r'^[0-9A-Fa-f:.]+$');
+
+/// Why [raw] cannot be used as a hub address, or null when it can.
+String? hostValidationError(String raw) {
   final value = raw.trim();
   if (value.isEmpty) return 'ホストを入力してください';
-  if (value != raw) return 'ホストの前後に空白は入れられません';
-  if (value.contains(' ')) return 'ホストに空白は使えません';
-  if (_ipv4.hasMatch(value) || _hostname.hasMatch(value)) return null;
-  return 'IP アドレス（192.168.x.x）かホスト名を入力してください';
+  const message = 'IP アドレス（192.168.x.x）かホスト名を入力してください';
+  // Brackets are how an IPv6 literal is written next to a port; the address
+  // itself is what gets dialled.
+  final bare = value.startsWith('[') && value.endsWith(']')
+      ? value.substring(1, value.length - 1)
+      : value;
+  if (bare.contains(':')) {
+    return _ipv6ish.hasMatch(bare) && !bare.contains(':::') ? null : message;
+  }
+  if (_dottedDigits.hasMatch(bare)) {
+    return _ipv4.hasMatch(bare) ? null : message;
+  }
+  return _hostname.hasMatch(bare) ? null : message;
 }

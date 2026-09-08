@@ -96,33 +96,57 @@ GoRouter buildAppRouter({String initialLocation = '/'}) => GoRouter(
 
 final GoRouter appRouter = buildAppRouter();
 
-/// Holds the active branch above a navigation bar that never moves.
+/// Holds the active branch above navigation that never moves.
 ///
-/// The bar is dropped on wide layouts, where [HomeScreen] draws its own
-/// sidebar and a second navigation strip would be the same five destinations
-/// twice.
+/// Narrow layouts get the bottom bar; from 800 dp the same five destinations
+/// become a [NavigationRail] down the left edge. The rail lives here rather
+/// than in [HomeScreen], which only ever drew a sidebar for itself and left
+/// /tasks, /daily-plan, /weekly-report and /categories with no way out on a
+/// tablet or a desktop window (C-1).
 class _ShellScaffold extends StatelessWidget {
   const _ShellScaffold({required this.navigationShell});
 
   final StatefulNavigationShell navigationShell;
 
+  /// `initialLocation: true` only when the tab is already selected: re-tapping
+  /// it returns to that tab's own root instead of doing nothing, while
+  /// switching tabs keeps where the user was.
+  void _select(int index) => navigationShell.goBranch(
+    index,
+    initialLocation: index == navigationShell.currentIndex,
+  );
+
   @override
   Widget build(BuildContext context) {
     final isWide = MediaQuery.sizeOf(context).width >= 800;
-    return Scaffold(
-      body: navigationShell,
-      bottomNavigationBar: isWide
-          ? null
-          : HomeBottomNav(
-              currentIndex: navigationShell.currentIndex,
-              // `initialLocation: true` only when the tab is already selected:
-              // re-tapping it returns to that tab's own root instead of doing
-              // nothing, while switching tabs keeps where the user was.
-              onSelect: (index) => navigationShell.goBranch(
-                index,
-                initialLocation: index == navigationShell.currentIndex,
+    final atHome = navigationShell.currentIndex == 0;
+    return PopScope(
+      // Android's back gesture used to leave the app from any tab. The first
+      // tab is home, so back means "up to home" everywhere else (I-1).
+      canPop: atHome,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        navigationShell.goBranch(0);
+      },
+      child: Scaffold(
+        body: isWide
+            ? Row(
+                children: <Widget>[
+                  ShellNavigationRail(
+                    currentIndex: navigationShell.currentIndex,
+                    onSelect: _select,
+                  ),
+                  Expanded(child: navigationShell),
+                ],
+              )
+            : navigationShell,
+        bottomNavigationBar: isWide
+            ? null
+            : HomeBottomNav(
+                currentIndex: navigationShell.currentIndex,
+                onSelect: _select,
               ),
-            ),
+      ),
     );
   }
 }

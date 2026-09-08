@@ -24,8 +24,12 @@ void main() {
 
   tearDown(() => container.dispose());
 
-  Future<void> pumpAt(WidgetTester tester, String location) async {
-    tester.view.physicalSize = const Size(390 * 3, 844 * 3);
+  Future<void> pumpAt(
+    WidgetTester tester,
+    String location, {
+    Size logicalSize = const Size(390, 844),
+  }) async {
+    tester.view.physicalSize = logicalSize * 3;
     tester.view.devicePixelRatio = 3;
     addTearDown(tester.view.reset);
     await tester.pumpWidget(
@@ -68,6 +72,73 @@ void main() {
     expect(find.byType(WeeklyReportScreen), findsOneWidget);
     await pumpAt(tester, '/categories');
     expect(find.byType(CategorySettingsScreen), findsOneWidget);
+  });
+
+  testWidgets('a wide window navigates from every branch, not just home', (
+    tester,
+  ) async {
+    // The bar is dropped above 800 dp, and the sidebar that replaced it was
+    // home's own: /tasks and the rest had no navigation at all (C-1).
+    await pumpAt(tester, '/tasks', logicalSize: const Size(1280, 800));
+
+    final rail = find.byType(NavigationRail);
+    expect(rail, findsOneWidget);
+    expect(tester.widget<NavigationRail>(rail).selectedIndex, 1);
+    expect(
+      find.descendant(of: rail, matching: find.text('タスク')),
+      findsOneWidget,
+    );
+    expect(find.byType(TaskMasterScreen), findsOneWidget);
+    expect(find.byType(HomeBottomNav), findsNothing);
+  });
+
+  testWidgets('a wide window offers exactly one way to navigate', (
+    tester,
+  ) async {
+    await pumpAt(tester, '/', logicalSize: const Size(1280, 800));
+
+    expect(find.byType(NavigationRail), findsOneWidget);
+    expect(find.byType(HomeBottomNav), findsNothing);
+    // The home sidebar keeps its brand column but no second copy of the five
+    // destinations, so the rail is the only place a branch is chosen.
+    expect(
+      find.descendant(
+        of: find.byType(NavigationRail),
+        matching: find.text('日次計画'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('the rail switches branch on tap', (tester) async {
+    await pumpAt(tester, '/', logicalSize: const Size(1280, 800));
+
+    await tester.tap(
+      find.descendant(
+        of: find.byType(NavigationRail),
+        matching: find.text('週次'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(WeeklyReportScreen), findsOneWidget);
+    expect(tester.widget<NavigationRail>(find.byType(NavigationRail)).selectedIndex, 3);
+  });
+
+  testWidgets('the system back button goes up to home, not out of the app', (
+    tester,
+  ) async {
+    await pumpAt(tester, '/tasks');
+    expect(find.byType(TaskMasterScreen), findsOneWidget);
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+
+    expect(find.byType(HomeScreen), findsOneWidget);
+    expect(
+      tester.widget<HomeBottomNav>(find.byType(HomeBottomNav)).currentIndex,
+      0,
+    );
   });
 
   testWidgets('the sync screens sit outside the shell', (tester) async {

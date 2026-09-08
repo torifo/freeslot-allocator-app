@@ -23,7 +23,12 @@ class _FakeScanner extends QrScanner {
 
   /// When set, the seam renders the screen's `errorBuilder` instead of a
   /// preview — what `mobile_scanner` does when the camera refuses to open.
-  final QrScannerError? error;
+  /// Cleared by a test that wants the next attempt to succeed, the way granting
+  /// the permission in the settings app does.
+  QrScannerError? error;
+
+  /// How many times the screen has asked for a preview.
+  int builds = 0;
 
   QrCodesCallback? onCodes;
   QrScanSpeed? speed;
@@ -39,6 +44,7 @@ class _FakeScanner extends QrScanner {
   }) {
     this.onCodes = onCodes;
     this.speed = speed;
+    builds += 1;
     final failure = error;
     if (failure != null && errorBuilder != null) {
       return Builder(builder: (ctx) => errorBuilder(ctx, failure));
@@ -192,9 +198,11 @@ void main() {
   testWidgets('a refused camera explains itself and points at the other routes', (tester) async {
     await pump(tester, withScanner: _FakeScanner(error: QrScannerError.permissionDenied));
 
-    expect(find.textContaining('カメラの使用が許可されていません'), findsOneWidget);
+    // Twice over: once where the preview would be, once in the progress panel
+    // — the explanation stays next to the retry button (I-2).
+    expect(find.textContaining('カメラの使用が許可されていません'), findsWidgets);
     // The other route is named for the platform the test runs on (macOS here).
-    expect(find.textContaining('ファイルから取り込む'), findsOneWidget);
+    expect(find.textContaining('ファイルから取り込む'), findsWidgets);
     expect(find.byKey(const Key('fake-scanner')), findsNothing);
   });
 
@@ -211,6 +219,46 @@ void main() {
   testWidgets('any other camera failure gets the generic Japanese line', (tester) async {
     await pump(tester, withScanner: _FakeScanner(error: QrScannerError.other));
     expect(find.textContaining(syncErrorMessage('camera')), findsWidgets);
+  });
+
+  testWidgets('a failed camera can be tried again from the screen', (
+    tester,
+  ) async {
+    final failing = _FakeScanner(error: QrScannerError.permissionDenied);
+    await pump(tester, withScanner: failing);
+
+    expect(find.text('失敗'), findsOneWidget);
+    expect(find.byKey(const Key('fake-scanner')), findsNothing);
+    final buildsBeforeRetry = failing.builds;
+
+    // The user grants the permission and comes back.
+    failing.error = null;
+    await tester.tap(find.text('もう一度試す'));
+    await tester.pump();
+
+    expect(failing.builds, greaterThan(buildsBeforeRetry));
+    expect(find.byKey(const Key('fake-scanner')), findsOneWidget);
+    // The panel is scanning again rather than still saying 失敗.
+    expect(find.text('失敗'), findsNothing);
+    expect(find.text('読み取り中'), findsOneWidget);
+    expect(find.text('もう一度試す'), findsNothing);
+  });
+
+  testWidgets('coming back to the app retries the camera by itself', (
+    tester,
+  ) async {
+    final failing = _FakeScanner(error: QrScannerError.permissionDenied);
+    await pump(tester, withScanner: failing);
+    expect(find.text('失敗'), findsOneWidget);
+
+    // Granting the permission happens in the settings app; the way back is a
+    // resume, not a tap on this screen.
+    failing.error = null;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+
+    expect(find.byKey(const Key('fake-scanner')), findsOneWidget);
+    expect(find.text('読み取り中'), findsOneWidget);
   });
 
   testWidgets('the instructions name no hub tool', (tester) async {

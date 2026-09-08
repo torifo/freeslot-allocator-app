@@ -30,8 +30,13 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
         title: const Text('タスク'),
         actions: [
           IconButton(
-            // `push`, not `go`: this is a detour from the task list, and the
-            // user has to be able to come back to it with the back arrow.
+            // `push`, not `go`, even though /categories is also one of the
+            // shell's five branches (M-7). Reached from here it is a detour
+            // the user finishes and leaves: pushing it above the shell keeps
+            // the task list underneath and gives the screen a back arrow,
+            // where `go` would swap the whole branch and strand the user on
+            // the 設定 tab. The bottom bar and the rail still reach it as a
+            // destination in its own right.
             onPressed: () => context.push('/categories'),
             icon: const Icon(Icons.tune),
             tooltip: 'カテゴリ設定',
@@ -66,26 +71,46 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
               LayoutBuilder(
                 builder: (context, constraints) {
                   const gap = 8.0;
-                  final chipWidth = (constraints.maxWidth - gap * 2) / 3;
+                  final filters = <({String label, TaskKind? kind})>[
+                    (label: 'すべて', kind: null),
+                    for (final kind in TaskKind.values)
+                      (label: kind.label, kind: kind),
+                  ];
+                  // A narrow phone (or a large text scale) cannot give three
+                  // columns enough room for 「やりたいこと」 without cutting the
+                  // word short, so there the chips wrap and keep their own
+                  // natural widths.
+                  if (constraints.maxWidth < 360) {
+                    return Wrap(
+                      spacing: gap,
+                      runSpacing: gap,
+                      children: <Widget>[
+                        for (final filter in filters)
+                          _buildFilterChip(
+                            label: filter.label,
+                            selected: _filter == filter.kind,
+                            onSelected: (_) =>
+                                setState(() => _filter = filter.kind),
+                          ),
+                      ],
+                    );
+                  }
+                  final chipWidth =
+                      (constraints.maxWidth - gap * (filters.length - 1)) /
+                      filters.length;
                   return Row(
-                    children: [
-                      _buildFilterChip(
-                        label: 'すべて',
-                        selected: _filter == null,
-                        width: chipWidth,
-                        onSelected: (_) => setState(() => _filter = null),
-                      ),
-                      ...TaskKind.values.map(
-                        (kind) => Padding(
-                          padding: const EdgeInsets.only(left: gap),
+                    children: <Widget>[
+                      for (final (index, filter) in filters.indexed)
+                        Padding(
+                          padding: EdgeInsets.only(left: index == 0 ? 0 : gap),
                           child: _buildFilterChip(
-                            label: kind.label,
-                            selected: _filter == kind,
+                            label: filter.label,
+                            selected: _filter == filter.kind,
                             width: chipWidth,
-                            onSelected: (_) => setState(() => _filter = kind),
+                            onSelected: (_) =>
+                                setState(() => _filter = filter.kind),
                           ),
                         ),
-                      ),
                     ],
                   );
                 },
@@ -153,9 +178,19 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
     double? width,
   }) {
     final chip = ChoiceChip(
+      // `double.infinity` rather than the column width again: the label sits
+      // inside the chip's own padding, so repeating the number made every chip
+      // wider than its column (M-4). A label too long for the column is cut
+      // with an ellipsis rather than wrapping and standing taller than its
+      // neighbours.
       label: SizedBox(
-        width: width,
-        child: Text(label, textAlign: TextAlign.center),
+        width: width == null ? null : double.infinity,
+        child: Text(
+          label,
+          textAlign: TextAlign.center,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
       ),
       selected: selected,
       onSelected: onSelected,
