@@ -87,10 +87,11 @@
 - 通信は HTTPS。ハブは初回起動時に自己署名証明書（10 年）を生成し `hub.json` に保持する。証明書の SHA-256 フィンガープリントをペアリング QR に載せ、スマホは以後そのフィンガープリントだけを信頼する（ピン留め）。cleartext 許可は行わない。
 - ペアリング: MCP ツール `sync_status` がローカル専用ページ `http://127.0.0.1:47821/pair` を返す。ページは `frelocator://pair?host=<LAN IP>&port=47820&fp=<sha256>&code=<短命コード>` を QR 表示する。短命コードは 5 分・1 回限り。スマホが `POST /pair` に code と自分の deviceId を送ると、ハブが端末別の長期トークンを返す。トークンは `hub.json` に端末ごとに保存し、`rotate_token` ツールで失効・再発行できる。
 - エンドポイント（`/pair` 以外は `Authorization: Bearer <端末トークン>` 必須）
-  - `POST /pair` → 端末トークン
-  - `GET /sync` → PC 側の全データ（v2 JSON、`purgedBefore` 付き）
-  - `POST /sync` body: スマホ側の全データ → ハブがマージし、ファイルに保存してから同じ結果を返す。`version < 2` は 426 で拒否しアプリ更新を促す
-  - `GET /health` → `{ ok: true, serverTime }`（deviceId は返さない）
+  - `POST /pair` → `{ token, hubDeviceId, fingerprint }`
+  - `GET /sync` → `{ document, hubDeviceId }`（`document` は PC 側の全データ v2 JSON、`purgedBefore` 付き）
+  - `POST /sync?mode=merge|take_hub|take_phone`（既定 `merge`）body: スマホ側の全データ → ハブがマージ／置き換えし、ファイルに保存してから `{ document, summary, warnings }` を返す。`summary` は `{ added, updated, deleted, removed, warnings }`。`take_hub` は PC 側をそのまま返し、`take_phone` は受信文書をそのまま保存する（いずれも相手側の未反映の変更を破棄する）。`version < 2` は 426 で拒否しアプリ更新を促す
+  - `GET /health`（HEAD も可）→ `{ ok: true, hubDeviceId, fingerprint, version, schema, serverTime }`
+  - エラーは共通で `{ error: { code, message } }`。401（トークン不正）・403（ペアリング失敗／期限切れ／試行回数超過）・409 `purged_before`（`merge` で自分の `lastSyncAt` より新しく purge が進んでいる）・413（`/pair` 8KB・`/sync` 20MB 超過、`Connection: close` 付き）・426（スキーマ古すぎ）。
 - リプレイ対策は TLS と端末別トークンに委ねる（nonce は持たない）。
 - 接続先の解決順: 保存済み host → mDNS（`_frelocator._tcp`、ハブが広告）→ ペアリングし直し。
 - スマホの「同期」ボタン 1 回で `POST /sync` → 返ってきた結果で自分を置き換える、まで行う。
@@ -107,7 +108,7 @@ PC → スマホ（QR）
 
 スマホ → PC（ファイル持ち込み）
 - スマホの「PC へ書き出す」が v2 JSON をファイルとして共有シートに渡す。画面では Nearby Share や USB 転送など第三者サーバーを経由しない手段を推奨し、「共有先はご自身で選んだものであり、アプリは送信しません」と明示する。
-- Mac 側は MCP ツール `import_file(path)` か、macOS 版アプリの「ファイルから取り込む」で読み込み、同じマージ規則で JSON ファイルに反映する。
+- Mac 側は MCP ツール `import_file(path)` か、macOS 版アプリの「ファイルから取り込む」で読み込み、同じマージ規則（`mode=merge` 相当）で JSON ファイルに反映する。ファイルの `deviceId` が未登録の端末なら、その場でペアリング登録される（現在発行中のペアリングコードを消費する）。
 
 ## 進捗と待ち状態の可視化（LAN・QR・ファイル共通）
 
