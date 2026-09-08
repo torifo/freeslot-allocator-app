@@ -36,7 +36,9 @@ const documentSchema = z.object({
     tasks: entityList,
     mustDoCategories: entityList,
     wantToDoCategories: entityList,
-    settings: z.object({}).passthrough().optional(),
+    // Required: `take_phone` persists the incoming document verbatim, so a
+    // settings-less payload would be stored and crash every later merge.
+    settings: z.object({ shareCategories: z.boolean() }).passthrough(),
   }).passthrough(),
   dailyPlan: z.object({ plans: entityList, slots: entityList, assignments: entityList }).passthrough(),
 }).passthrough();
@@ -59,7 +61,7 @@ export class SyncEngine {
   get lastSync(): SyncProgress | null {
     let last: SyncProgress | null = null;
     for (const p of this.progress.values()) last = p;
-    return last;
+    return last ? { ...last } : null;
   }
 
   progressFor(deviceId: string): SyncProgress | undefined {
@@ -101,8 +103,14 @@ export class SyncEngine {
       this.setProgress(deviceId, { stage: 'merging' });
       // Guard, merge, check and summarize all run inside the one locked read-modify-write,
       // so a concurrent sync cannot merge against a document that is already stale.
+      // The closure counters below (`summary`, `warnings`) assume `FileStore.update`
+      // invokes this mutator exactly once — it takes the lock first and does not retry.
       const saved = await this.store.update((current) => {
         const purgedBefore = instant(current.purgedBefore);
+        // A stored purgedBefore we cannot parse fails open: rejecting every sync
+        // would strand all devices behind a value only the hub can repair, so we
+        // let the sync through and surface the skipped guard as a warning instead.
+        const guardSkipped = current.purgedBefore != null && Number.isNaN(purgedBefore);
         if (mode === 'merge' && incomingLastSync !== null && !Number.isNaN(purgedBefore) && instant(incomingLastSync) < purgedBefore) {
           throw new SyncRejected(409, 'purged_before', `this device last synced at ${incomingLastSync}, before the hub purged tombstones at ${current.purgedBefore}; choose take_hub or take_phone`);
         }
@@ -115,6 +123,7 @@ export class SyncEngine {
         else { const r = merge(current, incoming); merged = r.document; mergeWarnings = r.warnings; }
         merged.lastSyncAt = at;
         warnings = [...mergeWarnings, ...checkInvariants(merged).map((v) => `${v.code}: ${v.message}`)];
+        if (guardSkipped) warnings.push('purgedBefore unparsable, guard skipped');
         summary = summarize(current, merged, warnings.length);
         return merged;
       });
@@ -143,6 +152,8 @@ export class SyncEngine {
     if (Number.isNaN(earliest)) return { purged: 0, purgedBefore: null };
     const cutoffMs = earliest - PURGE_SKEW_MS;
     const cutoff = new Date(cutoffMs).toISOString();
+    // `purged` and `effective` are closure counters: they assume `FileStore.update`
+    // invokes the mutator exactly once (it locks first and does not retry).
     let purged = 0;
     let effective = cutoff;
     await this.store.update((doc) => {

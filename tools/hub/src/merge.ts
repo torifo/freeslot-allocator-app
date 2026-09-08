@@ -6,6 +6,7 @@ import {
   metaKey,
   readMeta,
   SCHEMA_VERSION,
+  toIsoUtc,
   type Entity,
   type EntityKind,
   type SyncDocumentJson,
@@ -103,18 +104,31 @@ export function merge(a: SyncDocumentJson, b: SyncDocumentJson): MergeResult {
   }
   warnings.sort(compareStrings);
 
-  const later = (x?: string | null, y?: string | null): string | null =>
-    !x ? y ?? null : !y ? x : x > y ? x : y;
+  // Envelope timestamps are compared as instants, never lexicographically: a
+  // phone sending `+09:00` would otherwise sort ahead of an earlier UTC value.
+  // When one side is null or unparsable the other one is kept as-is.
+  const laterInstant = <T extends string | null | undefined>(x: T, y: T): T | null => {
+    const ix = x == null ? Number.NaN : Date.parse(x);
+    const iy = y == null ? Number.NaN : Date.parse(y);
+    if (Number.isNaN(ix)) return Number.isNaN(iy) ? (x ?? y ?? null) : y;
+    if (Number.isNaN(iy)) return x;
+    return ix >= iy ? x : y;
+  };
+  // purgedBefore is stored normalized so the next comparison — and any client
+  // reading it back — sees a single canonical form. Taking the max is
+  // deliberately monotonic; rejecting a hostile client's far-future value is
+  // out of scope here.
+  const purgedBefore = toIsoUtc(laterInstant(a.purgedBefore, b.purgedBefore));
 
   return {
     document: {
       version: SCHEMA_VERSION,
-      exportedAt: a.exportedAt > b.exportedAt ? a.exportedAt : b.exportedAt,
+      exportedAt: laterInstant(a.exportedAt, b.exportedAt) ?? a.exportedAt,
       // The envelope identity stays with argument `a`; only the entity
       // payload is order independent (same rule as the Dart merger).
       deviceId: a.deviceId,
       lastSyncAt: a.lastSyncAt ?? null,
-      purgedBefore: later(a.purgedBefore, b.purgedBefore),
+      purgedBefore,
       taskMaster: {
         tasks,
         mustDoCategories: mustDo,

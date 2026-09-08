@@ -60,6 +60,32 @@ describe('SyncEngine.sync', () => {
     expect(r2.document.taskMaster.tasks.map((t) => t.id)).toEqual(['phone-only']);
     expect(r2.summary).toMatchObject({ added: 0, updated: 0, removed: 0, deleted: 0 });
   });
+
+  it('rejects a document without taskMaster.settings with 400 and leaves the store untouched', async () => {
+    await store.update((d) => { d.taskMaster.tasks.push(task('hub-task', '10-0-hub')); return d; });
+    const before = await store.read();
+    const incoming = phoneDoc([task('phone-task', '11-0-android-1')]);
+    delete (incoming.taskMaster as unknown as Record<string, unknown>).settings;
+    const err = await engine.sync('android-1', incoming, 'take_phone').catch((e) => e);
+    expect(err).toBeInstanceOf(SyncRejected);
+    expect(err.status).toBe(400);
+    expect(err.code).toBe('invalid_document');
+    expect(await store.read()).toEqual(before);
+  });
+
+  it('warns instead of silently skipping the purgedBefore guard when it is unparsable', async () => {
+    await store.update((d) => { d.purgedBefore = 'not-a-timestamp'; return d; });
+    const result = await engine.sync('android-1', phoneDoc([], { lastSyncAt: '2026-08-01T00:00:00.000Z' }));
+    expect(result.warnings).toContain('purgedBefore unparsable, guard skipped');
+    expect(result.summary.warnings).toBe(result.warnings.length);
+  });
+
+  it('lastSync returns a copy, so callers cannot mutate the tracked progress', async () => {
+    await engine.sync('android-1', phoneDoc([]));
+    const snapshot = engine.lastSync!;
+    snapshot.stage = 'failed';
+    expect(engine.lastSync?.stage).toBe('done');
+  });
 });
 
 describe('SyncEngine.purge', () => {
