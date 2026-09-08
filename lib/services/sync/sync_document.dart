@@ -73,6 +73,9 @@ class SyncDocument {
     bool strict = false,
   }) {
     final rawVersion = json['version'];
+    if (strict && rawVersion is! int) {
+      throw FormatException('version must be an int, got $rawVersion');
+    }
     final version = rawVersion is int ? rawVersion : 1;
     if (version > schemaVersion) {
       throw UnsupportedSchemaException(version);
@@ -80,19 +83,33 @@ class SyncDocument {
     final isV1 = version < schemaVersion;
     Map<String, dynamic> section(String key) {
       final value = json[key];
-      return value is Map<String, dynamic> ? value : const <String, dynamic>{};
+      if (value is Map<String, dynamic>) return value;
+      if (strict) {
+        throw FormatException('$key must be a JSON object, got $value');
+      }
+      return const <String, dynamic>{};
     }
 
     final taskJson = section(isV1 ? 'task_master' : 'taskMaster');
     final planJson = section(isV1 ? 'daily_plan' : 'dailyPlan');
     final exportedRaw = json[isV1 ? 'exported_at' : 'exportedAt'];
+    final exportedAt = DateTime.tryParse(
+      exportedRaw is String ? exportedRaw : '',
+    )?.toUtc();
+    if (strict && exportedAt == null) {
+      throw FormatException(
+        'exportedAt missing or unparsable, got $exportedRaw',
+      );
+    }
+    final rawDeviceId = json['deviceId'];
+    if (strict && !isV1 && rawDeviceId is! String) {
+      throw FormatException('deviceId must be a String, got $rawDeviceId');
+    }
     return SyncDocument(
-      exportedAt:
-          DateTime.tryParse(exportedRaw is String ? exportedRaw : '')?.toUtc() ??
-          DateTime.utc(1970),
+      exportedAt: exportedAt ?? DateTime.utc(1970),
       deviceId: isV1
           ? 'migrated'
-          : (json['deviceId'] is String ? json['deviceId'] as String : 'unknown'),
+          : (rawDeviceId is String ? rawDeviceId : 'unknown'),
       lastSyncAt: _parseUtc(json['lastSyncAt']),
       purgedBefore: _parseUtc(json['purgedBefore']),
       taskMaster: TaskMasterStateData.fromJson(taskJson, strict: strict),

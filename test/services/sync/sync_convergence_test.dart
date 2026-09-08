@@ -47,6 +47,7 @@ void main() {
         b = merged.document;
       }
       expect(a.toJson()['taskMaster'], b.toJson()['taskMaster'], reason: 'seed $seed');
+      expect(a.toJson()['dailyPlan'], b.toJson()['dailyPlan'], reason: 'seed $seed');
     }
   });
 
@@ -72,9 +73,19 @@ void main() {
         reason: 'commutative, seed $seed',
       );
       expect(
+        ab.toJson()['dailyPlan'],
+        ba.toJson()['dailyPlan'],
+        reason: 'commutative dailyPlan, seed $seed',
+      );
+      expect(
         SyncMerger.merge(ab, b).document.toJson()['taskMaster'],
         ab.toJson()['taskMaster'],
         reason: 'idempotent, seed $seed',
+      );
+      expect(
+        SyncMerger.merge(ab, b).document.toJson()['dailyPlan'],
+        ab.toJson()['dailyPlan'],
+        reason: 'idempotent dailyPlan, seed $seed',
       );
     }
   });
@@ -92,11 +103,17 @@ SyncDocument _empty(String device) => SyncDocument(
   dailyPlan: DailyPlanStateData.initial(),
 );
 
+/// The fixed daily plan every replica's free-time-slot mutations attach to.
+const _fixedPlanId = 'plan-fixed';
+
 SyncDocument _mutate(SyncDocument doc, HlcClock clock, Random random) {
   final tasks = List<TaskMaster>.from(doc.taskMaster.tasks);
   var dead = List<Tombstone>.from(doc.taskMaster.deletedTasks);
   final now = DateTime.utc(2026, 1, 1, 0, 0, clock.last.counter);
-  final op = random.nextInt(3);
+  final op = random.nextInt(4);
+  if (op == 3) {
+    return _mutateSlot(doc, clock, random, now);
+  }
   if (op == 0 || tasks.isEmpty) {
     tasks.add(
       TaskMaster(
@@ -134,6 +151,51 @@ SyncDocument _mutate(SyncDocument doc, HlcClock clock, Random random) {
   );
 }
 
+/// Adds, edits, or tombstones a [FreeTimeSlot] on the shared fixed plan.
+SyncDocument _mutateSlot(
+  SyncDocument doc,
+  HlcClock clock,
+  Random random,
+  DateTime now,
+) {
+  final slots = List<FreeTimeSlot>.from(doc.dailyPlan.slots);
+  var deadSlots = List<Tombstone>.from(doc.dailyPlan.deletedSlots);
+  final verb = random.nextInt(3);
+  if (verb == 0 || slots.isEmpty) {
+    final startMinute = random.nextInt(600);
+    slots.add(
+      FreeTimeSlot(
+        id: 's${random.nextInt(8)}-${clock.deviceId}',
+        dailyPlanId: _fixedPlanId,
+        startAt: now.add(Duration(minutes: startMinute)),
+        endAt: now.add(Duration(minutes: startMinute + 30)),
+        label: 'l${random.nextInt(100)}',
+        meta: SyncMeta.stamp(clock.next(), now),
+      ),
+    );
+  } else if (verb == 1) {
+    final i = random.nextInt(slots.length);
+    slots[i] = slots[i].copyWith(
+      label: 'm${random.nextInt(100)}',
+      meta: slots[i].meta.touch(clock.next(), now),
+    );
+  } else {
+    final removed = slots.removeAt(random.nextInt(slots.length));
+    deadSlots.add(
+      Tombstone(id: removed.id, meta: removed.meta.tombstone(clock.next(), now)),
+    );
+  }
+  final seen = <String>{};
+  slots.retainWhere((s) => seen.add(s.id));
+  deadSlots = withoutTombstonesFor(deadSlots, slots.map((s) => s.id));
+  return SyncDocument(
+    exportedAt: doc.exportedAt,
+    deviceId: doc.deviceId,
+    taskMaster: doc.taskMaster,
+    dailyPlan: doc.dailyPlan.copyWith(slots: slots, deletedSlots: deadSlots),
+  );
+}
+
 Hlc _maxClock(SyncDocument doc) {
   var best = Hlc.migrated;
   for (final t in doc.taskMaster.tasks) {
@@ -141,6 +203,12 @@ Hlc _maxClock(SyncDocument doc) {
   }
   for (final t in doc.taskMaster.deletedTasks) {
     if (t.meta.clock.compareTo(best) > 0) best = t.meta.clock;
+  }
+  for (final s in doc.dailyPlan.slots) {
+    if (s.meta.clock.compareTo(best) > 0) best = s.meta.clock;
+  }
+  for (final s in doc.dailyPlan.deletedSlots) {
+    if (s.meta.clock.compareTo(best) > 0) best = s.meta.clock;
   }
   return best;
 }

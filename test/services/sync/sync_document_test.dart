@@ -109,4 +109,101 @@ void main() {
       throwsFormatException,
     );
   });
+
+  test('strict mode rejects a non-int version', () {
+    expect(
+      () => SyncDocument.fromJson(<String, dynamic>{
+        ..._validV2Json(),
+        'version': '2',
+      }, strict: true),
+      throwsFormatException,
+    );
+  });
+
+  test('strict mode rejects a missing exportedAt', () {
+    final json = _validV2Json()..remove('exportedAt');
+    expect(
+      () => SyncDocument.fromJson(json, strict: true),
+      throwsFormatException,
+    );
+  });
+
+  test('strict mode rejects an unparsable exportedAt', () {
+    expect(
+      () => SyncDocument.fromJson(<String, dynamic>{
+        ..._validV2Json(),
+        'exportedAt': 'not-a-date',
+      }, strict: true),
+      throwsFormatException,
+    );
+  });
+
+  test('strict mode rejects a non-String deviceId', () {
+    expect(
+      () => SyncDocument.fromJson(<String, dynamic>{
+        ..._validV2Json(),
+        'deviceId': 42,
+      }, strict: true),
+      throwsFormatException,
+    );
+  });
+
+  test('strict mode rejects a taskMaster that is not a Map', () {
+    expect(
+      () => SyncDocument.fromJson(<String, dynamic>{
+        ..._validV2Json(),
+        'taskMaster': <dynamic>[],
+      }, strict: true),
+      throwsFormatException,
+    );
+  });
+
+  test('strict mode rejects a dailyPlan that is not a Map', () {
+    expect(
+      () => SyncDocument.fromJson(<String, dynamic>{
+        ..._validV2Json(),
+        'dailyPlan': 'nope',
+      }, strict: true),
+      throwsFormatException,
+    );
+  });
+
+  test('lenient mode still tolerates all of the above', () {
+    final json = _validV2Json()..remove('exportedAt');
+    final doc = SyncDocument.fromJson(<String, dynamic>{
+      ...json,
+      'deviceId': 42,
+      'taskMaster': <dynamic>[],
+      'dailyPlan': 'nope',
+    });
+    expect(doc.version, 2);
+    expect(doc.exportedAt, DateTime.utc(1970));
+    expect(doc.deviceId, 'unknown');
+    expect(doc.taskMaster.tasks, isEmpty);
+    expect(doc.dailyPlan.plans, isEmpty);
+
+    final nonIntVersionDoc = SyncDocument.fromJson(<String, dynamic>{
+      ..._validV2Json(),
+      'version': '2',
+    });
+    expect(nonIntVersionDoc.version, 2);
+    expect(nonIntVersionDoc.deviceId, 'migrated');
+  });
 }
+
+Map<String, dynamic> _validV2Json() => <String, dynamic>{
+  'version': 2,
+  'exportedAt': '2026-09-08T00:00:00.000Z',
+  'deviceId': 'android-1',
+  'taskMaster': <String, dynamic>{
+    'tasks': <dynamic>[],
+    'mustDoCategories': <dynamic>[],
+    'wantToDoCategories': <dynamic>[],
+    'settings': <String, dynamic>{'shareCategories': false},
+  },
+  'dailyPlan': <String, dynamic>{
+    'plans': <dynamic>[],
+    'slots': <dynamic>[],
+    'assignments': <dynamic>[],
+  },
+};

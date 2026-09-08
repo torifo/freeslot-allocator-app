@@ -37,8 +37,14 @@ class _MergedList<T> {
   final List<Tombstone> dead;
 }
 
-/// Entity-level merge per the design spec. Pure; never mutates its inputs and
-/// always produces the same document for `merge(a, b)` and `merge(b, a)`.
+/// Entity-level merge per the design spec. Pure; never mutates its inputs.
+/// Only the entity payload (tasks, categories, plans, slots, assignments,
+/// tombstones) is order-independent — `merge(a, b)` and `merge(b, a)`
+/// produce the same entities. `deviceId` and `lastSyncAt` on the result
+/// always come from argument `a`, so the two calls differ in those fields.
+///
+/// Invariant checking (design rule 8) is the caller's responsibility; this
+/// merger does not run `InvariantChecker` itself.
 class SyncMerger {
   static MergeResult merge(SyncDocument a, SyncDocument b) {
     final warnings = <String>[];
