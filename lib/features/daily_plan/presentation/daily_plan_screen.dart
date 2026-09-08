@@ -752,6 +752,11 @@ class _DailyTimelineSectionState extends State<_DailyTimelineSection> {
   static const double _hourHeight = 72;
   static const double _gutterWidth = 56;
 
+  /// Vertical breathing room above and below the grid so the first and last
+  /// hour labels can sit centred on their lines instead of being pushed
+  /// inside the rounded corner of the grid card.
+  static const double _timelinePadding = 12;
+
   @override
   Widget build(BuildContext context) {
     final window = resolveTimelineWindow(
@@ -766,6 +771,7 @@ class _DailyTimelineSectionState extends State<_DailyTimelineSection> {
     final timelineEnd = window.end;
     final totalMinutes = timelineEnd.difference(timelineStart).inMinutes;
     final timelineHeight = (totalMinutes / 60) * _hourHeight;
+    final canvasHeight = timelineHeight + _timelinePadding * 2;
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -814,20 +820,25 @@ class _DailyTimelineSectionState extends State<_DailyTimelineSection> {
                       children: [
                         SizedBox(
                           width: _gutterWidth,
-                          height: timelineHeight,
+                          height: canvasHeight,
                           child: _TimelineGutter(
                             start: timelineStart,
                             end: timelineEnd,
                             hourHeight: _hourHeight,
+                            topPadding: _timelinePadding,
                           ),
                         ),
                         const SizedBox(width: 8),
                         SizedBox(
                           width: timelineWidth,
-                          height: timelineHeight,
+                          height: canvasHeight,
                           child: Stack(
                             children: [
-                              Positioned.fill(
+                              Positioned(
+                                top: _timelinePadding,
+                                bottom: _timelinePadding,
+                                left: 0,
+                                right: 0,
                                 child: _TimelineGrid(
                                   start: timelineStart,
                                   end: timelineEnd,
@@ -835,11 +846,13 @@ class _DailyTimelineSectionState extends State<_DailyTimelineSection> {
                                 ),
                               ),
                               ...widget.slots.map((slot) {
-                                final top = _offsetForTime(
-                                  slot.startAt,
-                                  timelineStart,
-                                  _hourHeight,
-                                );
+                                final top =
+                                    _timelinePadding +
+                                    _offsetForTime(
+                                      slot.startAt,
+                                      timelineStart,
+                                      _hourHeight,
+                                    );
                                 final height =
                                     (slot.durationMinutes / 60) * _hourHeight;
                                 return Positioned(
@@ -955,11 +968,17 @@ class _TimelineGutter extends StatelessWidget {
     required this.start,
     required this.end,
     required this.hourHeight,
+    this.topPadding = 0,
   });
 
   final DateTime start;
   final DateTime end;
   final double hourHeight;
+  final double topPadding;
+
+  /// Half the rendered height of a `labelSmall` line, used to centre each
+  /// label on its hour line.
+  static const double _labelHalfHeight = 8;
 
   @override
   Widget build(BuildContext context) {
@@ -974,7 +993,7 @@ class _TimelineGutter extends StatelessWidget {
       children: [
         for (var index = 0; index < hours.length; index += 1)
           Positioned(
-            top: _labelTopForIndex(index, hours.length),
+            top: topPadding + index * hourHeight - _labelHalfHeight,
             left: 0,
             right: 0,
             child: Text(
@@ -987,16 +1006,6 @@ class _TimelineGutter extends StatelessWidget {
     );
   }
 
-  double _labelTopForIndex(int index, int count) {
-    final base = index * hourHeight - 10;
-    if (index == 0) {
-      return 14;
-    }
-    if (index == count - 1) {
-      return base - 14;
-    }
-    return base;
-  }
 }
 
 class _TimelineGrid extends StatelessWidget {
@@ -1019,30 +1028,33 @@ class _TimelineGrid extends StatelessWidget {
       cursor = cursor.add(const Duration(hours: 1));
     }
 
+    // The first and last hours coincide with the card border, so drawing
+    // them again would leave a straight line poking out of the rounded
+    // corners. Interior lines are clipped to the same radius for safety.
+    final interior = lines.length > 2
+        ? lines.sublist(1, lines.length - 1)
+        : const <DateTime>[];
     return DecoratedBox(
       decoration: BoxDecoration(
         color: AppColors.bg,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: AppColors.line),
       ),
-      child: Stack(
-        children: [
-          ...lines.map((hour) {
-            final top = hour.difference(start).inMinutes / 60 * hourHeight;
-            return Positioned(
-              top: top,
-              left: 0,
-              right: 0,
-              child: Container(height: 1, color: AppColors.line),
-            );
-          }),
-          const Positioned(
-            top: 0,
-            bottom: 0,
-            right: 0,
-            child: ColoredBox(color: AppColors.line, child: SizedBox(width: 1)),
-          ),
-        ],
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: Stack(
+          children: [
+            ...interior.map((hour) {
+              final top = hour.difference(start).inMinutes / 60 * hourHeight;
+              return Positioned(
+                top: top,
+                left: 0,
+                right: 0,
+                child: Container(height: 1, color: AppColors.line),
+              );
+            }),
+          ],
+        ),
       ),
     );
   }
