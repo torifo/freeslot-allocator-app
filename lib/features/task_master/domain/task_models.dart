@@ -313,6 +313,13 @@ class TaskMasterStateData {
     final settings = json['settings'];
     final bool share;
     final SyncMeta settingsMeta;
+    if (strict && settings is! Map<String, dynamic>) {
+      // `strict` is the wire format: the hub always writes `settings` (with
+      // its own SyncMeta), and accepting a document without it would silently
+      // reset `shareCategories` and hand the merge a `migrated` meta that
+      // loses to everything.
+      throw const FormatException('taskMaster.settings is required');
+    }
     if (settings is Map<String, dynamic>) {
       final rawShare = settings['shareCategories'];
       share = rawShare is bool ? rawShare : false;

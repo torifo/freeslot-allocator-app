@@ -72,7 +72,15 @@ class PairingInfo {
     final port = int.tryParse(q['port'] ?? '');
     final fp = (q['fp'] ?? '').toUpperCase();
     final code = q['code'] ?? '';
-    if (host.isEmpty || port == null || !RegExp(r'^[0-9A-F]{64}$').hasMatch(fp) || code.isEmpty) {
+    // A port outside 1..65535 cannot be dialled; `int.tryParse` happily
+    // accepts `0` and `999999`, so the range is checked here rather than
+    // failing later as an opaque socket error.
+    if (host.isEmpty ||
+        port == null ||
+        port < 1 ||
+        port > 65535 ||
+        !RegExp(r'^[0-9A-F]{64}$').hasMatch(fp) ||
+        code.isEmpty) {
       throw const FormatException('ペアリング情報が不完全です');
     }
     return PairingInfo(host: host, port: port, fingerprint: fp, code: code);

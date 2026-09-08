@@ -46,7 +46,7 @@ class SyncSummary {
 
 /// Immutable snapshot the UI renders. Only measurable stages carry numbers.
 class SyncProgress {
-  const SyncProgress({
+  SyncProgress({
     required this.kind,
     required this.stage,
     required this.startedAt,
@@ -56,12 +56,12 @@ class SyncProgress {
     this.receivedBytes = 0,
     this.framesReceived = 0,
     this.framesTotal = 0,
-    this.missingFrames = const [],
     this.summary,
     this.errorCode,
     this.errorMessage,
     this.hubMayHaveChanged = false,
-  });
+    List<int> missingFrames = const <int>[],
+  }) : missingFrames = List<int>.unmodifiable(missingFrames);
 
   final SyncKind kind;
   final SyncStage stage;
@@ -72,6 +72,8 @@ class SyncProgress {
   final int receivedBytes;
   final int framesReceived;
   final int framesTotal;
+  /// Unmodifiable: the panel rebuilds from this list, and a caller mutating
+  /// it in place would change a value that has already been published.
   final List<int> missingFrames;
   final SyncSummary? summary;
   final String? errorCode;
@@ -91,11 +93,14 @@ class SyncProgress {
       elapsed(now) > slowAfter;
 
   double? get fraction {
+    // A finished sync is 100%, whatever the last frame count said: a QR
+    // transfer that ends with a couple of frames never re-scanned (because
+    // the document was already complete) must not leave the bar short.
+    if (stage == SyncStage.done) return 1;
     if (stage == SyncStage.sending && totalBytes != null && totalBytes! > 0) {
       return sentBytes / totalBytes!;
     }
     if (kind == SyncKind.qr && framesTotal > 0) return framesReceived / framesTotal;
-    if (stage == SyncStage.done) return 1;
     return null; // indeterminate (e.g. waitingHub)
   }
 
@@ -118,6 +123,8 @@ class SyncProgress {
     String? errorCode,
     String? errorMessage,
     bool? hubMayHaveChanged,
+    bool clearError = false,
+    bool clearSummary = false,
   }) => SyncProgress(
     kind: kind,
     stage: stage ?? this.stage,
@@ -129,9 +136,9 @@ class SyncProgress {
     framesReceived: framesReceived ?? this.framesReceived,
     framesTotal: framesTotal ?? this.framesTotal,
     missingFrames: missingFrames ?? this.missingFrames,
-    summary: summary ?? this.summary,
-    errorCode: errorCode ?? this.errorCode,
-    errorMessage: errorMessage ?? this.errorMessage,
+    summary: clearSummary ? null : (summary ?? this.summary),
+    errorCode: clearError ? null : (errorCode ?? this.errorCode),
+    errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
     hubMayHaveChanged: hubMayHaveChanged ?? this.hubMayHaveChanged,
   );
 }
@@ -161,8 +168,14 @@ class SyncProgressController extends ValueNotifier<SyncProgress> {
     );
   }
 
-  void stage(SyncStage s, {int? totalBytes}) =>
-      value = value.copyWith(stage: s, stageStartedAt: _now(), totalBytes: totalBytes);
+  void stage(SyncStage s, {int? totalBytes}) => value = value.copyWith(
+    stage: s,
+    stageStartedAt: _now(),
+    totalBytes: totalBytes,
+    // Entering `sending` starts a new upload — a retry after a failed attempt
+    // must not begin with the previous attempt's byte count already on the bar.
+    sentBytes: s == SyncStage.sending ? 0 : null,
+  );
 
   void bytes(int sent) => value = value.copyWith(sentBytes: sent);
 
@@ -182,9 +195,31 @@ class SyncProgressController extends ValueNotifier<SyncProgress> {
         stageStartedAt: _now(),
       );
 
+  /// The stages that only exist once a LAN request has been fully handed to
+  /// the hub. Cancelling in any of them means the hub may already hold the
+  /// merge, so the UI has to warn that the two sides can now differ.
+  ///
+  /// Spelled out rather than compared by [SyncStage] index: the enum is
+  /// ordered for reading, not for meaning, and `scanning` / `decoding` sit
+  /// past `waitingHub` in it while belonging to a QR transfer that never
+  /// touched the hub at all.
+  static const _afterHandoff = <SyncStage>{
+    SyncStage.waitingHub,
+    SyncStage.receiving,
+    SyncStage.applying,
+    SyncStage.saving,
+  };
+
   void cancel() {
+    // Cancelling something already finished, failed or cancelled must not
+    // rewrite its outcome: the panel would lose the summary it is showing.
+    if (!value.isActive) return;
     _cancelled = true;
-    final after = value.stage.index >= SyncStage.waitingHub.index && value.stage != SyncStage.done;
-    value = value.copyWith(stage: SyncStage.cancelled, hubMayHaveChanged: after, stageStartedAt: _now());
+    final after = value.kind == SyncKind.lan && _afterHandoff.contains(value.stage);
+    value = value.copyWith(
+      stage: SyncStage.cancelled,
+      hubMayHaveChanged: after,
+      stageStartedAt: _now(),
+    );
   }
 }

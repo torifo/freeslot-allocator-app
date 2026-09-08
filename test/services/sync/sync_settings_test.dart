@@ -42,4 +42,14 @@ void main() {
       throwsFormatException,
     );
   });
+
+  test('a port outside 1..65535 is not a usable pairing QR', () {
+    String qr(String port) =>
+        'frelocator://pair?host=192.168.1.20&port=$port&fp=${'AB' * 32}&code=K7Q2M9XZ';
+    expect(() => PairingInfo.parse(qr('0')), throwsFormatException);
+    expect(() => PairingInfo.parse(qr('65536')), throwsFormatException);
+    expect(() => PairingInfo.parse(qr('-1')), throwsFormatException);
+    expect(PairingInfo.parse(qr('1')).port, 1);
+    expect(PairingInfo.parse(qr('65535')).port, 65535);
+  });
 }

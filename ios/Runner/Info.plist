@@ -24,6 +24,14 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_frelocator._tcp</string>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>PC とペアリングするための QR コードと、PC から送られるデータの QR コードを読み取るためにカメラを使用します。</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>同じ Wi-Fi 上の PC（FRELOCATOR ハブ）を見つけて直接同期するために、ローカルネットワークへのアクセスを使用します。</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

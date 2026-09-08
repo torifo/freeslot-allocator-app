@@ -96,4 +96,28 @@ void main() {
     });
     expect(task.toJson()['updatedAt'], '2026-01-01T00:00:00.000Z');
   });
+
+  test('strict requires the settings object; the legacy fallback stays for local reads', () {
+    final withoutSettings = <String, dynamic>{
+      'tasks': <Map<String, dynamic>>[],
+      'mustDoCategories': <Map<String, dynamic>>[],
+      'wantToDoCategories': <Map<String, dynamic>>[],
+      'shareCategories': true,
+    };
+    expect(
+      () => TaskMasterStateData.fromJson(withoutSettings, strict: true),
+      throwsFormatException,
+      reason: 'on the wire a missing settings object would silently reset shareCategories',
+    );
+    // Non-strict is how a v1 document already on this phone is read.
+    final legacy = TaskMasterStateData.fromJson(withoutSettings);
+    expect(legacy.shareCategories, isTrue);
+    expect(legacy.settingsMeta.clock.isMigrated, isTrue);
+
+    final withSettings = <String, dynamic>{
+      ...withoutSettings,
+      'settings': <String, dynamic>{'shareCategories': true, 'clock': '1000-0-me'},
+    };
+    expect(TaskMasterStateData.fromJson(withSettings, strict: true).shareCategories, isTrue);
+  });
 }
