@@ -724,7 +724,7 @@ export class HubTools {
       weekStart: input.weekStart,
       days: plans.length,
       freeMinutes,
-      assignedMinutes: byKind.must_do + byKind.want_to_do,
+      assignedMinutes: Object.values(byKind).reduce((a, b) => a + b, 0),
       byKind,
       byCategory,
     };
