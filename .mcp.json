@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "frelocator-hub": {
+      "command": "node",
+      "args": ["tools/hub/dist/index.js"]
+    }
+  }
+}
