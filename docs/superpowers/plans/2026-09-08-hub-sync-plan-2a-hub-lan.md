@@ -10,6 +10,10 @@
 
 **設計書:** `docs/superpowers/specs/2026-09-08-frelocator-hub-sync-design.md`（「LAN 同期プロトコル」「ネットワーク不一致時の副経路」「削除とゴミ掃除」「MCP ツール一覧」）。Plan 1 で `tools/hub/src/{model,hlc,hash,merge,invariants,store,ids,tools,index}.ts` は実装済み。
 
+**Plan 2b への申し送り（バッチ 1 レビュー）:**
+- クライアントは**フィンガープリントでピン留め**し、ホスト名検証はバイパスする（Dart は `HttpClient.badCertificateCallback` で証明書の SHA-256 を照合して判定する）。証明書には SAN（`frelocator-hub.local` / `localhost` / `127.0.0.1`）が入っているが、LAN の IP 直打ちでは一致しないため。
+- **ワイヤ上の時刻は必ず UTC ISO-8601（`Z` 付き）**で送る。ハブは `Date.parse` の瞬間比較で判定するが、オフセット無しの文字列はハブのローカル時刻として解釈されるため、`Z` 無しの送信は禁止。
+
 ---
 
 ## ファイル構成（`tools/hub/`）
@@ -42,7 +46,7 @@
 ```ts
 // test/tls.test.ts
 import { describe, expect, it } from 'vitest';
-import { X509Certificate } from 'node:crypto';
+import { createPrivateKey, createPublicKey, sign, verify, X509Certificate } from 'node:crypto';
 import { createSelfSignedCert, fingerprintOf } from '../src/tls.js';
 
 describe('tls', () => {
@@ -55,12 +59,31 @@ describe('tls', () => {
     expect(cert.fingerprint).toMatch(/^[0-9A-F]{64}$/);
     expect(fingerprintOf(cert.certPem)).toBe(cert.fingerprint);
   });
+
+  it('carries the SANs the LAN clients connect by', () => {
+    const x509 = new X509Certificate(createSelfSignedCert('frelocator-hub').certPem);
+    const san = x509.subjectAltName ?? '';
+    expect(san).toContain('DNS:frelocator-hub.local');
+    expect(san).toContain('DNS:localhost');
+    expect(san).toContain('IP Address:127.0.0.1');
+  });
+
+  it('emits a private key that matches the certificate public key', () => {
+    const bundle = createSelfSignedCert('frelocator-hub');
+    const privateKey = createPrivateKey(bundle.keyPem);
+    const publicKey = new X509Certificate(bundle.certPem).publicKey;
+    const payload = Buffer.from('frelocator');
+    const signature = sign('sha256', payload, privateKey);
+    expect(verify('sha256', payload, publicKey, signature)).toBe(true);
+    expect(createPublicKey(privateKey).export({ type: 'spki', format: 'pem' }))
+      .toBe(publicKey.export({ type: 'spki', format: 'pem' }));
+  });
 });
 ```
 
 ```ts
 // test/config.test.ts
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -104,6 +127,70 @@ describe('HubConfig', () => {
     expect(cfg.devices()).toEqual([]);
     await expect(cfg.rotateToken('nope')).rejects.toThrow(/unknown device/);
   });
+
+  it('stores hub.json with owner-only permissions', async () => {
+    await HubConfig.load(dir);
+    expect(statSync(join(dir, 'hub.json')).mode & 0o777).toBe(0o600);
+  });
+
+  it('recomputes the fingerprint instead of trusting the stored one', async () => {
+    const a = await HubConfig.load(dir);
+    const path = join(dir, 'hub.json');
+    const json = JSON.parse(readFileSync(path, 'utf8'));
+    json.fingerprint = 'DEADBEEF';
+    writeFileSync(path, JSON.stringify(json));
+    const b = await HubConfig.load(dir);
+    expect(b.fingerprint).toBe(a.fingerprint);
+  });
+
+  it.each([
+    ['corrupt JSON', 'not json at all'],
+    ['an array root', '[]'],
+    ['a missing certPem', JSON.stringify({ keyPem: 'x', devices: [] })],
+    ['non-array devices', JSON.stringify({ certPem: 'x', keyPem: 'y', devices: {} })],
+  ])('refuses to mint a new identity over %s', async (_label, text) => {
+    const path = join(dir, 'hub.json');
+    writeFileSync(path, text);
+    await expect(HubConfig.load(dir)).rejects.toThrow(/hub identity lost/);
+    const broken = readdirSync(dir).filter((f) => f.startsWith('hub.json.broken-'));
+    expect(broken).toHaveLength(1);
+    expect(readFileSync(join(dir, broken[0]), 'utf8')).toBe(text);
+  });
+
+  it('serializes concurrent recordSync calls into one parseable hub.json', async () => {
+    const cfg = await HubConfig.load(dir, () => 5_000);
+    const ids = Array.from({ length: 12 }, (_, i) => `android-${i}`);
+    for (const id of ids) await cfg.redeemPairingCode(await cfg.issuePairingCode(), id, id);
+    await Promise.all(ids.map((id, i) => cfg.recordSync(id, `2026-09-0${(i % 9) + 1}T00:00:00.000Z`)));
+    const json = JSON.parse(readFileSync(join(dir, 'hub.json'), 'utf8'));
+    expect(json.devices).toHaveLength(ids.length);
+    for (const d of json.devices) expect(d.lastSyncAt).toMatch(/^2026-09-\d\dT/);
+  });
+
+  it('keeps a valid pairing code usable after a wrong attempt', async () => {
+    const cfg = await HubConfig.load(dir, () => 5_000);
+    const code = await cfg.issuePairingCode();
+    await expect(cfg.redeemPairingCode('WRONGWRO', 'android-1', 'Pixel')).rejects.toThrow(/invalid/);
+    expect(cfg.pairingCode()?.code).toBe(code);
+    await expect(cfg.redeemPairingCode(code, 'android-1', 'Pixel')).resolves.toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('clears an expired pairing code even on a wrong attempt', async () => {
+    let now = 1_000_000;
+    const cfg = await HubConfig.load(dir, () => now);
+    await cfg.issuePairingCode();
+    now += 6 * 60 * 1000;
+    await expect(cfg.redeemPairingCode('WRONGWRO', 'android-1', 'Pixel')).rejects.toThrow(/expired/);
+    expect(JSON.parse(readFileSync(join(dir, 'hub.json'), 'utf8')).pairing).toBeNull();
+  });
+
+  it('forgets a device token', async () => {
+    const cfg = await HubConfig.load(dir, () => 5_000);
+    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    expect(cfg.deviceForToken(token)?.deviceId).toBe('android-1');
+    await cfg.forgetDevice('android-1');
+    expect(cfg.deviceForToken(token)).toBeUndefined();
+  });
 });
 ```
 
@@ -121,6 +208,10 @@ import selfsigned from 'selfsigned';
 
 export interface CertBundle { certPem: string; keyPem: string; fingerprint: string; }
 
+/** Names the certificate is valid for: mDNS host, loopback name and loopback address. */
+export const HUB_SAN_DNS = ['frelocator-hub.local', 'localhost'] as const;
+export const HUB_SAN_IP = ['127.0.0.1'] as const;
+
 /** SHA-256 over the DER certificate, upper-case hex without separators. */
 export function fingerprintOf(certPem: string): string {
   return createHash('sha256').update(new X509Certificate(certPem).raw).digest('hex').toUpperCase();
@@ -131,7 +222,18 @@ export function createSelfSignedCert(commonName: string): CertBundle {
     days: 3650,
     keySize: 2048,
     algorithm: 'sha256',
-    extensions: [{ name: 'basicConstraints', cA: false }, { name: 'keyUsage', digitalSignature: true, keyEncipherment: true }],
+    extensions: [
+      { name: 'basicConstraints', cA: false },
+      { name: 'keyUsage', digitalSignature: true, keyEncipherment: true },
+      {
+        name: 'subjectAltName',
+        // node-forge altName types: 2 = dNSName, 7 = iPAddress.
+        altNames: [
+          ...HUB_SAN_DNS.map((value) => ({ type: 2, value })),
+          ...HUB_SAN_IP.map((ip) => ({ type: 7, ip })),
+        ],
+      },
+    ],
   });
   return { certPem: pems.cert, keyPem: pems.private, fingerprint: fingerprintOf(pems.cert) };
 }
@@ -139,11 +241,11 @@ export function createSelfSignedCert(commonName: string): CertBundle {
 
 ```ts
 // src/config.ts
-import { randomBytes, randomInt } from 'node:crypto';
+import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createSelfSignedCert } from './tls.js';
+import { createSelfSignedCert, fingerprintOf } from './tls.js';
 
 export interface DeviceRecord { deviceId: string; name: string; token: string; pairedAt: string; lastSyncAt: string | null; }
 interface HubJson {
@@ -155,21 +257,37 @@ interface HubJson {
 const PAIRING_TTL_MS = 5 * 60 * 1000;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
-/** hub.json: certificate, pairing state and paired devices. Not covered by data.lock (separate file, single writer = the hub). */
+/** Constant-time secret comparison over sha256 digests (fixed length, leaks no length). */
+function secretEquals(a: string, b: string): boolean {
+  const digest = (s: string) => createHash('sha256').update(s, 'utf8').digest();
+  return timingSafeEqual(digest(a), digest(b));
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Structural check for hub.json. A file that fails this is never silently replaced. */
+function validateHubJson(value: unknown): void {
+  if (!isPlainObject(value)) throw new Error('root is not a JSON object');
+  if (typeof value.certPem !== 'string' || value.certPem.length === 0) throw new Error('certPem is missing or not a string');
+  if (typeof value.keyPem !== 'string' || value.keyPem.length === 0) throw new Error('keyPem is missing or not a string');
+  if (value.devices !== undefined && !Array.isArray(value.devices)) throw new Error('devices is not an array');
+}
+
+/** hub.json: certificate, pairing state and paired devices (not covered by data.lock). One instance per directory is required — saves are serialized inside this object only. */
 export class HubConfig {
+  /** Serializes save() so concurrent mutations can never publish a partial file. */
+  private chain: Promise<unknown> = Promise.resolve();
+
   private constructor(private readonly path: string, private json: HubJson, private readonly now: () => number) {}
 
   static async load(directory: string, now: () => number = () => Date.now()): Promise<HubConfig> {
     await mkdir(directory, { recursive: true });
     const path = join(directory, 'hub.json');
-    let json: HubJson;
-    if (existsSync(path)) {
-      json = JSON.parse(await readFile(path, 'utf8')) as HubJson;
-      if (!json.certPem || !json.keyPem) Object.assign(json, createSelfSignedCert('frelocator-hub'));
-      json.devices ??= []; json.pairing ??= null;
-    } else {
-      json = { ...createSelfSignedCert('frelocator-hub'), pairing: null, devices: [] };
-    }
+    const json = existsSync(path)
+      ? await readHubJson(path)
+      : { ...createSelfSignedCert('frelocator-hub'), pairing: null, devices: [] };
     const cfg = new HubConfig(path, json, now);
     await cfg.save();
     return cfg;
@@ -179,8 +297,16 @@ export class HubConfig {
   get keyPem(): string { return this.json.keyPem; }
   get fingerprint(): string { return this.json.fingerprint; }
   devices(): DeviceRecord[] { return this.json.devices.map((d) => ({ ...d })); }
-  deviceForToken(token: string): DeviceRecord | undefined { return this.json.devices.find((d) => d.token === token); }
+
+  /** Constant-time lookup: every device is compared, with no early exit. */
+  deviceForToken(token: string): DeviceRecord | undefined {
+    let found: DeviceRecord | undefined;
+    for (const d of this.json.devices) if (secretEquals(d.token, token)) found = d;
+    return found;
+  }
+
   device(deviceId: string): DeviceRecord | undefined { return this.json.devices.find((d) => d.deviceId === deviceId); }
+
   pairingCode(): { code: string; expiresAt: number } | null {
     const p = this.json.pairing;
     return p && p.expiresAt > this.now() ? { ...p } : null;
@@ -193,11 +319,12 @@ export class HubConfig {
     return code;
   }
 
-  /** Single use: the code is cleared on success or when expired. */
+  /** Single use: cleared on success and once expired (even on a wrong code); a wrong attempt on a valid code leaves it usable. */
   async redeemPairingCode(code: string, deviceId: string, name: string): Promise<string> {
     const p = this.json.pairing;
-    if (!p || p.code !== code) throw new Error('invalid pairing code');
+    if (!p) throw new Error('invalid pairing code');
     if (p.expiresAt <= this.now()) { this.json.pairing = null; await this.save(); throw new Error('pairing code expired'); }
+    if (!secretEquals(p.code, code)) throw new Error('invalid pairing code');
     this.json.pairing = null;
     const token = randomBytes(32).toString('hex');
     const existing = this.json.devices.find((d) => d.deviceId === deviceId);
@@ -229,11 +356,48 @@ export class HubConfig {
     await this.save();
   }
 
-  private async save(): Promise<void> {
-    const tmp = `${this.path}.tmp`;
-    await writeFile(tmp, JSON.stringify(this.json, null, 2), { mode: 0o600 });
-    await rename(tmp, this.path);
+  /** Unique tmp + rename, serialized: a concurrent caller can never publish a truncated hub.json. */
+  private save(): Promise<void> {
+    const run = async () => {
+      const tmp = `${this.path}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
+      await writeFile(tmp, JSON.stringify(this.json, null, 2), { mode: 0o600 });
+      await rename(tmp, this.path);
+    };
+    const next = this.chain.then(run, run);
+    this.chain = next.catch(() => undefined);
+    return next;
   }
+}
+
+/** A present-but-unusable hub.json is kept as `hub.json.broken-<ts>` and reported: regenerating here would invalidate every pinned fingerprint. */
+async function readHubJson(path: string): Promise<HubJson> {
+  const broken = async (reason: string): Promise<never> => {
+    const quarantine = `${path}.broken-${Date.now()}`;
+    await rename(path, quarantine);
+    throw new Error(
+      `hub.json is unusable (${reason}); moved to ${quarantine}. No certificate was regenerated. `
+      + 'Restore that file from a backup, otherwise the hub identity lost with it means '
+      + 'every device must re-pair.',
+    );
+  };
+  const text = await readFile(path, 'utf8');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+    validateHubJson(parsed);
+  } catch (error) {
+    return broken(String((error as Error).message ?? error));
+  }
+  const json = parsed as HubJson;
+  json.devices ??= [];
+  json.pairing ??= null;
+  try {
+    // Never trust the stored fingerprint: it is only a cache of the certificate.
+    json.fingerprint = fingerprintOf(json.certPem);
+  } catch (error) {
+    return broken(`certPem is not a valid certificate (${String((error as Error).message ?? error)})`);
+  }
+  return json;
 }
 ```
 
@@ -264,7 +428,7 @@ git commit -m "feat(hub): self-signed TLS and hub.json config with pairing and d
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HubConfig } from '../src/config.js';
 import { HlcClock } from '../src/hlc.js';
 import { emptyDocument, type Entity, type SyncDocumentJson } from '../src/model.js';
@@ -289,7 +453,9 @@ describe('SyncEngine.sync', () => {
     await store.update((d) => { d.taskMaster.tasks.push(task('hub-task', '10-0-hub')); return d; });
     const result = await engine.sync('android-1', phoneDoc([task('phone-task', '11-0-android-1')]));
     expect(result.document.taskMaster.tasks.map((t) => t.id).sort()).toEqual(['hub-task', 'phone-task']);
-    expect(result.summary).toEqual({ added: 1, updated: 0, deleted: 0, warnings: 0 });
+    expect(result.summary).toEqual({ added: 1, updated: 0, deleted: 0, removed: 0, warnings: 0 });
+    expect(result.document.lastSyncAt).toBe(new Date(now).toISOString());
+    expect((await store.read()).lastSyncAt).toBe(new Date(now).toISOString());
     expect(cfg.device('android-1')?.lastSyncAt).toBe(new Date(now).toISOString());
     expect((await store.read()).taskMaster.tasks).toHaveLength(2);
     expect(engine.lastSync?.stage).toBe('done');
@@ -316,8 +482,10 @@ describe('SyncEngine.sync', () => {
     await store.update((d) => { d.taskMaster.tasks.push(task('hub-only', '10-0-hub')); return d; });
     const r1 = await engine.sync('android-1', phoneDoc([task('phone-only', '9-0-android-1')]), 'take_phone');
     expect(r1.document.taskMaster.tasks.map((t) => t.id)).toEqual(['phone-only']);
+    expect(r1.summary).toMatchObject({ added: 1, removed: 1, deleted: 0 });
     const r2 = await engine.sync('android-1', phoneDoc([]), 'take_hub');
     expect(r2.document.taskMaster.tasks.map((t) => t.id)).toEqual(['phone-only']);
+    expect(r2.summary).toMatchObject({ added: 0, updated: 0, removed: 0, deleted: 0 });
   });
 });
 
@@ -334,12 +502,120 @@ describe('SyncEngine.purge', () => {
     expect(result.purged).toBe(1);
     const doc = await store.read();
     expect(doc.taskMaster.tasks.map((t) => t.id)).toEqual(['new']);
-    expect(doc.purgedBefore).toBe('2026-09-05T00:00:00.000Z');
+    // The effective cutoff carries a 24h clock-skew margin (see PURGE_SKEW_MS).
+    expect(doc.purgedBefore).toBe('2026-09-04T00:00:00.000Z');
+    expect(result.purgedBefore).toBe('2026-09-04T00:00:00.000Z');
   });
 
   it('purges nothing when no device is known', async () => {
     await cfg.forgetDevice('android-1');
     expect((await engine.purge()).purged).toBe(0);
+  });
+
+  it('purges nothing while a known device has never synced', async () => {
+    await store.update((d) => { d.taskMaster.tasks.push({ ...task('old', '1-0-hub', true), deletedAt: '2000-01-01T00:00:00.000Z' }); return d; });
+    expect(await engine.purge()).toEqual({ purged: 0, purgedBefore: null });
+    expect((await store.read()).taskMaster.tasks).toHaveLength(1);
+  });
+
+  it('keeps a tombstone deleted just before the cutoff and drops a clearly older one', async () => {
+    now = Date.parse('2026-09-10T00:00:00.000Z');
+    await cfg.recordSync('android-1', '2026-09-05T00:00:00.000Z');
+    await store.update((d) => {
+      d.taskMaster.tasks.push({ ...task('within-skew', '1-0-hub', true), deletedAt: '2026-09-04T23:00:00.000Z' });
+      d.taskMaster.tasks.push({ ...task('beyond-skew', '2-0-hub', true), deletedAt: '2026-09-03T00:00:00.000Z' });
+      return d;
+    });
+    expect((await engine.purge()).purged).toBe(1);
+    expect((await store.read()).taskMaster.tasks.map((t) => t.id)).toEqual(['within-skew']);
+  });
+
+  it('never lowers purgedBefore', async () => {
+    now = Date.parse('2026-09-10T00:00:00.000Z');
+    await store.update((d) => { d.purgedBefore = '2026-09-20T00:00:00.000Z'; return d; });
+    await cfg.recordSync('android-1', '2026-09-05T00:00:00.000Z');
+    const result = await engine.purge();
+    expect(result.purgedBefore).toBe('2026-09-20T00:00:00.000Z');
+    expect((await store.read()).purgedBefore).toBe('2026-09-20T00:00:00.000Z');
+  });
+
+  it('takes the earliest lastSyncAt across devices regardless of string form', async () => {
+    now = Date.parse('2026-09-10T00:00:00.000Z');
+    await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-2', 'Tab');
+    await cfg.recordSync('android-1', '2026-09-08T00:00:00.000Z');
+    await cfg.recordSync('android-2', '2026-09-06T09:00:00+09:00'); // 2026-09-06T00:00Z, the true minimum
+    expect((await engine.purge()).purgedBefore).toBe('2026-09-05T00:00:00.000Z');
+  });
+});
+
+describe('SyncEngine document validation', () => {
+  it('rejects a structurally invalid document with 400 invalid_document', async () => {
+    const err = await engine.sync('android-1', { version: 2 } as never).catch((e) => e);
+    expect(err).toBeInstanceOf(SyncRejected);
+    expect(err.status).toBe(400);
+    expect(err.code).toBe('invalid_document');
+  });
+
+  it('accepts unknown extra fields so the schema can evolve', async () => {
+    const doc = { ...phoneDoc([task('t1', '11-0-android-1')]), futureField: { anything: true } } as SyncDocumentJson;
+    await expect(engine.sync('android-1', doc)).resolves.toBeTruthy();
+  });
+
+  it('rejects an unparsable lastSyncAt with 400 bad_timestamp', async () => {
+    const err = await engine.sync('android-1', phoneDoc([], { lastSyncAt: 'yesterday' })).catch((e) => e);
+    expect(err.status).toBe(400);
+    expect(err.code).toBe('bad_timestamp');
+  });
+});
+
+describe('SyncEngine timestamp handling', () => {
+  // purgedBefore is 2026-09-01T00:00:00.000Z in every row.
+  it.each([
+    ['UTC Z, before', '2026-08-31T23:00:00.000Z', true],
+    ['UTC Z, after', '2026-09-01T01:00:00.000Z', false],
+    // No suffix is local time by definition, so these rows stay clear of any UTC offset.
+    ['no suffix, before', '2026-08-30T12:00:00.000', true],
+    ['no suffix, after', '2026-09-02T12:00:00.000', false],
+    ['+09:00 offset, before', '2026-09-01T08:00:00+09:00', true],
+    ['+09:00 offset, after', '2026-09-01T10:00:00+09:00', false],
+    ['second precision, before', '2026-08-31T23:00:00Z', true],
+    ['second precision, after', '2026-09-01T00:00:01Z', false],
+  ])('compares %s as an instant', async (_label, lastSyncAt, rejected) => {
+    await store.update((d) => { d.purgedBefore = '2026-09-01T00:00:00.000Z'; return d; });
+    const outcome = await engine.sync('android-1', phoneDoc([], { lastSyncAt })).then(() => 'ok').catch((e) => e.code);
+    expect(outcome).toBe(rejected ? 'purged_before' : 'ok');
+  });
+});
+
+describe('SyncEngine concurrency', () => {
+  it('does not lose an entity when two devices sync at once', async () => {
+    await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-2', 'Tab');
+    const [a, b] = await Promise.all([
+      engine.sync('android-1', phoneDoc([task('from-1', '11-0-android-1')])),
+      engine.sync('android-2', { ...phoneDoc([task('from-2', '12-0-android-2')]), deviceId: 'android-2' }),
+    ]);
+    expect(a.document).toBeTruthy();
+    expect(b.document).toBeTruthy();
+    expect((await store.read()).taskMaster.tasks.map((t) => t.id).sort()).toEqual(['from-1', 'from-2']);
+  });
+
+  it('tracks progress per device and exposes the most recent as lastSync', async () => {
+    await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-2', 'Tab');
+    await engine.sync('android-1', phoneDoc([]));
+    await engine.sync('android-2', { ...phoneDoc([]), deviceId: 'android-2' });
+    expect(engine.lastSync?.deviceId).toBe('android-2');
+    expect(engine.progressFor('android-1')?.stage).toBe('done');
+    expect(engine.progressFor('nobody')).toBeUndefined();
+  });
+
+  it('warns instead of failing when recording lastSyncAt fails', async () => {
+    const boom = new Error('hub.json is read-only');
+    const spy = vi.spyOn(cfg, 'recordSync').mockRejectedValueOnce(boom);
+    const result = await engine.sync('android-1', phoneDoc([task('t1', '11-0-android-1')]));
+    expect(result.warnings.some((w) => w.includes('hub.json is read-only'))).toBe(true);
+    expect(result.summary.warnings).toBe(result.warnings.length);
+    expect(engine.lastSync?.stage).toBe('done');
+    spy.mockRestore();
   });
 });
 ```
@@ -353,11 +629,12 @@ Expected: FAIL
 
 ```ts
 // src/sync-engine.ts
+import { z } from 'zod';
 import type { HubConfig } from './config.js';
 import { checkInvariants } from './invariants.js';
 import { Hlc, HlcClock } from './hlc.js';
 import { merge } from './merge.js';
-import { isDeleted, SCHEMA_VERSION, type Entity, type SyncDocumentJson } from './model.js';
+import { isDeleted, SCHEMA_VERSION, toIsoUtc, type Entity, type SyncDocumentJson } from './model.js';
 import type { FileStore } from './store.js';
 
 export class SyncRejected extends Error {
@@ -365,18 +642,42 @@ export class SyncRejected extends Error {
 }
 
 export type SyncMode = 'merge' | 'take_hub' | 'take_phone';
-export interface SyncSummary { added: number; updated: number; deleted: number; warnings: number; }
+export interface SyncSummary { added: number; updated: number; deleted: number; removed: number; warnings: number; }
 export interface SyncResult { document: SyncDocumentJson; summary: SyncSummary; warnings: string[]; }
 export interface SyncProgress { deviceId: string; stage: 'received' | 'merging' | 'saving' | 'done' | 'failed'; startedAt: string; finishedAt?: string; summary?: SyncSummary; error?: string; }
+
+/** Tombstones are kept this much longer than the cutoff demands, to absorb device clock skew. */
+export const PURGE_SKEW_MS = 24 * 60 * 60 * 1000;
 
 const ENTITY_LISTS = (d: SyncDocumentJson): Entity[][] => [
   d.taskMaster.tasks, d.taskMaster.mustDoCategories, d.taskMaster.wantToDoCategories,
   d.dailyPlan.plans, d.dailyPlan.slots, d.dailyPlan.assignments,
 ];
 
+const entitySchema = z.object({ id: z.string() }).passthrough();
+const entityList = z.array(entitySchema);
+/** Permissive on unknown fields so a newer client's extra keys survive instead of breaking sync. */
+const documentSchema = z.object({
+  version: z.number(),
+  exportedAt: z.string().optional(),
+  deviceId: z.string().optional(),
+  lastSyncAt: z.string().nullish(),
+  purgedBefore: z.string().nullish(),
+  taskMaster: z.object({
+    tasks: entityList,
+    mustDoCategories: entityList,
+    wantToDoCategories: entityList,
+    settings: z.object({}).passthrough().optional(),
+  }).passthrough(),
+  dailyPlan: z.object({ plans: entityList, slots: entityList, assignments: entityList }).passthrough(),
+}).passthrough();
+
+/** Instant of an ISO string, whatever its offset or precision; NaN when unparsable. */
+const instant = (value: unknown): number => (typeof value === 'string' ? Date.parse(value) : Number.NaN);
+
 /** Implements POST /sync and tombstone purge. Pure of HTTP concerns. */
 export class SyncEngine {
-  lastSync: SyncProgress | null = null;
+  private readonly progress = new Map<string, SyncProgress>();
 
   constructor(
     private readonly store: FileStore,
@@ -385,74 +686,126 @@ export class SyncEngine {
     private readonly now: () => Date = () => new Date(),
   ) {}
 
+  /** The most recently updated device's progress. */
+  get lastSync(): SyncProgress | null {
+    let last: SyncProgress | null = null;
+    for (const p of this.progress.values()) last = p;
+    return last;
+  }
+
+  progressFor(deviceId: string): SyncProgress | undefined {
+    const p = this.progress.get(deviceId);
+    return p ? { ...p } : undefined;
+  }
+
+  private setProgress(deviceId: string, patch: Partial<SyncProgress> & Pick<SyncProgress, 'stage'>): void {
+    const previous = this.progress.get(deviceId);
+    const next: SyncProgress = { deviceId, startedAt: previous?.startedAt ?? this.now().toISOString(), ...previous, ...patch };
+    // Re-insert so Map iteration order tracks recency.
+    this.progress.delete(deviceId);
+    this.progress.set(deviceId, next);
+  }
+
   async sync(deviceId: string, incoming: SyncDocumentJson, mode: SyncMode = 'merge'): Promise<SyncResult> {
     const startedAt = this.now().toISOString();
-    this.lastSync = { deviceId, stage: 'received', startedAt };
+    this.progress.delete(deviceId);
+    this.setProgress(deviceId, { stage: 'received', startedAt, finishedAt: undefined, summary: undefined, error: undefined });
     try {
+      const parsed = documentSchema.safeParse(incoming);
+      if (!parsed.success) {
+        throw new SyncRejected(400, 'invalid_document', `document does not match the sync schema: ${parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`);
+      }
       if (typeof incoming.version !== 'number' || incoming.version < SCHEMA_VERSION) {
         throw new SyncRejected(426, 'upgrade_required', `client schema ${incoming.version} is older than ${SCHEMA_VERSION}; update the app`);
       }
       if (incoming.version > SCHEMA_VERSION) {
         throw new SyncRejected(400, 'unsupported_version', `client schema ${incoming.version} is newer than the hub`);
       }
-      const current = await this.store.read();
-      if (mode === 'merge' && current.purgedBefore && incoming.lastSyncAt && incoming.lastSyncAt < current.purgedBefore) {
-        throw new SyncRejected(409, 'purged_before', `this device last synced at ${incoming.lastSyncAt}, before the hub purged tombstones at ${current.purgedBefore}; choose take_hub or take_phone`);
+      const incomingLastSync = incoming.lastSyncAt ?? null;
+      if (incomingLastSync !== null && Number.isNaN(instant(incomingLastSync))) {
+        throw new SyncRejected(400, 'bad_timestamp', `lastSyncAt ${JSON.stringify(incomingLastSync)} is not a parsable timestamp; send UTC ISO-8601`);
       }
-      this.lastSync.stage = 'merging';
-      for (const list of [...ENTITY_LISTS(current), ...ENTITY_LISTS(incoming)]) for (const e of list) { const h = Hlc.tryParse(e.clock); if (h) this.clock.observe(h); }
 
-      let merged: SyncDocumentJson; let warnings: string[] = [];
-      if (mode === 'take_phone') merged = { ...incoming, deviceId: current.deviceId, lastSyncAt: current.lastSyncAt ?? null, purgedBefore: current.purgedBefore ?? null };
-      else if (mode === 'take_hub') merged = current;
-      else { const r = merge(current, incoming); merged = r.document; warnings = r.warnings; }
-      warnings = [...warnings, ...checkInvariants(merged).map((v) => `${v.code}: ${v.message}`)];
-
-      const summary = summarize(current, merged, warnings.length);
-      this.lastSync.stage = 'saving';
-      const saved = await this.store.update(() => merged);
       const at = this.now().toISOString();
-      await this.config.recordSync(deviceId, at);
-      this.lastSync = { ...this.lastSync, stage: 'done', finishedAt: at, summary };
-      return { document: { ...saved, lastSyncAt: at }, summary, warnings };
+      let summary: SyncSummary = { added: 0, updated: 0, deleted: 0, removed: 0, warnings: 0 };
+      let warnings: string[] = [];
+      this.setProgress(deviceId, { stage: 'merging' });
+      // Guard, merge, check and summarize all run inside the one locked read-modify-write,
+      // so a concurrent sync cannot merge against a document that is already stale.
+      const saved = await this.store.update((current) => {
+        const purgedBefore = instant(current.purgedBefore);
+        if (mode === 'merge' && incomingLastSync !== null && !Number.isNaN(purgedBefore) && instant(incomingLastSync) < purgedBefore) {
+          throw new SyncRejected(409, 'purged_before', `this device last synced at ${incomingLastSync}, before the hub purged tombstones at ${current.purgedBefore}; choose take_hub or take_phone`);
+        }
+        for (const list of [...ENTITY_LISTS(current), ...ENTITY_LISTS(incoming)]) for (const e of list) { const h = Hlc.tryParse(e.clock); if (h) this.clock.observe(h); }
+
+        let merged: SyncDocumentJson;
+        let mergeWarnings: string[] = [];
+        if (mode === 'take_phone') merged = { ...incoming, deviceId: current.deviceId, purgedBefore: current.purgedBefore ?? null };
+        else if (mode === 'take_hub') merged = current;
+        else { const r = merge(current, incoming); merged = r.document; mergeWarnings = r.warnings; }
+        merged.lastSyncAt = at;
+        warnings = [...mergeWarnings, ...checkInvariants(merged).map((v) => `${v.code}: ${v.message}`)];
+        summary = summarize(current, merged, warnings.length);
+        return merged;
+      });
+      this.setProgress(deviceId, { stage: 'saving' });
+
+      try {
+        await this.config.recordSync(deviceId, at);
+      } catch (error) {
+        // The document is already durable; a failed bookkeeping write must not undo it.
+        warnings = [...warnings, `record_sync_failed: ${String((error as Error).message ?? error)}`];
+        summary = { ...summary, warnings: warnings.length };
+      }
+      this.setProgress(deviceId, { stage: 'done', finishedAt: at, summary });
+      return { document: saved, summary, warnings };
     } catch (error) {
-      this.lastSync = { ...this.lastSync, stage: 'failed', finishedAt: this.now().toISOString(), error: String((error as Error).message ?? error) };
+      this.setProgress(deviceId, { stage: 'failed', finishedAt: this.now().toISOString(), error: String((error as Error).message ?? error) });
       throw error;
     }
   }
 
-  /** Physically drops tombstones older than every known device's lastSyncAt. Nothing is purged while any device has never synced or no device is known. */
+  /** Drops tombstones whose device-authored `deletedAt` is PURGE_SKEW_MS before the earliest device lastSyncAt; a clock slower than that margin can still lose a tombstone early. Nothing is purged while a device has never synced or none is known. */
   async purge(): Promise<{ purged: number; purgedBefore: string | null }> {
     const devices = this.config.devices();
     if (devices.length === 0 || devices.some((d) => !d.lastSyncAt)) return { purged: 0, purgedBefore: null };
-    const cutoff = devices.map((d) => d.lastSyncAt!).sort()[0];
+    const earliest = Math.min(...devices.map((d) => instant(d.lastSyncAt)));
+    if (Number.isNaN(earliest)) return { purged: 0, purgedBefore: null };
+    const cutoffMs = earliest - PURGE_SKEW_MS;
+    const cutoff = new Date(cutoffMs).toISOString();
     let purged = 0;
+    let effective = cutoff;
     await this.store.update((doc) => {
-      const keep = (list: Entity[]) => list.filter((e) => { const drop = isDeleted(e) && String(e.deletedAt) < cutoff; if (drop) purged += 1; return !drop; });
+      const keep = (list: Entity[]) => list.filter((e) => { const drop = isDeleted(e) && instant(e.deletedAt) < cutoffMs; if (drop) purged += 1; return !drop; });
       doc.taskMaster.tasks = keep(doc.taskMaster.tasks);
       doc.taskMaster.mustDoCategories = keep(doc.taskMaster.mustDoCategories);
       doc.taskMaster.wantToDoCategories = keep(doc.taskMaster.wantToDoCategories);
       doc.dailyPlan.plans = keep(doc.dailyPlan.plans);
       doc.dailyPlan.slots = keep(doc.dailyPlan.slots);
       doc.dailyPlan.assignments = keep(doc.dailyPlan.assignments);
-      doc.purgedBefore = cutoff;
+      // Monotonic: purgedBefore only ever moves forward.
+      const previous = instant(doc.purgedBefore);
+      effective = !Number.isNaN(previous) && previous > cutoffMs ? toIsoUtc(doc.purgedBefore) ?? cutoff : cutoff;
+      doc.purgedBefore = effective;
       return doc;
     });
-    return { purged, purgedBefore: cutoff };
+    return { purged, purgedBefore: effective };
   }
 }
 
 function summarize(before: SyncDocumentJson, after: SyncDocumentJson, warnings: number): SyncSummary {
   const index = (d: SyncDocumentJson) => new Map(ENTITY_LISTS(d).flat().map((e) => [e.id, e]));
   const a = index(before); const b = index(after);
-  let added = 0, updated = 0, deleted = 0;
+  let added = 0, updated = 0, deleted = 0, removed = 0;
   for (const [id, e] of b) {
     const prev = a.get(id);
     if (!prev) { if (!isDeleted(e)) added += 1; continue; }
     if (isDeleted(e) && !isDeleted(prev)) deleted += 1;
     else if (!isDeleted(e) && e.clock !== prev.clock) updated += 1;
   }
-  return { added, updated, deleted, warnings };
+  for (const id of a.keys()) if (!b.has(id)) removed += 1;
+  return { added, updated, deleted, removed, warnings };
 }
 ```
 
@@ -468,6 +821,22 @@ git add tools/hub/src/sync-engine.ts tools/hub/test/sync-engine.test.ts
 git commit -m "feat(hub): sync engine with purgedBefore guard and tombstone purge / 同期エンジンと墓標掃除"
 ```
 
+#### レビュー反映（バッチ 1）
+
+上のコードブロックはレビュー指摘を反映済みの最終形。指摘と対応は以下（コミット `fix(hub): serialize sync inside the store lock and compare timestamps as instants`）。
+
+- **C1**: `purgedBefore` 判定・HLC observe・マージ・不変条件・集計を 1 回の `store.update((current) => ...)` の中で実行し、同時 `sync` でのデータ喪失を解消（`update` は throw をそのまま伝播するので 409 はそのまま動く）。
+- **C2**: 時刻比較を全て `Date.parse` の瞬間比較に変更（`Z` 無し・`+09:00` 付き・秒精度も正しく判定）。解釈不能な `lastSyncAt` は `SyncRejected(400, 'bad_timestamp')`。`model.ts` の `toIsoUtc` を export して境界で正規化。
+- **I1**: 受信文書を zod スキーマ（`passthrough`＝未知フィールドは許容）で検証し、不正なら `400 invalid_document`。
+- **I2**: `purge()` の `purgedBefore` を単調増加（後退させない）にし、実効値を返す。
+- **I3**: 墓標掃除のカットオフから 24 時間のスキュー余裕（`PURGE_SKEW_MS`）を引く。`deletedAt` は端末が書く値なので、doc コメントで「これ以上遅れた時計は依然として早期削除され得る」と正直に明記。
+- **I4**: `SyncSummary` に `removed`（before に在り after に無い件数）を追加（加算のみ、既存フィールドは維持）。`take_hub` / `take_phone` の削除件数が 0 に見えていた問題を解消。
+- **I5**: `hub.json` の保存を「一意な tmp 名（pid＋乱数）＋ rename」＋インスタンス内 Promise チェーンで直列化。単一ディレクトリ単一インスタンス前提をクラスコメントに明記。
+- **I6**: `hub.json` の `JSON.parse` をガードし、`certPem` / `keyPem` が文字列・`devices` が配列であることを検証。壊れていたら `hub.json.broken-<ts>` に退避してエラー（証明書の黙示再生成をやめ、ピン留め全滅を防ぐ）。`fingerprint` は毎回 `certPem` から再計算。
+- **I7**: 自己署名証明書に SAN（`frelocator-hub.local` / `localhost` / IP `127.0.0.1`）と `basicConstraints` / `keyUsage` を付与。秘密鍵が証明書の公開鍵と対応することを署名検証でテスト。
+- **I8**: 端末トークンとペアリングコードの比較を sha256 ダイジェスト＋`timingSafeEqual` の定数時間比較に変更（早期 return もしない）。
+- **軽微**: 期限切れペアリングコードは誤コード入力でも無条件に破棄／有効コードは誤入力後も使える、進捗は `Map<deviceId, SyncProgress>`（`lastSync` getter＋`progressFor`）、`config.recordSync` の失敗は warning にして同期は成功扱い、`lastSyncAt = at` を同じ `store.update` で永続化。
+
 ---
 
 ### Task 3: LanServer（HTTPS、/pair /sync /health）
@@ -476,6 +845,11 @@ git commit -m "feat(hub): sync engine with purgedBefore guard and tombstone purg
 - Create: `src/lan-server.ts`、`src/net.ts`
 - Modify: `package.json`（`bonjour-service: ^1.3.0`）
 - Test: `test/lan-server.test.ts`
+
+> **NOTE（バッチ 1 レビューの申し送り）:** 以下は本タスクの実装時に必ず入れること。
+> - `/pair` の失敗回数に上限を設ける（例: 10 回失敗でそのコードを無効化）。`HubConfig` 側でコード単位に失敗回数を持つ。
+> - リクエストボディにサイズ上限を設ける（例: 16 MB 超は `413`）。ストリーム受信中に打ち切る。
+> - `SyncRejected` の 400 系（`invalid_document` / `bad_timestamp` / `unsupported_version`）も `{ error: { code, message } }` エンベロープにマップする（現状の 409 / 426 と同様）。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
