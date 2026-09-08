@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -41,5 +41,69 @@ describe('HubConfig', () => {
     await cfg.forgetDevice('android-1');
     expect(cfg.devices()).toEqual([]);
     await expect(cfg.rotateToken('nope')).rejects.toThrow(/unknown device/);
+  });
+
+  it('stores hub.json with owner-only permissions', async () => {
+    await HubConfig.load(dir);
+    expect(statSync(join(dir, 'hub.json')).mode & 0o777).toBe(0o600);
+  });
+
+  it('recomputes the fingerprint instead of trusting the stored one', async () => {
+    const a = await HubConfig.load(dir);
+    const path = join(dir, 'hub.json');
+    const json = JSON.parse(readFileSync(path, 'utf8'));
+    json.fingerprint = 'DEADBEEF';
+    writeFileSync(path, JSON.stringify(json));
+    const b = await HubConfig.load(dir);
+    expect(b.fingerprint).toBe(a.fingerprint);
+  });
+
+  it.each([
+    ['corrupt JSON', 'not json at all'],
+    ['an array root', '[]'],
+    ['a missing certPem', JSON.stringify({ keyPem: 'x', devices: [] })],
+    ['non-array devices', JSON.stringify({ certPem: 'x', keyPem: 'y', devices: {} })],
+  ])('refuses to mint a new identity over %s', async (_label, text) => {
+    const path = join(dir, 'hub.json');
+    writeFileSync(path, text);
+    await expect(HubConfig.load(dir)).rejects.toThrow(/hub identity lost/);
+    const broken = readdirSync(dir).filter((f) => f.startsWith('hub.json.broken-'));
+    expect(broken).toHaveLength(1);
+    expect(readFileSync(join(dir, broken[0]), 'utf8')).toBe(text);
+  });
+
+  it('serializes concurrent recordSync calls into one parseable hub.json', async () => {
+    const cfg = await HubConfig.load(dir, () => 5_000);
+    const ids = Array.from({ length: 12 }, (_, i) => `android-${i}`);
+    for (const id of ids) await cfg.redeemPairingCode(await cfg.issuePairingCode(), id, id);
+    await Promise.all(ids.map((id, i) => cfg.recordSync(id, `2026-09-0${(i % 9) + 1}T00:00:00.000Z`)));
+    const json = JSON.parse(readFileSync(join(dir, 'hub.json'), 'utf8'));
+    expect(json.devices).toHaveLength(ids.length);
+    for (const d of json.devices) expect(d.lastSyncAt).toMatch(/^2026-09-\d\dT/);
+  });
+
+  it('keeps a valid pairing code usable after a wrong attempt', async () => {
+    const cfg = await HubConfig.load(dir, () => 5_000);
+    const code = await cfg.issuePairingCode();
+    await expect(cfg.redeemPairingCode('WRONGWRO', 'android-1', 'Pixel')).rejects.toThrow(/invalid/);
+    expect(cfg.pairingCode()?.code).toBe(code);
+    await expect(cfg.redeemPairingCode(code, 'android-1', 'Pixel')).resolves.toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('clears an expired pairing code even on a wrong attempt', async () => {
+    let now = 1_000_000;
+    const cfg = await HubConfig.load(dir, () => now);
+    await cfg.issuePairingCode();
+    now += 6 * 60 * 1000;
+    await expect(cfg.redeemPairingCode('WRONGWRO', 'android-1', 'Pixel')).rejects.toThrow(/expired/);
+    expect(JSON.parse(readFileSync(join(dir, 'hub.json'), 'utf8')).pairing).toBeNull();
+  });
+
+  it('forgets a device token', async () => {
+    const cfg = await HubConfig.load(dir, () => 5_000);
+    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    expect(cfg.deviceForToken(token)?.deviceId).toBe('android-1');
+    await cfg.forgetDevice('android-1');
+    expect(cfg.deviceForToken(token)).toBeUndefined();
   });
 });

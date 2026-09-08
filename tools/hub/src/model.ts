@@ -71,7 +71,8 @@ export interface SyncMeta {
   extra: Record<string, unknown>;
 }
 
-function toIsoUtc(value: unknown): string | null {
+/** Any parsable timestamp string to UTC ISO-8601 with `Z`; null when it is not one. */
+export function toIsoUtc(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const ms = Date.parse(value);
   return Number.isNaN(ms) ? null : new Date(ms).toISOString();
