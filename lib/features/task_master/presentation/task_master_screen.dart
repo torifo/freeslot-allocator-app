@@ -481,7 +481,7 @@ class _TaskSectionCard extends StatelessWidget {
                           '優先度 ${task.priority}',
                           if (task.estimatedMinutes > 0)
                             '${task.estimatedMinutes}分',
-                          DateFormat('yyyy/MM/dd HH:mm').format(task.updatedAt),
+                          DateFormat('yyyy/MM/dd HH:mm').format(task.updatedAt.toLocal()),
                         ].join(' / '),
                       ),
                       isThreeLine: task.memo.isNotEmpty,

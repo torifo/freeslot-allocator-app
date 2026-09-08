@@ -1,69 +1,120 @@
 import 'dart:convert';
 import 'dart:math';
 
+import '../../../core/hlc.dart';
+import '../../../core/sync_meta.dart';
+import '../../../core/tombstone.dart';
 import '../../task_master/domain/task_models.dart';
+
+export '../../../core/tombstone.dart' show Tombstone;
 
 DateTime dateOnly(DateTime value) =>
     DateTime(value.year, value.month, value.day);
 
+/// `YYYY-MM-DD` for the calendar day a [DailyPlan] belongs to. The day is a
+/// calendar label, not an instant, so it is never converted to UTC.
+String formatDateKey(DateTime value) {
+  final d = dateOnly(value);
+  return '${d.year.toString().padLeft(4, '0')}-'
+      '${d.month.toString().padLeft(2, '0')}-'
+      '${d.day.toString().padLeft(2, '0')}';
+}
+
+/// Accepts both `YYYY-MM-DD` (v2) and a full ISO datetime (v1).
+DateTime parseDateKey(String value) {
+  final parts = value.split('T').first.split('-');
+  return DateTime(
+    int.parse(parts[0]),
+    int.parse(parts[1]),
+    int.parse(parts[2]),
+  );
+}
+
 class DailyPlan {
-  const DailyPlan({
+  DailyPlan({
     required this.id,
     required this.date,
     required this.createdAt,
     required this.updatedAt,
-  });
+    SyncMeta? meta,
+  }) : meta = meta ?? SyncMeta.migratedDefault;
+
+  static const Set<String> jsonKeys = <String>{'id', 'date', 'createdAt'};
 
   final String id;
   final DateTime date;
   final DateTime createdAt;
   final DateTime updatedAt;
+  final SyncMeta meta;
 
   DailyPlan copyWith({
     String? id,
     DateTime? date,
     DateTime? createdAt,
     DateTime? updatedAt,
+    SyncMeta? meta,
   }) {
     return DailyPlan(
       id: id ?? this.id,
       date: date ?? this.date,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      meta: meta ?? this.meta,
     );
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
     'id': id,
-    'date': date.toIso8601String(),
-    'createdAt': createdAt.toIso8601String(),
-    'updatedAt': updatedAt.toIso8601String(),
+    'date': formatDateKey(date),
+    'createdAt': createdAt.toUtc().toIso8601String(),
+    ...meta.toJson(),
+    'updatedAt': updatedAt.toUtc().toIso8601String(),
   };
 
   factory DailyPlan.fromJson(Map<String, dynamic> json) {
+    final meta = SyncMeta.fromJson(json, knownKeys: jsonKeys);
+    final updatedAt = DateTime.parse(json['updatedAt'] as String).toUtc();
     return DailyPlan(
       id: json['id'] as String,
-      date: dateOnly(DateTime.parse(json['date'] as String)),
-      createdAt: DateTime.parse(json['createdAt'] as String),
-      updatedAt: DateTime.parse(json['updatedAt'] as String),
+      date: parseDateKey(json['date'] as String),
+      createdAt: DateTime.parse(json['createdAt'] as String).toUtc(),
+      updatedAt: updatedAt,
+      meta: meta.migrated
+          ? SyncMeta(
+              clock: Hlc.migrated,
+              updatedAt: updatedAt,
+              migrated: true,
+              extra: meta.extra,
+            )
+          : meta,
     );
   }
 }
 
 class FreeTimeSlot {
-  const FreeTimeSlot({
+  FreeTimeSlot({
     required this.id,
     required this.dailyPlanId,
     required this.startAt,
     required this.endAt,
     this.label = '',
-  });
+    SyncMeta? meta,
+  }) : meta = meta ?? SyncMeta.migratedDefault;
+
+  static const Set<String> jsonKeys = <String>{
+    'id',
+    'dailyPlanId',
+    'startAt',
+    'endAt',
+    'label',
+  };
 
   final String id;
   final String dailyPlanId;
   final DateTime startAt;
   final DateTime endAt;
   final String label;
+  final SyncMeta meta;
 
   int get durationMinutes => max(0, endAt.difference(startAt).inMinutes);
 
@@ -73,6 +124,7 @@ class FreeTimeSlot {
     DateTime? startAt,
     DateTime? endAt,
     String? label,
+    SyncMeta? meta,
   }) {
     return FreeTimeSlot(
       id: id ?? this.id,
@@ -80,30 +132,33 @@ class FreeTimeSlot {
       startAt: startAt ?? this.startAt,
       endAt: endAt ?? this.endAt,
       label: label ?? this.label,
+      meta: meta ?? this.meta,
     );
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
     'id': id,
     'dailyPlanId': dailyPlanId,
-    'startAt': startAt.toIso8601String(),
-    'endAt': endAt.toIso8601String(),
+    'startAt': startAt.toUtc().toIso8601String(),
+    'endAt': endAt.toUtc().toIso8601String(),
     'label': label,
+    ...meta.toJson(),
   };
 
   factory FreeTimeSlot.fromJson(Map<String, dynamic> json) {
     return FreeTimeSlot(
       id: json['id'] as String,
       dailyPlanId: json['dailyPlanId'] as String,
-      startAt: DateTime.parse(json['startAt'] as String),
-      endAt: DateTime.parse(json['endAt'] as String),
+      startAt: DateTime.parse(json['startAt'] as String).toLocal(),
+      endAt: DateTime.parse(json['endAt'] as String).toLocal(),
       label: json['label'] as String? ?? '',
+      meta: SyncMeta.fromJson(json, knownKeys: jsonKeys),
     );
   }
 }
 
 class SlotTaskAssignment {
-  const SlotTaskAssignment({
+  SlotTaskAssignment({
     required this.id,
     required this.dailyPlanId,
     required this.slotId,
@@ -116,7 +171,23 @@ class SlotTaskAssignment {
     this.categoryId,
     this.categoryName,
     this.memo = '',
-  });
+    SyncMeta? meta,
+  }) : meta = meta ?? SyncMeta.migratedDefault;
+
+  static const Set<String> jsonKeys = <String>{
+    'id',
+    'dailyPlanId',
+    'slotId',
+    'taskId',
+    'taskTitle',
+    'taskKind',
+    'startAt',
+    'endAt',
+    'sortOrder',
+    'categoryId',
+    'categoryName',
+    'memo',
+  };
 
   final String id;
   final String dailyPlanId;
@@ -130,6 +201,7 @@ class SlotTaskAssignment {
   final String? categoryId;
   final String? categoryName;
   final String memo;
+  final SyncMeta meta;
 
   int get durationMinutes => max(0, endAt.difference(startAt).inMinutes);
 
@@ -148,6 +220,7 @@ class SlotTaskAssignment {
     String? categoryName,
     bool clearCategoryName = false,
     String? memo,
+    SyncMeta? meta,
   }) {
     return SlotTaskAssignment(
       id: id ?? this.id,
@@ -164,6 +237,7 @@ class SlotTaskAssignment {
           ? null
           : (categoryName ?? this.categoryName),
       memo: memo ?? this.memo,
+      meta: meta ?? this.meta,
     );
   }
 
@@ -174,12 +248,13 @@ class SlotTaskAssignment {
     'taskId': taskId,
     'taskTitle': taskTitle,
     'taskKind': taskKind.storageKey,
-    'startAt': startAt.toIso8601String(),
-    'endAt': endAt.toIso8601String(),
+    'startAt': startAt.toUtc().toIso8601String(),
+    'endAt': endAt.toUtc().toIso8601String(),
     'sortOrder': sortOrder,
     'categoryId': categoryId,
     'categoryName': categoryName,
     'memo': memo,
+    ...meta.toJson(),
   };
 
   factory SlotTaskAssignment.fromJson(Map<String, dynamic> json) {
@@ -190,38 +265,15 @@ class SlotTaskAssignment {
       taskId: json['taskId'] as String,
       taskTitle: json['taskTitle'] as String,
       taskKind: TaskKindX.fromStorageKey(json['taskKind'] as String),
-      startAt: DateTime.parse(json['startAt'] as String),
-      endAt: DateTime.parse(json['endAt'] as String),
+      startAt: DateTime.parse(json['startAt'] as String).toLocal(),
+      endAt: DateTime.parse(json['endAt'] as String).toLocal(),
       sortOrder: json['sortOrder'] as int? ?? 0,
       categoryId: json['categoryId'] as String?,
       categoryName: json['categoryName'] as String?,
       memo: json['memo'] as String? ?? '',
+      meta: SyncMeta.fromJson(json, knownKeys: jsonKeys),
     );
   }
-}
-
-/// Decodes a JSON list, skipping entries that cannot be parsed instead of
-/// failing the whole load. A single corrupt record must not make the app
-/// unusable at startup.
-List<T> _decodeList<T>(
-  dynamic raw,
-  T Function(Map<String, dynamic> json) parse,
-) {
-  if (raw is! List) {
-    return <T>[];
-  }
-  final items = <T>[];
-  for (final dynamic entry in raw) {
-    if (entry is! Map<String, dynamic>) {
-      continue;
-    }
-    try {
-      items.add(parse(entry));
-    } catch (_) {
-      continue;
-    }
-  }
-  return items;
 }
 
 class DailyPlanStateData {
@@ -229,13 +281,22 @@ class DailyPlanStateData {
     required List<DailyPlan> plans,
     required List<FreeTimeSlot> slots,
     required List<SlotTaskAssignment> assignments,
+    List<Tombstone> deletedPlans = const <Tombstone>[],
+    List<Tombstone> deletedSlots = const <Tombstone>[],
+    List<Tombstone> deletedAssignments = const <Tombstone>[],
   }) : plans = List<DailyPlan>.unmodifiable(plans),
        slots = List<FreeTimeSlot>.unmodifiable(slots),
-       assignments = List<SlotTaskAssignment>.unmodifiable(assignments);
+       assignments = List<SlotTaskAssignment>.unmodifiable(assignments),
+       deletedPlans = List<Tombstone>.unmodifiable(deletedPlans),
+       deletedSlots = List<Tombstone>.unmodifiable(deletedSlots),
+       deletedAssignments = List<Tombstone>.unmodifiable(deletedAssignments);
 
   final List<DailyPlan> plans;
   final List<FreeTimeSlot> slots;
   final List<SlotTaskAssignment> assignments;
+  final List<Tombstone> deletedPlans;
+  final List<Tombstone> deletedSlots;
+  final List<Tombstone> deletedAssignments;
 
   factory DailyPlanStateData.initial() {
     return DailyPlanStateData(
@@ -249,11 +310,17 @@ class DailyPlanStateData {
     List<DailyPlan>? plans,
     List<FreeTimeSlot>? slots,
     List<SlotTaskAssignment>? assignments,
+    List<Tombstone>? deletedPlans,
+    List<Tombstone>? deletedSlots,
+    List<Tombstone>? deletedAssignments,
   }) {
     return DailyPlanStateData(
       plans: plans ?? this.plans,
       slots: slots ?? this.slots,
       assignments: assignments ?? this.assignments,
+      deletedPlans: deletedPlans ?? this.deletedPlans,
+      deletedSlots: deletedSlots ?? this.deletedSlots,
+      deletedAssignments: deletedAssignments ?? this.deletedAssignments,
     );
   }
 
@@ -281,21 +348,40 @@ class DailyPlanStateData {
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
-    'plans': plans.map((item) => item.toJson()).toList(),
-    'slots': slots.map((item) => item.toJson()).toList(),
-    'assignments': assignments.map((item) => item.toJson()).toList(),
+    'plans': <Map<String, dynamic>>[
+      ...plans.map((item) => item.toJson()),
+      ...deletedPlans.map((item) => item.toJson()),
+    ],
+    'slots': <Map<String, dynamic>>[
+      ...slots.map((item) => item.toJson()),
+      ...deletedSlots.map((item) => item.toJson()),
+    ],
+    'assignments': <Map<String, dynamic>>[
+      ...assignments.map((item) => item.toJson()),
+      ...deletedAssignments.map((item) => item.toJson()),
+    ],
   };
 
   String encode() => jsonEncode(toJson());
 
-  factory DailyPlanStateData.fromJson(Map<String, dynamic> json) {
+  factory DailyPlanStateData.fromJson(
+    Map<String, dynamic> json, {
+    bool strict = false,
+  }) {
+    final plans = splitDeleted(json['plans'], strict: strict);
+    final slots = splitDeleted(json['slots'], strict: strict);
+    final assignments = splitDeleted(json['assignments'], strict: strict);
     return DailyPlanStateData(
-      plans: _decodeList<DailyPlan>(json['plans'], DailyPlan.fromJson),
-      slots: _decodeList<FreeTimeSlot>(json['slots'], FreeTimeSlot.fromJson),
-      assignments: _decodeList<SlotTaskAssignment>(
-        json['assignments'],
+      plans: parseLive(plans.live, DailyPlan.fromJson, strict: strict),
+      slots: parseLive(slots.live, FreeTimeSlot.fromJson, strict: strict),
+      assignments: parseLive(
+        assignments.live,
         SlotTaskAssignment.fromJson,
+        strict: strict,
       ),
+      deletedPlans: plans.tombstones,
+      deletedSlots: slots.tombstones,
+      deletedAssignments: assignments.tombstones,
     );
   }
 

@@ -5,11 +5,11 @@ import 'package:frelocator/features/task_master/domain/task_models.dart';
 void main() {
   group('mergeCategories', () {
     final mustDoCategories = <TaskCategory>[
-      const TaskCategory(id: 'm1', name: '仕事'),
-      const TaskCategory(id: 'm2', name: '家事'),
+      TaskCategory(id: 'm1', name: '仕事'),
+      TaskCategory(id: 'm2', name: '家事'),
     ];
     final wantToDoCategories = <TaskCategory>[
-      const TaskCategory(id: 'w1', name: '趣味'),
+      TaskCategory(id: 'w1', name: '趣味'),
     ];
 
     test('keeps shorter list', () {
@@ -66,8 +66,8 @@ void main() {
   test('duplicate category names are rejected', () {
     expect(
       () => validateCategoryNameUniqueness(
-        category: const TaskCategory(id: 'want-hobby-2', name: '趣味'),
-        categories: const <TaskCategory>[
+        category: TaskCategory(id: 'want-hobby-2', name: '趣味'),
+        categories: <TaskCategory>[
           TaskCategory(id: 'want-hobby', name: '趣味'),
         ],
       ),

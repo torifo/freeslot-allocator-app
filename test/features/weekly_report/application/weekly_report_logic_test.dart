@@ -125,7 +125,7 @@ void main() {
         ),
       ];
       final categories = <TaskCategory>[
-        const TaskCategory(id: 'want-hobby', name: '趣味(新)'),
+        TaskCategory(id: 'want-hobby', name: '趣味(新)'),
       ];
 
       final totals = categoryTotals(

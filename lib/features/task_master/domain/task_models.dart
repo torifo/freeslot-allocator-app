@@ -1,5 +1,11 @@
 import 'dart:convert';
 
+import '../../../core/hlc.dart';
+import '../../../core/sync_meta.dart';
+import '../../../core/tombstone.dart';
+
+export '../../../core/tombstone.dart' show Tombstone;
+
 enum TaskKind { mustDo, wantToDo }
 
 extension TaskKindX on TaskKind {
@@ -30,24 +36,40 @@ extension TaskKindX on TaskKind {
 }
 
 class TaskCategory {
-  const TaskCategory({required this.id, required this.name});
+  TaskCategory({required this.id, required this.name, SyncMeta? meta})
+    : meta = meta ?? SyncMeta.migratedDefault;
+
+  static const Set<String> jsonKeys = <String>{'id', 'name'};
 
   final String id;
   final String name;
+  final SyncMeta meta;
 
-  TaskCategory copyWith({String? id, String? name}) {
-    return TaskCategory(id: id ?? this.id, name: name ?? this.name);
+  TaskCategory copyWith({String? id, String? name, SyncMeta? meta}) {
+    return TaskCategory(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      meta: meta ?? this.meta,
+    );
   }
 
-  Map<String, dynamic> toJson() => <String, dynamic>{'id': id, 'name': name};
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'id': id,
+    'name': name,
+    ...meta.toJson(),
+  };
 
   factory TaskCategory.fromJson(Map<String, dynamic> json) {
-    return TaskCategory(id: json['id'] as String, name: json['name'] as String);
+    return TaskCategory(
+      id: json['id'] as String,
+      name: json['name'] as String,
+      meta: SyncMeta.fromJson(json, knownKeys: jsonKeys),
+    );
   }
 }
 
 class TaskMaster {
-  const TaskMaster({
+  TaskMaster({
     required this.id,
     required this.title,
     required this.kind,
@@ -57,7 +79,19 @@ class TaskMaster {
     this.memo = '',
     this.categoryId,
     this.estimatedMinutes = 0,
-  });
+    SyncMeta? meta,
+  }) : meta = meta ?? SyncMeta.migratedDefault;
+
+  static const Set<String> jsonKeys = <String>{
+    'id',
+    'title',
+    'kind',
+    'priority',
+    'createdAt',
+    'memo',
+    'categoryId',
+    'estimatedMinutes',
+  };
 
   final String id;
   final String title;
@@ -68,6 +102,7 @@ class TaskMaster {
   final String memo;
   final String? categoryId;
   final int estimatedMinutes;
+  final SyncMeta meta;
 
   TaskMaster copyWith({
     String? id,
@@ -80,6 +115,7 @@ class TaskMaster {
     String? categoryId,
     bool clearCategory = false,
     int? estimatedMinutes,
+    SyncMeta? meta,
   }) {
     return TaskMaster(
       id: id ?? this.id,
@@ -91,6 +127,7 @@ class TaskMaster {
       memo: memo ?? this.memo,
       categoryId: clearCategory ? null : (categoryId ?? this.categoryId),
       estimatedMinutes: estimatedMinutes ?? this.estimatedMinutes,
+      meta: meta ?? this.meta,
     );
   }
 
@@ -99,24 +136,36 @@ class TaskMaster {
     'title': title,
     'kind': kind.storageKey,
     'priority': priority,
-    'createdAt': createdAt.toIso8601String(),
-    'updatedAt': updatedAt.toIso8601String(),
+    'createdAt': createdAt.toUtc().toIso8601String(),
     'memo': memo,
     'categoryId': categoryId,
     'estimatedMinutes': estimatedMinutes,
+    ...meta.toJson(),
+    // updatedAt は meta 側の値を正とし、表示用フィールドと二重管理しない。
+    'updatedAt': updatedAt.toUtc().toIso8601String(),
   };
 
   factory TaskMaster.fromJson(Map<String, dynamic> json) {
+    final meta = SyncMeta.fromJson(json, knownKeys: jsonKeys);
+    final updatedAt = DateTime.parse(json['updatedAt'] as String).toUtc();
     return TaskMaster(
       id: json['id'] as String,
       title: json['title'] as String,
       kind: TaskKindX.fromStorageKey(json['kind'] as String),
       priority: json['priority'] as int? ?? 3,
-      createdAt: DateTime.parse(json['createdAt'] as String),
-      updatedAt: DateTime.parse(json['updatedAt'] as String),
+      createdAt: DateTime.parse(json['createdAt'] as String).toUtc(),
+      updatedAt: updatedAt,
       memo: json['memo'] as String? ?? '',
       categoryId: json['categoryId'] as String?,
       estimatedMinutes: json['estimatedMinutes'] as int? ?? 0,
+      meta: meta.migrated
+          ? SyncMeta(
+              clock: Hlc.migrated,
+              updatedAt: updatedAt,
+              migrated: true,
+              extra: meta.extra,
+            )
+          : meta,
     );
   }
 }
@@ -138,54 +187,46 @@ extension CategoryMergeStrategyX on CategoryMergeStrategy {
   }
 }
 
-/// Decodes a JSON list, skipping entries that cannot be parsed instead of
-/// failing the whole load. A single corrupt record must not make the app
-/// unusable at startup.
-List<T> _decodeList<T>(
-  dynamic raw,
-  T Function(Map<String, dynamic> json) parse,
-) {
-  if (raw is! List) {
-    return <T>[];
-  }
-  final items = <T>[];
-  for (final dynamic entry in raw) {
-    if (entry is! Map<String, dynamic>) {
-      continue;
-    }
-    try {
-      items.add(parse(entry));
-    } catch (_) {
-      continue;
-    }
-  }
-  return items;
-}
-
 class TaskMasterStateData {
   TaskMasterStateData({
     required List<TaskMaster> tasks,
     required List<TaskCategory> mustDoCategories,
     required List<TaskCategory> wantToDoCategories,
     required this.shareCategories,
+    SyncMeta? settingsMeta,
+    List<Tombstone> deletedTasks = const <Tombstone>[],
+    List<Tombstone> deletedMustDoCategories = const <Tombstone>[],
+    List<Tombstone> deletedWantToDoCategories = const <Tombstone>[],
   }) : tasks = List<TaskMaster>.unmodifiable(tasks),
        mustDoCategories = List<TaskCategory>.unmodifiable(mustDoCategories),
-       wantToDoCategories = List<TaskCategory>.unmodifiable(wantToDoCategories);
+       wantToDoCategories = List<TaskCategory>.unmodifiable(wantToDoCategories),
+       settingsMeta = settingsMeta ?? SyncMeta.migratedDefault,
+       deletedTasks = List<Tombstone>.unmodifiable(deletedTasks),
+       deletedMustDoCategories = List<Tombstone>.unmodifiable(
+         deletedMustDoCategories,
+       ),
+       deletedWantToDoCategories = List<Tombstone>.unmodifiable(
+         deletedWantToDoCategories,
+       );
 
   final List<TaskMaster> tasks;
   final List<TaskCategory> mustDoCategories;
   final List<TaskCategory> wantToDoCategories;
   final bool shareCategories;
+  final SyncMeta settingsMeta;
+  final List<Tombstone> deletedTasks;
+  final List<Tombstone> deletedMustDoCategories;
+  final List<Tombstone> deletedWantToDoCategories;
 
   factory TaskMasterStateData.initial() {
     return TaskMasterStateData(
       tasks: const <TaskMaster>[],
-      mustDoCategories: const <TaskCategory>[
+      mustDoCategories: <TaskCategory>[
         TaskCategory(id: 'must-work', name: '仕事'),
         TaskCategory(id: 'must-housework', name: '家事'),
         TaskCategory(id: 'must-admin', name: '雑務'),
       ],
-      wantToDoCategories: const <TaskCategory>[
+      wantToDoCategories: <TaskCategory>[
         TaskCategory(id: 'want-hobby', name: '趣味'),
         TaskCategory(id: 'want-learning', name: '学習'),
         TaskCategory(id: 'want-health', name: '健康'),
@@ -199,12 +240,22 @@ class TaskMasterStateData {
     List<TaskCategory>? mustDoCategories,
     List<TaskCategory>? wantToDoCategories,
     bool? shareCategories,
+    SyncMeta? settingsMeta,
+    List<Tombstone>? deletedTasks,
+    List<Tombstone>? deletedMustDoCategories,
+    List<Tombstone>? deletedWantToDoCategories,
   }) {
     return TaskMasterStateData(
       tasks: tasks ?? this.tasks,
       mustDoCategories: mustDoCategories ?? this.mustDoCategories,
       wantToDoCategories: wantToDoCategories ?? this.wantToDoCategories,
       shareCategories: shareCategories ?? this.shareCategories,
+      settingsMeta: settingsMeta ?? this.settingsMeta,
+      deletedTasks: deletedTasks ?? this.deletedTasks,
+      deletedMustDoCategories:
+          deletedMustDoCategories ?? this.deletedMustDoCategories,
+      deletedWantToDoCategories:
+          deletedWantToDoCategories ?? this.deletedWantToDoCategories,
     );
   }
 
@@ -213,30 +264,64 @@ class TaskMasterStateData {
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
-    'tasks': tasks.map((task) => task.toJson()).toList(),
-    'mustDoCategories': mustDoCategories
-        .map((category) => category.toJson())
-        .toList(),
-    'wantToDoCategories': wantToDoCategories
-        .map((category) => category.toJson())
-        .toList(),
-    'shareCategories': shareCategories,
+    'tasks': <Map<String, dynamic>>[
+      ...tasks.map((task) => task.toJson()),
+      ...deletedTasks.map((item) => item.toJson()),
+    ],
+    'mustDoCategories': <Map<String, dynamic>>[
+      ...mustDoCategories.map((category) => category.toJson()),
+      ...deletedMustDoCategories.map((item) => item.toJson()),
+    ],
+    'wantToDoCategories': <Map<String, dynamic>>[
+      ...wantToDoCategories.map((category) => category.toJson()),
+      ...deletedWantToDoCategories.map((item) => item.toJson()),
+    ],
+    'settings': <String, dynamic>{
+      'shareCategories': shareCategories,
+      ...settingsMeta.toJson(),
+    },
   };
 
   String encode() => jsonEncode(toJson());
 
-  factory TaskMasterStateData.fromJson(Map<String, dynamic> json) {
+  factory TaskMasterStateData.fromJson(
+    Map<String, dynamic> json, {
+    bool strict = false,
+  }) {
+    final tasks = splitDeleted(json['tasks'], strict: strict);
+    final mustDo = splitDeleted(json['mustDoCategories'], strict: strict);
+    final wantToDo = splitDeleted(json['wantToDoCategories'], strict: strict);
+    final settings = json['settings'];
+    final bool share;
+    final SyncMeta settingsMeta;
+    if (settings is Map<String, dynamic>) {
+      share = settings['shareCategories'] as bool? ?? false;
+      settingsMeta = SyncMeta.fromJson(
+        settings,
+        knownKeys: const <String>{'shareCategories'},
+      );
+    } else {
+      // v1 payload: the flag lived at the top level and carried no meta.
+      share = json['shareCategories'] as bool? ?? false;
+      settingsMeta = SyncMeta.migratedDefault;
+    }
     return TaskMasterStateData(
-      tasks: _decodeList<TaskMaster>(json['tasks'], TaskMaster.fromJson),
-      mustDoCategories: _decodeList<TaskCategory>(
-        json['mustDoCategories'],
+      tasks: parseLive(tasks.live, TaskMaster.fromJson, strict: strict),
+      mustDoCategories: parseLive(
+        mustDo.live,
         TaskCategory.fromJson,
+        strict: strict,
       ),
-      wantToDoCategories: _decodeList<TaskCategory>(
-        json['wantToDoCategories'],
+      wantToDoCategories: parseLive(
+        wantToDo.live,
         TaskCategory.fromJson,
+        strict: strict,
       ),
-      shareCategories: json['shareCategories'] as bool? ?? false,
+      shareCategories: share,
+      settingsMeta: settingsMeta,
+      deletedTasks: tasks.tombstones,
+      deletedMustDoCategories: mustDo.tombstones,
+      deletedWantToDoCategories: wantToDo.tombstones,
     );
   }
 

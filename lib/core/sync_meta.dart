@@ -22,6 +22,11 @@ class SyncMeta {
 
   bool get isDeleted => deletedAt != null;
 
+  /// Meta for records created by code that has not been told a clock yet
+  /// (legacy constructors, v1 payloads). Deterministic on every device.
+  static SyncMeta get migratedDefault =>
+      SyncMeta(clock: Hlc.migrated, updatedAt: epoch, migrated: true);
+
   factory SyncMeta.stamp(Hlc clock, DateTime now) =>
       SyncMeta(clock: clock, updatedAt: now.toUtc());
 
