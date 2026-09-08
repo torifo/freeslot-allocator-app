@@ -452,6 +452,9 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
               ? 'ポートは 1〜65535 の数字です'
               : null;
           return AlertDialog(
+            // Scrollable so the keyboard pushes the fields rather than hiding
+            // the title behind itself (M-16).
+            scrollable: true,
             title: const Text('接続先'),
             content: Column(
               mainAxisSize: MainAxisSize.min,
