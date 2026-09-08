@@ -30,7 +30,7 @@ FRELOCATOR の macOS 版と同じ `data.json` を編集する MCP サーバー�
 
 ### ペアリング
 
-1. `sync_status` ツールが返す `lan.pairingPage`（既定 `http://127.0.0.1:47821/pair`）を PC のブラウザで開く（127.0.0.1 限定。LAN からはアクセスできない）。
+1. `sync_status` ツールが返す `lan.pairingPage`（`http://127.0.0.1:47821/<秘密のパス>/pair`）を PC のブラウザで開く（127.0.0.1 限定。LAN からはアクセスできない）。パスの先頭にはハブ起動ごとに生成されるランダムな秘密文字列が入るので、URL は毎回 `sync_status` から取り直すこと。
 2. ページに表示される QR をスマホの FRELOCATOR アプリで読み取る。コードは 5 分・1 回限りで、失敗が 10 回続くとそのコードはロックされる（ページを再読み込みすれば新しいコードが出る）。
 3. 成功するとスマホは端末別の長期トークンを受け取り、以後 `Authorization: Bearer <token>` で `/sync` `/health` を呼ぶ。
 
@@ -46,18 +46,20 @@ FRELOCATOR の macOS 版と同じ `data.json` を編集する MCP サーバー�
 
 ### QR でスマホにデータを送る（PC → スマホ）
 
-- `sync_status` の `lan.qrPage`（既定 `http://127.0.0.1:47821/qr`）を開くと、`data.json` 全体を gzip→base45 化した QR コマ（`FRL2:<hash>:<index>:<total>:<crc32>:<chunk>` 形式）を繰り返し表示する。スマホの「QR で受け取る」でカメラを向け続けると全コマを回収して復元・マージする。
+- `sync_status` の `lan.qrPage`（`http://127.0.0.1:47821/<秘密のパス>/qr`）を開くと、`data.json` 全体を gzip→base45 化した QR コマ（`FRL2:<hash>:<index>:<total>:<crc32>:<chunk>` 形式）を繰り返し表示する。スマホの「QR で受け取る」でカメラを向け続けると全コマを回収して復元・マージする。
 - コマ数が 80 を超えると画面に警告が出て LAN 同期を勧める。200 コマを超えるデータは QR 表示自体を拒否する（413）ので、その場合は LAN 同期か後述のファイル取り込みを使う。
 
 ### ファイル取り込み（スマホ → PC）
 
 - スマホの「PC へ書き出す」で作った v2 JSON ファイルを、`import_file(path)` ツールで取り込む。中身は `/sync?mode=merge` と同じマージ規則で `data.json` に反映される。
-- 送ってきた `deviceId` が未登録の端末なら自動でペアリング登録される（**その時点で画面に表示中のペアリングコードが消費される**ので、QR ペアリングの途中では使わないこと）。
+- 読めるのは **データディレクトリ（`FRELOCATOR_DATA_DIR`）・`~/Downloads`・`FRELOCATOR_IMPORT_DIRS`（`:` 区切り）配下のファイルだけ**。それ以外は `path not allowed: <解決後のパス>` で拒否する。先頭の `~` はホームディレクトリに展開する。
+- サイズ上限は `/sync` と同じ 20 MB。超えるファイルは開かずに拒否する。
+- 送ってきた `deviceId` が未登録の端末なら、**マージが成功した後に**登録される（purge のカットオフ計算に入れるため）。**画面に表示中のペアリングコードは消費しない**ので、QR ペアリングの途中でも使ってよい。取り込みが失敗した場合は端末レコードも残らない。
 
 ### 端末管理
 
 - `forget_device(deviceId)`: 端末を `hub.json` の一覧から外す。以後その端末はトークンが無効になり、`purge_tombstones` のカットオフ計算からも除外される。
-- `rotate_token(deviceId)`: その端末のトークンを失効させ新しいものを発行する。スマホは再ペアリングが必要。
+- `rotate_token(deviceId)`: その端末のトークンを失効させ新しいものを発行する。**新しいトークンは応答に含めない**（MCP の応答はログやチャットに残るため）。スマホは新しいペアリング QR を読み直して再ペアリングする。
 - `purge_tombstones()`: 墓標（削除済みレコード）を物理削除する。カットオフは「ペアリング済み端末全員の `lastSyncAt` の最小値 − 24 時間」。1 台でも一度も同期していない端末があれば何も削除しない。
 
 ### `sync_status`
@@ -65,24 +67,29 @@ FRELOCATOR の macOS 版と同じ `data.json` を編集する MCP サーバー�
 主なフィールド:
 
 - `dataFile` / `modifiedAt` / `warning` / `purgedBefore`: `data.json` 自体の情報。
-- `lan`: `{ listening, url, addresses, port, pairingPage, qrPage }`。LAN が無効なら `null`。
+- `lan`: `{ listening, disabled, url, addresses, port, pairingPage, qrPage }` のオブジェクト。`FRELOCATOR_LAN=off` のときは `listening: false` / `disabled: true` で、`url` `port` `pairingPage` `qrPage` は `null`。`null` になるのは `hub.json` の読み込みに失敗した（`configError` 付き）ときだけ。
 - `fingerprint`: 証明書の SHA-256 フィンガープリント。
 - `pairing`: `{ state: 'none'|'issued'|'expired'|'locked', expiresAt, failures }`。コードそのものは含まれない。
 - `devices`: ペアリング済み端末（トークンは含まない）と、各端末の直近同期の進捗（`progress`）。
 - `lastSync`: 直近に処理した同期の段階・結果。
-- `lanError` / `configError`: LAN 起動や `hub.json` 読み込みが失敗した理由。
+- `lanError` / `configError`: LAN 起動や `hub.json` 読み込みが失敗した理由。`FRELOCATOR_LAN=off` のときは `lanError` に `LAN disabled by FRELOCATOR_LAN=off` が入る（失敗ではなく設定である目印）。
 
 ### 環境変数
 
 - `FRELOCATOR_LAN=off` — LAN サーバーとローカルページを起動しない（ローカルの MCP ツールは通常どおり動く）。
 - `FRELOCATOR_LAN_PORT`（既定 `47820`）/ `FRELOCATOR_LOCAL_PORT`（既定 `47821`）。
 - `FRELOCATOR_MDNS=off` — mDNS（`_frelocator._tcp`）広告だけ止める。LAN サーバー自体は動く。
+- `FRELOCATOR_IMPORT_DIRS` — `import_file` が読んでよいディレクトリの追加分（`:` 区切り）。既定はデータディレクトリと `~/Downloads`。
+- ポート番号が 0〜65535 の整数でない場合は stderr に警告を出して既定値に戻す。
 
 ### セキュリティ
 
 - 通信は自己署名 TLS。スマホはペアリング時に受け取った証明書フィンガープリントだけを信頼する（ホスト名検証はしない = ピン留め）。
 - `/pair` 以外は端末別トークンによる Bearer 認証必須。トークンは `hub.json`（同ディレクトリ、パーミッション 600）にのみ保存され、`sync_status` など MCP 応答には絶対に出さない。
 - ペアリングコードの誤入力は 1 コードあたり 10 回まで。超えるとそのコードはロックされ、新しいコードを発行し直す必要がある。
+- ローカルページ（`/pair` `/qr`）は **URL を知っているプロセスをすべて信頼する**。同じ Mac の他プロセスや他ユーザーから守るため、全ルートはハブ起動ごとのランダムな秘密パス（16 バイト hex）配下に置かれ、その URL は `sync_status` の応答でしか手に入らない。秘密パスの付いていないリクエストは 404。
+- 加えて、ブラウザからの横取りを防ぐガードを掛けている: `GET` / `HEAD` 以外は 405、`Host` が `127.0.0.1:<port>` か `localhost:<port>` でなければ 403（DNS リバインディング対策）、`Origin` ヘッダが付いていれば 403、`Sec-Fetch-Site` が `none` / `same-origin` 以外なら 403。
+- `import_file` が読めるのはデータディレクトリ・`~/Downloads`・`FRELOCATOR_IMPORT_DIRS` 配下だけ。エラーメッセージはファイルの中身を反射しない（`not valid JSON` / `cannot read file` の固定文言）。
 - `hub.json` が壊れている（JSON が壊れている・証明書が不正）場合は `hub.json.broken-<timestamp>` に退避して起動する。証明書ごと失われるため、**全端末が再ペアリングになる**。ローカルのタスク管理ツールは引き続き使えるが、LAN 同期は `configError` 付きで無効になる。
 
 ### トラブルシューティング
