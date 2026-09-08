@@ -30,7 +30,9 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
         title: const Text('TaskMaster'),
         actions: [
           IconButton(
-            onPressed: () => context.go('/categories'),
+            // `push`, not `go`: this is a detour from the task list, and the
+            // user has to be able to come back to it with the back arrow.
+            onPressed: () => context.push('/categories'),
             icon: const Icon(Icons.tune),
             tooltip: 'カテゴリ設定',
           ),

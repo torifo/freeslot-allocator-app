@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
+import '../../../app/router.dart';
 import '../../../app/theme.dart';
 import '../../../core/error_view.dart';
 import '../../daily_plan/application/daily_plan_controller.dart';
@@ -56,7 +57,8 @@ class _NarrowHome extends StatelessWidget {
 
     return Scaffold(
       backgroundColor: AppColors.bg,
-      bottomNavigationBar: const HomeBottomNav(),
+      // No bottom navigation here: the router shell owns it now, so it stays
+      // put on every top-level screen instead of only on this one.
       body: SafeArea(
         child: Column(
           children: [
@@ -269,7 +271,7 @@ class _Sidebar extends StatelessWidget {
       _NavItem(glyph: '▣', label: '日次計画', route: '/daily-plan'),
       _NavItem(
         glyph: '✓',
-        label: 'TaskMaster',
+        label: 'タスク',
         route: '/tasks',
         badge: '${taskData.tasks.length}',
       ),
@@ -839,7 +841,7 @@ class _QuickActions extends StatelessWidget {
     ),
     _Action(
       glyph: '任',
-      label: 'TaskMaster を開く',
+      label: 'タスク一覧を開く',
       sub: 'タスクを登録・編集する',
       route: '/tasks',
     ),
@@ -983,15 +985,36 @@ class _ActionRow extends StatelessWidget {
 }
 
 // ── Bottom navigation (mobile) ────────────────────────────────
-/// Bottom navigation of the home screen.
+/// The app's persistent bottom navigation, drawn by the router shell on every
+/// top-level screen rather than by the home screen alone.
+///
+/// [currentIndex] indexes [shellBranchPaths], so the highlighted tab is always
+/// the branch the shell is actually showing — it used to hard-code 今日 as
+/// active, which said "home" on the tasks screen.
 ///
 /// The bar adds the system navigation inset below its 70 px content so the
 /// icons and labels stay above the gesture bar on edge-to-edge devices
 /// (Android 15+); without it the lower half of the row is hidden.
 class HomeBottomNav extends StatelessWidget {
-  const HomeBottomNav({super.key});
+  const HomeBottomNav({super.key, required this.currentIndex, this.onSelect});
+
+  /// Index into [shellBranchPaths] of the destination being shown.
+  final int currentIndex;
+
+  /// How a tap changes destination. Left null (in tests, or anywhere outside
+  /// the shell) the bar falls back to a plain `context.go`.
+  final ValueChanged<int>? onSelect;
 
   static const double contentHeight = 70;
+
+  void _select(BuildContext context, int index) {
+    final select = onSelect;
+    if (select != null) {
+      select(index);
+      return;
+    }
+    context.go(shellBranchPaths[index]);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1009,42 +1032,53 @@ class HomeBottomNav extends StatelessWidget {
           _NavBtn(
             icon: Icons.home_outlined,
             label: '今日',
-            active: true,
-            onTap: () => context.go('/'),
+            active: currentIndex == 0,
+            onTap: () => _select(context, 0),
           ),
           _NavBtn(
             icon: Icons.checklist_rounded,
             label: 'タスク',
-            onTap: () => context.go('/tasks'),
+            active: currentIndex == 1,
+            onTap: () => _select(context, 1),
           ),
-          // Center FAB
+          // Centre button — the daily plan, the one screen the whole app is for.
           Expanded(
             child: Center(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => context.go('/daily-plan'),
-                child: SizedBox(
-                  width: 48,
-                  height: 48,
-                  child: Center(
-                    child: Container(
-                      width: 46,
-                      height: 46,
-                      decoration: BoxDecoration(
-                        color: AppColors.clay,
-                        borderRadius: BorderRadius.circular(13),
-                        boxShadow: [
-                          BoxShadow(
-                            color: AppColors.clay.withValues(alpha: 0.4),
-                            blurRadius: 12,
-                            offset: const Offset(0, 3),
-                          ),
-                        ],
-                      ),
-                      child: const Icon(
-                        Icons.add,
-                        color: Colors.white,
-                        size: 22,
+              child: Semantics(
+                selected: currentIndex == 2,
+                button: true,
+                label: '日次計画',
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => _select(context, 2),
+                  child: SizedBox(
+                    width: 48,
+                    height: 48,
+                    child: Center(
+                      child: Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          color: AppColors.clay,
+                          borderRadius: BorderRadius.circular(13),
+                          border: currentIndex == 2
+                              ? Border.all(color: AppColors.clayInk, width: 2)
+                              : null,
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppColors.clay.withValues(alpha: 0.4),
+                              blurRadius: 12,
+                              offset: const Offset(0, 3),
+                            ),
+                          ],
+                        ),
+                        child: Icon(
+                          currentIndex == 2
+                              ? Icons.calendar_today_rounded
+                              : Icons.add,
+                          color: Colors.white,
+                          size: 22,
+                        ),
                       ),
                     ),
                   ),
@@ -1055,12 +1089,14 @@ class HomeBottomNav extends StatelessWidget {
           _NavBtn(
             icon: Icons.bar_chart_rounded,
             label: '週次',
-            onTap: () => context.go('/weekly-report'),
+            active: currentIndex == 3,
+            onTap: () => _select(context, 3),
           ),
           _NavBtn(
             icon: Icons.category_outlined,
             label: '設定',
-            onTap: () => context.go('/categories'),
+            active: currentIndex == 4,
+            onTap: () => _select(context, 4),
           ),
         ],
       ),
