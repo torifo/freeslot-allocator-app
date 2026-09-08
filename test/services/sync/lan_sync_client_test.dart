@@ -271,6 +271,113 @@ void main() {
     completer.complete();
   });
 
+  test('a hub that sends headers then stalls times out instead of hanging', () async {
+    final bound = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server = bound;
+    seen = <HttpRequest>[];
+    bodies = <String>[];
+    bound.listen((req) async {
+      await utf8.decoder.bind(req).join();
+      req.response.headers.contentType = ContentType.json;
+      req.response.write('{"document":');
+      await req.response.flush();
+      // ...and then nothing: the body never finishes.
+    });
+    final client = LanSyncClient(
+      allowInsecureForTest: true,
+      timeout: const Duration(milliseconds: 100),
+    );
+    await expectLater(
+      client.sync(
+        SyncSettings(
+          host: '127.0.0.1',
+          port: bound.port,
+          fingerprint: 'AB' * 32,
+          token: 't' * 64,
+        ),
+        {'version': 2},
+      ),
+      throwsA(isA<SyncHttpException>().having((e) => e.code, 'code', 'timeout')),
+    );
+  }, timeout: const Timeout(Duration(seconds: 20)));
+
+  test('after a 413 the chunk feeder stops reporting progress', () async {
+    await serve({
+      'POST /sync': (req, body) => {
+        '_status': 413,
+        'error': {'code': 'payload_too_large', 'message': 'too big'},
+      },
+    });
+    final progress = SyncProgressController();
+    progress.start(SyncKind.lan);
+    var updates = 0;
+    progress.addListener(() => updates += 1);
+    final client = LanSyncClient(allowInsecureForTest: true);
+    await expectLater(
+      // Large enough that the feeder is still mid-loop when the hub answers.
+      client.sync(settings(), {'version': 2, 'payload': 'q' * 2 * 1024 * 1024}, progress: progress),
+      throwsA(isA<SyncHttpException>().having((e) => e.status, 'status', 413)),
+    );
+    final settled = updates;
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(
+      updates,
+      settled,
+      reason: 'the feeder must be finished by the time sync() returns, not left '
+          'pushing bytes for a request the hub already refused',
+    );
+  });
+
+  test('a hub answer of the wrong shape is corrupt, not unreachable', () async {
+    await serve({
+      'POST /sync': (req, body) => {'document': 'not-an-object'},
+    });
+    final client = LanSyncClient(allowInsecureForTest: true);
+    await expectLater(
+      client.sync(settings(), {'version': 2}),
+      throwsA(isA<SyncHttpException>().having((e) => e.code, 'code', 'corrupt')),
+    );
+  });
+
+  test('a pair answer missing its token is corrupt', () async {
+    await serve({
+      'POST /pair': (req, body) => {'hubDeviceId': 'hub', 'fingerprint': 'ab' * 32},
+    });
+    final client = LanSyncClient(allowInsecureForTest: true);
+    await expectLater(
+      client.pair(
+        PairingInfo(host: '127.0.0.1', port: server!.port, fingerprint: 'AB' * 32, code: 'c'),
+        deviceId: 'd',
+        deviceName: 'n',
+      ),
+      throwsA(isA<SyncHttpException>().having((e) => e.code, 'code', 'corrupt')),
+    );
+  });
+
+  test('fetch rejects a body without a document object', () async {
+    await serve({
+      'GET /sync': (req, body) => {'summary': <String, dynamic>{}},
+    });
+    final client = LanSyncClient(allowInsecureForTest: true);
+    await expectLater(
+      client.fetch(settings()),
+      throwsA(isA<SyncHttpException>().having((e) => e.code, 'code', 'corrupt')),
+    );
+  });
+
+  test('health and fetch refuse to call an unpaired hub', () async {
+    final client = LanSyncClient(allowInsecureForTest: true);
+    const unpaired = SyncSettings(host: null, port: 47820, fingerprint: 'AB', token: null);
+    await expectLater(
+      client.health(unpaired),
+      throwsA(isA<SyncHttpException>().having((e) => e.code, 'code', 'not_paired')),
+    );
+    await expectLater(
+      client.fetch(unpaired),
+      throwsA(isA<SyncHttpException>().having((e) => e.code, 'code', 'not_paired')),
+    );
+  });
+
   test('fingerprint verification', () {
     expect(fingerprintMatches(sha256Hex: 'ab' * 32, expected: 'AB' * 32), isTrue);
     expect(fingerprintMatches(sha256Hex: 'ab' * 32, expected: 'CD' * 32), isFalse);

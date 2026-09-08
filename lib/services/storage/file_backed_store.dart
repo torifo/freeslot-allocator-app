@@ -317,6 +317,24 @@ class FileBackedStore extends StateStore {
     );
   });
 
+  /// One lock, one document, one rename: tasks and plans land together or not
+  /// at all.
+  @override
+  Future<void> writeAll(TaskMasterStateData tasks, DailyPlanStateData plans) =>
+      _withLock(() async {
+        final current = await _readLocked();
+        await _writeLocked(
+          SyncDocument(
+            exportedAt: DateTime.now().toUtc(),
+            deviceId: deviceId,
+            lastSyncAt: current.lastSyncAt,
+            purgedBefore: current.purgedBefore,
+            taskMaster: tasks,
+            dailyPlan: plans,
+          ),
+        );
+      });
+
   @override
   Future<bool> changedSinceLastRead() async {
     if (!await _file.exists()) return _lastReadLength != null;

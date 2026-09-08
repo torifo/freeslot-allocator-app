@@ -3,12 +3,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/device_clock.dart';
 import '../features/daily_plan/data/daily_plan_repository.dart';
 import '../features/task_master/data/task_master_repository.dart';
+import 'storage/state_store.dart';
 import 'sync/sync_document.dart';
 
 final appDataServiceProvider = Provider<AppDataService>((ref) {
   return AppDataService(
     taskRepo: ref.read(taskMasterRepositoryProvider),
     dailyPlanRepo: ref.read(dailyPlanRepositoryProvider),
+    store: ref.read(stateStoreProvider),
     deviceClock: ref.read(deviceClockProvider),
   );
 });
@@ -17,11 +19,16 @@ class AppDataService {
   const AppDataService({
     required this.taskRepo,
     required this.dailyPlanRepo,
+    required this.store,
     required this.deviceClock,
   });
 
   final TaskMasterRepository taskRepo;
   final DailyPlanRepository dailyPlanRepo;
+
+  /// The store both repositories sit on. An import has to reach it directly:
+  /// going through the two repositories would be two separate writes.
+  final StateStore store;
   final DeviceClock deviceClock;
 
   Future<SyncDocument> exportDocument() async {
@@ -36,12 +43,15 @@ class AppDataService {
   Future<Map<String, dynamic>> exportAll() async =>
       (await exportDocument()).toJson();
 
-  /// Replaces local state with [document]. Callers that merge must do so
-  /// before calling this (see SyncMerger).
-  Future<void> importDocument(SyncDocument document) async {
-    await taskRepo.save(document.taskMaster);
-    await dailyPlanRepo.save(document.dailyPlan);
-  }
+  /// Replaces local state with [document] as a single commit. Callers that
+  /// merge must do so before calling this (see SyncMerger).
+  ///
+  /// Tasks and daily plans are two halves of one document — an assignment
+  /// refers to a task by id — so a half-applied import is not "most of the
+  /// sync", it is a broken database. [StateStore.writeAll] is what makes it
+  /// all-or-nothing.
+  Future<void> importDocument(SyncDocument document) =>
+      store.writeAll(document.taskMaster, document.dailyPlan);
 
   Future<void> importAll(Map<String, dynamic> data) =>
       importDocument(SyncDocument.fromJson(data, strict: true));

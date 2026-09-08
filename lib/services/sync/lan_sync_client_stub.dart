@@ -17,6 +17,10 @@ class LanSyncClient {
   final bool allowInsecureForTest;
   final Duration timeout;
 
+  /// Kept for API parity with the `dart:io` client; nothing on the web ever
+  /// reaches a TLS handshake here.
+  int certificateChecks = 0;
+
   static const _unsupported = SyncHttpException(
     0,
     'unsupported',

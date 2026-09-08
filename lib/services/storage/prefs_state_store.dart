@@ -36,4 +36,26 @@ class PrefsStateStore extends StateStore {
   @override
   Future<void> writeDailyPlan(DailyPlanStateData state) async =>
       (await _get()).setString(planKey, state.encode());
+
+  /// Encodes both halves *before* touching either key, so a document that
+  /// cannot be serialised is rejected while the stored data is still intact;
+  /// a failure during the second write rolls the first one back.
+  @override
+  Future<void> writeAll(TaskMasterStateData tasks, DailyPlanStateData plans) async {
+    final encodedTasks = tasks.encode();
+    final encodedPlans = plans.encode();
+    final p = await _get();
+    final previousTasks = p.getString(taskKey);
+    await p.setString(taskKey, encodedTasks);
+    try {
+      await p.setString(planKey, encodedPlans);
+    } catch (_) {
+      if (previousTasks == null) {
+        await p.remove(taskKey);
+      } else {
+        await p.setString(taskKey, previousTasks);
+      }
+      rethrow;
+    }
+  }
 }

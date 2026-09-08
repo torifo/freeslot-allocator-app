@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frelocator/core/device_clock.dart';
 import 'package:frelocator/features/daily_plan/data/daily_plan_repository.dart';
@@ -81,6 +83,7 @@ void main() {
     final data = AppDataService(
       taskRepo: TaskMasterRepository(store),
       dailyPlanRepo: DailyPlanRepository(store),
+      store: store,
       deviceClock: clock,
     );
     final settingsStore = SyncSettingsStore();
@@ -309,8 +312,115 @@ void main() {
         ],
       ),
     );
-    final applied = await service.applyReceived(incoming.toJson());
+    final applied = await service.applyReceived(incoming.toJson()) as SyncApplied;
     expect(applied.summary.added, 1);
     expect((await service.data.taskRepo.load()).tasks.map((t) => t.id), contains('from-qr'));
+  });
+
+  test('applyReceived reports a corrupt document instead of throwing', () async {
+    final service = await make(_FakeClient((s, d, m) async => throw StateError('unused')));
+    final progress = SyncProgressController();
+    progress.start(SyncKind.qr);
+    final outcome = await service.applyReceived(
+      <String, dynamic>{'version': 2, 'taskMaster': 'not-an-object'},
+      progress: progress,
+    );
+    expect(outcome, isA<SyncFailed>());
+    expect((outcome as SyncFailed).code, 'corrupt');
+    expect(progress.value.stage, SyncStage.failed);
+    expect(progress.value.errorCode, 'corrupt');
+  });
+
+  test('lastSyncAt comes from the hub document, not the phone clock', () async {
+    final hubStamp = DateTime.utc(2020, 5, 4, 3, 2, 1);
+    final client = _FakeClient((s, doc, mode) async {
+      final result = SyncDocument.fromJson(doc, strict: true).toJson();
+      result['lastSyncAt'] = hubStamp.toIso8601String();
+      return SyncResponse(
+        document: result,
+        summary: const SyncSummary(added: 0, updated: 0, deleted: 0, warnings: 0),
+        warnings: const <String>[],
+      );
+    });
+    final service = await make(client);
+    expect(await service.syncNow(), isA<SyncApplied>());
+    expect((await service.settingsStore.load()).lastSyncAt, hubStamp);
+  });
+
+  test('a second concurrent syncNow is refused as busy', () async {
+    final gate = Completer<void>();
+    var calls = 0;
+    final client = _FakeClient((s, doc, mode) async {
+      calls += 1;
+      await gate.future;
+      return _echoWithHubTask(s, doc, mode);
+    });
+    final service = await make(client);
+    final first = service.syncNow();
+    final second = await service.syncNow();
+    expect(second, isA<SyncFailed>());
+    expect((second as SyncFailed).code, 'busy');
+    expect((second).message, contains('実行中'));
+    gate.complete();
+    expect(await first, isA<SyncApplied>());
+    expect(calls, 1);
+    // The guard has to lift once the first sync is done.
+    expect(await service.syncNow(), isA<SyncApplied>());
+  });
+
+  test('a replace snapshots the current data first and restoreBackup puts it back', () async {
+    final client = _FakeClient(_echoWithHubTask);
+    final service = await make(client);
+    // Something only this phone has, which take_hub is about to wipe out.
+    final before = await service.data.exportDocument();
+    await service.data.importDocument(
+      before.copyWith(
+        taskMaster: before.taskMaster.copyWith(
+          tasks: [TaskMaster.fromJson(_hubTask('only-on-phone', '1000-0-me'))],
+        ),
+      ),
+    );
+    expect(await service.hasBackup, isFalse);
+
+    expect(await service.syncNow(mode: SyncMode.takeHub), isA<SyncApplied>());
+    expect((await service.data.taskRepo.load()).tasks.map((t) => t.id), ['from-hub']);
+    expect(await service.hasBackup, isTrue);
+
+    expect(await service.restoreBackup(), isTrue);
+    expect((await service.data.taskRepo.load()).tasks.map((t) => t.id), ['only-on-phone']);
+    expect(await service.hasBackup, isFalse, reason: 'the snapshot is spent once used');
+    expect(await service.restoreBackup(), isFalse);
+  });
+
+  test('a merge does not snapshot: nothing is being thrown away', () async {
+    final service = await make(_FakeClient(_echoWithHubTask));
+    expect(await service.syncNow(), isA<SyncApplied>());
+    expect(await service.hasBackup, isFalse);
+  });
+
+  test('the hub English message stays out of the panel text', () async {
+    final service = await make(
+      _FakeClient((s, d, m) async => throw const SyncHttpException(401, 'unauthorized', 'bad token')),
+    );
+    final progress = SyncProgressController();
+    final failed = await service.syncNow(progress: progress) as SyncFailed;
+    expect(progress.value.errorMessage, isNot(contains('bad token')));
+    expect(progress.value.errorMessage, contains('ペアリング'));
+    expect(failed.message, contains('bad token'), reason: 'kept as detail for the log');
+  });
+
+  test('a rediscovered address is only stored once the retry works', () async {
+    final client = _FakeClient((s, doc, mode) async {
+      throw const SyncHttpException(0, 'unreachable', 'no route');
+    });
+    final service = await make(
+      client,
+      discover: () async => (host: '10.0.0.9', port: 47820),
+    );
+    expect((await service.syncNow() as SyncFailed).code, 'unreachable');
+    expect(client.hosts, ['h:1', '10.0.0.9:47820']);
+    final saved = await service.settingsStore.load();
+    expect(saved.host, 'h', reason: 'a guess that did not work must not replace the stored address');
+    expect(saved.port, 1);
   });
 }

@@ -18,11 +18,16 @@ class SyncHttpException implements Exception {
   /// 413 in particular must never be retried: the hub closes the connection
   /// without draining the body, so a retry loop would hammer a fresh socket
   /// per attempt with the same over-sized document.
-  bool get retriable => status == 0 && (code == 'unreachable' || code == 'timeout');
+  bool get retriable => status == 0 && retriableSyncCodes.contains(code);
 
   @override
   String toString() => 'SyncHttpException($status $code): $message';
 }
+
+/// The only failures worth trying again unchanged, in one place so
+/// [SyncHttpException.retriable] and `SyncFailed.retriable` cannot disagree
+/// about what the retry button should offer.
+const Set<String> retriableSyncCodes = <String>{'unreachable', 'timeout'};
 
 class PairResult {
   const PairResult({
@@ -88,7 +93,7 @@ String syncErrorMessage(String code, {String? fallback}) => switch (code) {
   'invalid_document' =>
     'この端末のデータを PC が読めませんでした。アプリを更新しても直らない場合はサポートへご連絡ください。',
   'bad_timestamp' =>
-    '同期時刻の記録が壊れています。ペアリングをやり直すと直ります。',
+    '前回の同期時刻の記録が読めませんでした。もう一度同期すると記録し直されます。',
   'payload_too_large' =>
     'データが大きすぎて送れませんでした。不要なタスクを整理するか、QR かファイルで渡してください。',
   'certificate' => 'PC の証明書が変わっています。もう一度ペアリングしてください。',
@@ -98,5 +103,10 @@ String syncErrorMessage(String code, {String? fallback}) => switch (code) {
   'cancelled' => '同期を中止しました。',
   'corrupt' => 'PC から受け取ったデータを読めませんでした。',
   'unsupported' => 'この環境では LAN 同期は使えません。',
+  'busy' => '同期の実行中です。終わるまでお待ちください。',
+  'bad_mode' => '同期の種類を PC が理解できませんでした。アプリを更新してください。',
+  'bad_request' => 'PC がこの要求を受け付けませんでした。アプリを更新してください。',
+  'not_found' => 'PC のハブにこの機能がありません。PC のハブを更新してください。',
+  'internal' => 'PC 側でエラーが起きました。PC のハブを再起動してからお試しください。',
   _ => fallback ?? '同期に失敗しました（$code）。',
 };

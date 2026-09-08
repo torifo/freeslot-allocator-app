@@ -7,6 +7,7 @@ import '../../core/hlc.dart';
 import '../app_data_service.dart';
 import 'hub_discovery.dart';
 import 'lan_sync_client.dart';
+import 'sync_backup_store.dart';
 import 'sync_document.dart';
 import 'sync_merger.dart';
 import 'sync_progress.dart';
@@ -17,6 +18,7 @@ final syncServiceProvider = Provider<SyncService>(
     client: ref.read(lanSyncClientProvider),
     data: ref.read(appDataServiceProvider),
     settingsStore: ref.read(syncSettingsStoreProvider),
+    backupStore: ref.read(syncBackupStoreProvider),
     deviceClock: ref.read(deviceClockProvider),
   ),
 );
@@ -66,9 +68,17 @@ class SyncFailed extends SyncOutcome {
   final String message;
 
   /// Transport trouble; the same request may well work in a moment.
-  bool get retriable => code == 'unreachable' || code == 'timeout';
+  ///
+  /// Derived from the same set [SyncHttpException.retriable] uses, so the
+  /// panel's retry button and the client's own judgement can never drift
+  /// apart.
+  bool get retriable => retriableSyncCodes.contains(code);
 
   /// The pairing itself is broken — the phone has to scan a new QR.
+  ///
+  /// `bad_timestamp` deliberately stays out: a stored sync stamp the hub
+  /// cannot parse is fixed by clearing that stamp, and telling the user to
+  /// re-pair would be asking them to redo something that is not broken.
   bool get needsRepair => const {
     'unauthorized',
     'certificate',
@@ -87,20 +97,44 @@ class SyncService {
     required this.data,
     required this.settingsStore,
     required this.deviceClock,
+    SyncBackupStore? backupStore,
     Future<HubAddress?> Function()? discover,
     this.discoveryTimeout = const Duration(seconds: 3),
-  }) : _discover = discover ?? discoverHub;
+  }) : backupStore = backupStore ?? SyncBackupStore(),
+       _discover = discover ?? discoverHub;
 
   final LanSyncClient client;
   final AppDataService data;
   final SyncSettingsStore settingsStore;
+  final SyncBackupStore backupStore;
   final DeviceClock deviceClock;
   final Duration discoveryTimeout;
   final Future<HubAddress?> Function() _discover;
 
+  /// The sync currently running, if any. Two syncs at once would export the
+  /// same document twice and race each other into `importDocument`; the
+  /// second caller is told the phone is busy instead.
+  Future<SyncOutcome>? _inFlight;
+
+  bool get isSyncing => _inFlight != null;
+
   Future<SyncOutcome> syncNow({
     SyncMode mode = SyncMode.merge,
     SyncProgressController? progress,
+  }) {
+    if (_inFlight != null) {
+      return Future<SyncOutcome>.value(
+        SyncFailed('busy', syncErrorMessage('busy')),
+      );
+    }
+    final running = _syncNow(mode: mode, progress: progress);
+    _inFlight = running;
+    return running.whenComplete(() => _inFlight = null);
+  }
+
+  Future<SyncOutcome> _syncNow({
+    required SyncMode mode,
+    required SyncProgressController? progress,
   }) async {
     var settings = await settingsStore.load();
     if (!settings.isPaired) {
@@ -135,9 +169,12 @@ class SyncService {
         }
         // The hub moved (DHCP, a new Wi-Fi); the pin and the token still hold.
         settings = settings.copyWith(host: found.host, port: found.port);
-        await settingsStore.save(settings);
         progress?.stage(SyncStage.connecting);
         response = await client.sync(settings, payload, mode: mode.wire, progress: progress);
+        // Only now is the new address worth remembering: writing it before the
+        // retry would replace a merely-unreachable address with a guess that
+        // may itself be wrong, and the user would be stuck editing it by hand.
+        await settingsStore.save(settings);
       }
 
       if (progress?.isCancelled ?? false) {
@@ -147,45 +184,105 @@ class SyncService {
       final document = SyncDocument.fromJson(response.document, strict: true);
       await _observeClocks(document);
       progress?.stage(SyncStage.saving);
+      // A replace throws away whichever side lost. Snapshot first so the user
+      // has a way back that does not depend on the hub still holding it.
+      if (mode != SyncMode.merge) await _snapshotBeforeReplace();
       await data.importDocument(document);
-      await settingsStore.save(settings.copyWith(lastSyncAt: DateTime.now().toUtc()));
+      // The hub's own stamp, not this phone's clock: a phone whose clock runs
+      // fast would otherwise record a lastSyncAt in the hub's future and make
+      // the next delta look empty.
+      await settingsStore.save(
+        settings.copyWith(lastSyncAt: document.lastSyncAt ?? DateTime.now().toUtc()),
+      );
       progress?.finish(response.summary);
       return SyncApplied(response.summary, response.warnings);
-    } on SyncHttpException catch (error) {
+    } catch (error) {
+      return _mapFailure(error, progress);
+    }
+  }
+
+  /// Turns anything thrown while talking to the hub or applying its answer
+  /// into the outcome the UI renders. Shared by [syncNow] and [applyReceived]
+  /// so a QR import and a LAN sync explain the same failure the same way.
+  SyncOutcome _mapFailure(Object error, SyncProgressController? progress) {
+    if (error is SyncHttpException) {
       if (error.code == 'cancelled') {
         return SyncCancelled(hubMayHaveChanged: progress?.value.hubMayHaveChanged ?? false);
       }
-      final message = syncErrorMessage(error.code, fallback: error.message);
+      // The hub's own `message` is English and written for logs; it belongs in
+      // the failure detail, never in what the panel shows.
+      final message = syncErrorMessage(error.code);
       progress?.fail(error.code, message);
       if (error.code == 'purged_before') return SyncNeedsReplace(message);
-      return SyncFailed(error.code, message);
-    } on UnsupportedSchemaException catch (error) {
+      return SyncFailed(error.code, _withDetail(message, error.message));
+    }
+    if (error is UnsupportedSchemaException) {
       final message = syncErrorMessage('upgrade_required');
       progress?.fail('upgrade_required', message);
       return SyncFailed('upgrade_required', '$message（$error）');
-    } on FormatException catch (error) {
-      final message = syncErrorMessage('corrupt');
-      progress?.fail('corrupt', '$message: ${error.message}');
-      return SyncFailed('corrupt', message);
     }
+    if (error is FormatException) {
+      final message = syncErrorMessage('corrupt');
+      progress?.fail('corrupt', message);
+      return SyncFailed('corrupt', _withDetail(message, error.message));
+    }
+    throw error;
+  }
+
+  static String _withDetail(String message, String detail) =>
+      detail.isEmpty ? message : '$message（$detail）';
+
+  /// Keeps one copy of everything this phone holds, so a replace the user
+  /// regrets is one tap away from being undone.
+  Future<void> _snapshotBeforeReplace() async =>
+      backupStore.save(await data.exportAll());
+
+  /// True when [restoreBackup] has something to put back.
+  Future<bool> get hasBackup => backupStore.exists();
+
+  /// Puts back the snapshot taken before the last replace. Returns false when
+  /// there is no usable snapshot, in which case nothing is touched.
+  Future<bool> restoreBackup() async {
+    final json = await backupStore.load();
+    if (json == null) return false;
+    final SyncDocument document;
+    try {
+      document = SyncDocument.fromJson(json, strict: true);
+    } on FormatException {
+      return false;
+    } on UnsupportedSchemaException {
+      return false;
+    }
+    await data.importDocument(document);
+    // One shot: leaving it in place would let a second tap silently undo work
+    // done after the restore.
+    await backupStore.clear();
+    return true;
   }
 
   /// Applies a document received out of band (QR or file) using the same merge
   /// rules the hub uses.
-  Future<SyncApplied> applyReceived(
+  /// Returns the same [SyncOutcome] a LAN sync does: a QR or a file can carry
+  /// a document this build cannot read, and the caller needs to say so in the
+  /// same words the panel already uses.
+  Future<SyncOutcome> applyReceived(
     Map<String, dynamic> json, {
     SyncProgressController? progress,
   }) async {
-    progress?.stage(SyncStage.applying);
-    final incoming = SyncDocument.fromJson(json, strict: true);
-    final local = await data.exportDocument();
-    final merged = SyncMerger.merge(local, incoming);
-    await _observeClocks(merged.document);
-    progress?.stage(SyncStage.saving);
-    await data.importDocument(merged.document);
-    final summary = merged.summaryAgainst(local);
-    progress?.finish(summary);
-    return SyncApplied(summary, merged.warnings);
+    try {
+      progress?.stage(SyncStage.applying);
+      final incoming = SyncDocument.fromJson(json, strict: true);
+      final local = await data.exportDocument();
+      final merged = SyncMerger.merge(local, incoming);
+      await _observeClocks(merged.document);
+      progress?.stage(SyncStage.saving);
+      await data.importDocument(merged.document);
+      final summary = merged.summaryAgainst(local);
+      progress?.finish(summary);
+      return SyncApplied(summary, merged.warnings);
+    } catch (error) {
+      return _mapFailure(error, progress);
+    }
   }
 
   /// mDNS is a fallback, never a gate: a slow or silent network must not hold
