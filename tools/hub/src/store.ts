@@ -1,5 +1,6 @@
 import { copyFile, mkdir, readFile, rename, stat, writeFile, unlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { emptyDocument, EPOCH_ISO, SCHEMA_VERSION, type SyncDocumentJson } from './model.js';
@@ -10,18 +11,6 @@ export class UnsupportedSchemaError extends Error {
     this.name = 'UnsupportedSchemaError';
   }
 }
-
-/**
- * Lock options chosen to interoperate with the Dart `FileBackedStore`:
- * `proper-lockfile` creates the sentinel directory `data.lock.lock`, refreshes
- * its mtime every 2s and treats it as stale after 10s — exactly the protocol
- * lib/services/storage/file_backed_store.dart implements natively.
- */
-const LOCK_OPTIONS = {
-  stale: 10_000,
-  update: 2_000,
-  retries: { retries: 200, minTimeout: 50, maxTimeout: 200 },
-} as const;
 
 /** Owns data.json. Every read/update runs under the shared advisory lock. */
 export class FileStore {
@@ -45,6 +34,18 @@ export class FileStore {
     return join(this.directory, 'data.lock');
   }
 
+  /** Lock options matching Dart's `FileBackedStore` protocol; @internal exposed for tests only. */
+  lockOptions(): NonNullable<Parameters<typeof lockfile.lock>[1]> {
+    return {
+      stale: 10_000,
+      update: 2_000,
+      retries: { retries: 200, minTimeout: 50, maxTimeout: 200 },
+      onCompromised: (err: Error) => {
+        this.lastWarning = `lock compromised: ${err.message}`;
+      },
+    };
+  }
+
   /** Serializes calls in-process and takes the cross-process lock. */
   private async withLock<T>(body: () => Promise<T>): Promise<T> {
     const run = async () => {
@@ -56,11 +57,16 @@ export class FileStore {
           // Best-effort: proper-lockfile only needs the target path to exist.
         }
       }
-      const release = await lockfile.lock(this.lockPath, LOCK_OPTIONS);
+      const release = await lockfile.lock(this.lockPath, this.lockOptions());
       try {
         return await body();
       } finally {
-        await release();
+        try {
+          await release();
+        } catch (error) {
+          // Never mask the body's own error/result with a release failure.
+          this.lastWarning = `lock release failed: ${String(error)}`;
+        }
       }
     };
     const next = this.chain.then(run, run);
@@ -69,11 +75,15 @@ export class FileStore {
   }
 
   private async readLocked(): Promise<SyncDocumentJson> {
-    if (!existsSync(this.filePath)) return emptyDocument(this.deviceId);
+    if (!existsSync(this.filePath)) {
+      this.lastWarning = null;
+      return emptyDocument(this.deviceId);
+    }
     const text = await readFile(this.filePath, 'utf8');
     if (text.trim().length === 0) {
       // Another process may be mid-write (tmp not yet renamed into place);
       // treat as "no data yet" without quarantining anything.
+      this.lastWarning = null;
       return emptyDocument(this.deviceId);
     }
     let json: unknown;
@@ -83,12 +93,15 @@ export class FileStore {
         throw new SyntaxError('root is not an object');
       }
     } catch (error) {
-      const quarantine = `${this.filePath}.broken-${Date.now()}`;
+      const suffix = randomBytes(2).toString('hex');
+      const quarantine = `${this.filePath}.broken-${Date.now()}-${suffix}`;
       await rename(this.filePath, quarantine);
       this.lastWarning = `data.json was corrupt (${String(error)}); moved to ${quarantine} (broken file kept) and started empty.`;
       return emptyDocument(this.deviceId);
     }
-    return parseDocument(json as Record<string, unknown>, this.deviceId);
+    const doc = parseDocument(json as Record<string, unknown>, this.deviceId);
+    this.lastWarning = null;
+    return doc;
   }
 
   private async writeLocked(doc: SyncDocumentJson): Promise<void> {
@@ -133,8 +146,20 @@ export class FileStore {
     return this.withLock(async () => {
       const bak = `${this.filePath}.bak`;
       if (!existsSync(bak)) return false;
-      await copyFile(bak, `${this.filePath}.tmp`);
-      await rename(`${this.filePath}.tmp`, this.filePath);
+      const tmp = `${this.filePath}.tmp`;
+      try {
+        await copyFile(bak, tmp);
+        await rename(tmp, this.filePath);
+      } catch (error) {
+        if (existsSync(tmp)) {
+          try {
+            await unlink(tmp);
+          } catch {
+            // best-effort cleanup
+          }
+        }
+        throw error;
+      }
       return true;
     });
   }

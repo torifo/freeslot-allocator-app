@@ -96,8 +96,9 @@ export function merge(a: SyncDocumentJson, b: SyncDocumentJson): MergeResult {
   const liveSlots = new Set(slots.filter((s) => !isDeleted(s)).map((s) => s.id));
   for (const x of assignments) {
     if (isDeleted(x)) continue;
-    if (!liveSlots.has(String(x.slotId))) {
-      warnings.push(`assignment ${x.id} references missing slot ${x.slotId}`);
+    const slotId = x.slotId;
+    if (slotId != null && !liveSlots.has(String(slotId))) {
+      warnings.push(`assignment ${x.id} references missing slot ${slotId}`);
     }
   }
   warnings.sort(compareStrings);

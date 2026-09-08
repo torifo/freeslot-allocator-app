@@ -1,0 +1,103 @@
+{
+  "name": "an assignment without a slotId does not warn about a missing slot",
+  "a": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "a",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": [
+        {
+          "id": "asg1",
+          "dailyPlanId": "p1",
+          "taskId": "t1",
+          "taskTitle": "書類",
+          "taskKind": "must_do",
+          "startAt": "2026-09-08T09:00:00.000Z",
+          "endAt": "2026-09-08T09:30:00.000Z",
+          "sortOrder": 0,
+          "categoryId": null,
+          "categoryName": null,
+          "memo": "",
+          "clock": "10-0-a",
+          "updatedAt": "2026-09-08T00:00:10.000Z",
+          "deletedAt": null,
+          "migrated": false
+        }
+      ]
+    }
+  },
+  "b": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "b",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expected": {
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": [
+        {
+          "id": "asg1",
+          "dailyPlanId": "p1",
+          "taskId": "t1",
+          "taskTitle": "書類",
+          "taskKind": "must_do",
+          "startAt": "2026-09-08T09:00:00.000Z",
+          "endAt": "2026-09-08T09:30:00.000Z",
+          "sortOrder": 0,
+          "categoryId": null,
+          "categoryName": null,
+          "memo": "",
+          "clock": "10-0-a",
+          "updatedAt": "2026-09-08T00:00:10.000Z",
+          "deletedAt": null,
+          "migrated": false
+        }
+      ]
+    }
+  },
+  "expectedWarnings": []
+}

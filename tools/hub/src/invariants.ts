@@ -6,6 +6,12 @@ export interface Violation {
   message: string;
 }
 
+/** Non-finite `sortOrder` (missing/NaN) sorts last instead of producing NaN comparisons. */
+function sortOrderOf(entity: Entity): number {
+  const n = Number(entity.sortOrder);
+  return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY;
+}
+
 /**
  * The rules the app UI otherwise guarantees, mirroring
  * lib/services/sync/invariant_checker.dart. Tombstones are ignored: the Dart
@@ -50,8 +56,8 @@ export function checkInvariants(doc: SyncDocumentJson): Violation[] {
     }
   }
   for (const [slotId, list] of bySlot) {
-    const byOrder = [...list].sort((x, y) => Number(x.sortOrder) - Number(y.sortOrder));
-    if (byOrder.some((a, i) => Number(a.sortOrder) !== i)) {
+    const byOrder = [...list].sort((x, y) => sortOrderOf(x) - sortOrderOf(y));
+    if (byOrder.some((a, i) => sortOrderOf(a) !== i)) {
       out.push({ code: 'sort_order_not_contiguous', message: `slot ${slotId} has gaps in sortOrder` });
     }
     const byStart = [...list].sort((x, y) => compareStrings(String(x.startAt), String(y.startAt)));

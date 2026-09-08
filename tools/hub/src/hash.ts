@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 export const META_KEYS = ['clock', 'updatedAt', 'deletedAt', 'migrated'] as const;
 
-const MAX_SAFE_INTEGER = 9007199254740992;
+const TWO_POW_53 = 9007199254740992;
 
 /**
  * Canonical JSON, byte-for-byte identical to lib/core/content_hash.dart:
@@ -23,7 +23,7 @@ function canonicalize(value: unknown): string {
     const keys = Object.keys(obj).sort();
     return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalize(obj[k])}`).join(',')}}`;
   }
-  if (typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && Math.abs(value) < MAX_SAFE_INTEGER) {
+  if (typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && Math.abs(value) < TWO_POW_53) {
     return value.toFixed(0);
   }
   return JSON.stringify(value) ?? 'null';

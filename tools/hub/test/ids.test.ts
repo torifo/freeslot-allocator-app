@@ -12,6 +12,13 @@ describe('ids', () => {
     expect(deviceFragment('hub')).toBe('hub0');
     expect(deviceFragment('mac-ab')).toBe('ab00');
   });
+  it('is strictly increasing for ids generated within the same millisecond', () => {
+    const ids = Array.from({ length: 50 }, () => generateId('task', 'hub-1234'));
+    const micros = ids.map((id) => BigInt(id.split('-')[1]));
+    for (let i = 1; i < micros.length; i += 1) {
+      expect(micros[i]).toBeGreaterThan(micros[i - 1]);
+    }
+  });
   it('copyId is deterministic and generation-aware', () => {
     const a = copyId('slot', 'plan-1', '2026-09-09', 'slot-1', 0);
     expect(a).toBe(copyId('slot', 'plan-1', '2026-09-09', 'slot-1', 0));

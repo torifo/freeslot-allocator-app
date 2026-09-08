@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import lockfile from 'proper-lockfile';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FileStore, UnsupportedSchemaError } from '../src/store.js';
 
 let dir: string;
@@ -147,5 +148,24 @@ describe('FileStore', () => {
     const doc = await store.update((d) => { d.taskMaster.settings.shareCategories = true; return d; });
     expect(doc.taskMaster.settings.shareCategories).toBe(true);
     expect(existsSync(sentinel)).toBe(false);
+  });
+
+  it('a release() failure records a warning without masking the body result', async () => {
+    const store = new FileStore(dir, 'hub');
+    const spy = vi.spyOn(lockfile, 'lock').mockResolvedValueOnce(async () => {
+      throw new Error('release boom');
+    });
+    const doc = await store.read();
+    expect(doc.version).toBe(2);
+    expect(store.lastWarning).toBe('lock release failed: Error: release boom');
+    spy.mockRestore();
+  });
+
+  it('onCompromised records a warning instead of throwing', () => {
+    const store = new FileStore(dir, 'hub');
+    const options = store.lockOptions();
+    expect(typeof options.onCompromised).toBe('function');
+    expect(() => options.onCompromised!(new Error('stale reclaim by Dart app'))).not.toThrow();
+    expect(store.lastWarning).toBe('lock compromised: stale reclaim by Dart app');
   });
 });

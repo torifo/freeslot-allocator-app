@@ -8,9 +8,13 @@ export function deviceFragment(deviceId?: string | null): string {
   return body.length >= 4 ? body.slice(0, 4) : body.padEnd(4, '0');
 }
 
+// Module-level counter so ids generated within the same millisecond still
+// sort strictly increasing (Date.now() alone only has ms resolution).
+let idCounter = 0n;
+
 /** `<prefix>-<microsSinceEpoch>-<device fragment>-<6 hex>` — same as lib/core/id_generator.dart. */
 export function generateId(prefix: string, deviceId?: string | null): string {
-  const micros = BigInt(Date.now()) * 1000n + (process.hrtime.bigint() / 1000n) % 1000n;
+  const micros = BigInt(Date.now()) * 1000n + (idCounter++ % 1000n);
   return `${prefix}-${micros}-${deviceFragment(deviceId)}-${randomBytes(3).toString('hex')}`;
 }
 
