@@ -1,11 +1,12 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:frelocator/features/daily_plan/application/daily_plan_controller.dart';
 import 'package:frelocator/features/daily_plan/data/daily_plan_repository.dart';
 import 'package:frelocator/features/daily_plan/application/daily_plan_logic.dart';
 import 'package:frelocator/features/daily_plan/domain/daily_plan_models.dart';
 import 'package:frelocator/features/task_master/domain/task_models.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../../helpers/test_container.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -17,7 +18,7 @@ void main() {
         SharedPreferences.setMockInitialValues(<String, Object>{
           'daily_plan_state_v1': _sampleState().encode(),
         });
-        final container = ProviderContainer();
+        final container = await testContainer();
         addTearDown(container.dispose);
 
         await container.read(dailyPlanControllerProvider.future);
@@ -54,7 +55,7 @@ void main() {
         SharedPreferences.setMockInitialValues(<String, Object>{
           'daily_plan_state_v1': _sampleState().encode(),
         });
-        final container = ProviderContainer();
+        final container = await testContainer();
         addTearDown(container.dispose);
 
         await container.read(dailyPlanControllerProvider.future);
@@ -87,7 +88,7 @@ void main() {
         SharedPreferences.setMockInitialValues(<String, Object>{
           'daily_plan_state_v1': _sampleState().encode(),
         });
-        final container = ProviderContainer();
+        final container = await testContainer();
         addTearDown(container.dispose);
 
         await container.read(dailyPlanControllerProvider.future);
@@ -119,7 +120,7 @@ void main() {
         SharedPreferences.setMockInitialValues(<String, Object>{
           'daily_plan_state_v1': _sampleState().encode(),
         });
-        final container = ProviderContainer();
+        final container = await testContainer();
         addTearDown(container.dispose);
 
         await container.read(dailyPlanControllerProvider.future);
@@ -143,7 +144,7 @@ void main() {
       SharedPreferences.setMockInitialValues(<String, Object>{
         'daily_plan_state_v1': _sampleState().encode(),
       });
-      final container = ProviderContainer();
+      final container = await testContainer();
       addTearDown(container.dispose);
 
       await container.read(dailyPlanControllerProvider.future);
@@ -167,7 +168,7 @@ void main() {
   group('persistence failures', () {
     test('leaves the published state unchanged when saving throws', () async {
       SharedPreferences.setMockInitialValues(<String, Object>{});
-      final container = ProviderContainer(
+      final container = await testContainer(
         overrides: [
           dailyPlanRepositoryProvider.overrideWithValue(
             _FailingDailyPlanRepository(_sampleState()),
@@ -202,7 +203,7 @@ void main() {
   group('mutations before the state is ready', () {
     test('report a Japanese validation error instead of crashing', () async {
       SharedPreferences.setMockInitialValues(<String, Object>{});
-      final container = ProviderContainer(
+      final container = await testContainer(
         overrides: [
           dailyPlanRepositoryProvider.overrideWithValue(
             _UnloadableDailyPlanRepository(),
@@ -234,6 +235,69 @@ void main() {
       await expectLater(
         notifier.deleteSlot('slot-1'),
         throwsA(isA<DailyPlanValidationException>()),
+      );
+    });
+  });
+
+  group('tombstones', () {
+    test('deleteSlot tombstones the slot and its assignments', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'daily_plan_state_v1': _sampleState().encode(),
+      });
+      final container = await testContainer(now: () => 1000);
+      addTearDown(container.dispose);
+
+      await container.read(dailyPlanControllerProvider.future);
+      final notifier = container.read(dailyPlanControllerProvider.notifier);
+
+      await notifier.deleteSlot('slot-target-1');
+
+      final state = container.read(dailyPlanControllerProvider).requireValue;
+      expect(state.slots.any((item) => item.id == 'slot-target-1'), isFalse);
+      expect(
+        state.assignments.any((item) => item.id == 'assignment-target-1'),
+        isFalse,
+      );
+      expect(state.deletedSlots.single.id, 'slot-target-1');
+      expect(state.deletedAssignments.single.id, 'assignment-target-1');
+      expect(state.deletedSlots.single.meta.isDeleted, isTrue);
+    });
+
+    test('duplicatePlan with replaceExisting tombstones replaced records and uses deterministic ids', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'daily_plan_state_v1': _sampleState().encode(),
+      });
+      final container = await testContainer(now: () => 1000);
+      addTearDown(container.dispose);
+
+      await container.read(dailyPlanControllerProvider.future);
+      final notifier = container.read(dailyPlanControllerProvider.notifier);
+
+      final source = DateTime(2026, 4, 18);
+      final target = DateTime(2026, 4, 20);
+      final first = await notifier.duplicatePlan(
+        sourceDate: source,
+        targetDate: target,
+        sourceSlotIds: const <String>['slot-source-2'],
+        replaceExisting: true,
+      );
+      final state1 = container.read(dailyPlanControllerProvider).requireValue;
+      expect(state1.deletedSlots, hasLength(1));
+      expect(state1.deletedAssignments, hasLength(1));
+      final copiedId = state1.slotsForPlan(first.id).single.id;
+      expect(copiedId, matches(RegExp(r'^slot-[0-9a-f]{16}$')));
+
+      await notifier.duplicatePlan(
+        sourceDate: source,
+        targetDate: target,
+        sourceSlotIds: const <String>['slot-source-2'],
+        replaceExisting: true,
+      );
+      final state2 = container.read(dailyPlanControllerProvider).requireValue;
+      expect(
+        state2.slotsForPlan(first.id).single.id,
+        isNot(copiedId),
+        reason: '世代カウンタで墓標と衝突しない',
       );
     });
   });

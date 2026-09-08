@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:frelocator/core/hlc.dart';
 import 'package:frelocator/features/task_master/application/task_master_logic.dart';
 import 'package:frelocator/features/task_master/domain/task_models.dart';
 
@@ -52,6 +53,8 @@ void main() {
       state,
       kind: TaskKind.mustDo,
       categoryId: 'must-housework',
+      clock: Hlc.parse('1-0-test'),
+      now: DateTime.utc(2026),
     );
 
     expect(result.tasks.single.categoryId, isNull);

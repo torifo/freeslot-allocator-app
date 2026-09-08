@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/device_clock.dart';
+import '../../../core/sync_meta.dart';
 import '../data/task_master_repository.dart';
 import '../domain/task_models.dart';
 import 'task_master_logic.dart';
@@ -12,6 +14,17 @@ final taskMasterControllerProvider =
 class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
   TaskMasterRepository get _repository =>
       ref.read(taskMasterRepositoryProvider);
+
+  DeviceClock get _device => ref.read(deviceClockProvider);
+
+  /// Issues a fresh clock and folds it into [previous], or starts a new meta.
+  Future<SyncMeta> _stamp(SyncMeta? previous) async {
+    final clock = await _device.next();
+    final now = DateTime.now().toUtc();
+    return previous == null
+        ? SyncMeta.stamp(clock, now)
+        : previous.touch(clock, now);
+  }
 
   @override
   Future<TaskMasterStateData> build() async {
@@ -30,8 +43,12 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
 
   Future<void> addOrUpdateTask(TaskMaster task) async {
     final current = _current;
-    final sanitizedTask = sanitizeTaskAgainstCategories(task, current);
     final index = current.tasks.indexWhere((item) => item.id == task.id);
+    final previousMeta = index >= 0 ? current.tasks[index].meta : null;
+    final sanitizedTask = sanitizeTaskAgainstCategories(
+      task,
+      current,
+    ).copyWith(meta: await _stamp(previousMeta), updatedAt: DateTime.now().toUtc());
     final tasks = List<TaskMaster>.from(current.tasks);
 
     if (index >= 0) {
@@ -45,8 +62,21 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
 
   Future<void> deleteTask(String id) async {
     final current = _current;
-    final tasks = current.tasks.where((task) => task.id != id).toList();
-    await _persist(current.copyWith(tasks: tasks));
+    final target = current.tasks.where((task) => task.id == id).firstOrNull;
+    if (target == null) {
+      return;
+    }
+    final clock = await _device.next();
+    final tombstone = Tombstone(
+      id: id,
+      meta: target.meta.tombstone(clock, DateTime.now().toUtc()),
+    );
+    await _persist(
+      current.copyWith(
+        tasks: current.tasks.where((task) => task.id != id).toList(),
+        deletedTasks: <Tombstone>[...current.deletedTasks, tombstone],
+      ),
+    );
   }
 
   Future<void> reorderTasks({
@@ -70,14 +100,17 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
       for (final task in tasksOfKind)
         if (!orderedIds.contains(task.id)) task,
     ];
-    final now = DateTime.now();
-    final reorderedTasks = <TaskMaster>[
-      for (var index = 0; index < orderedTasks.length; index += 1)
+    final now = DateTime.now().toUtc();
+    final reorderedTasks = <TaskMaster>[];
+    for (var index = 0; index < orderedTasks.length; index += 1) {
+      reorderedTasks.add(
         orderedTasks[index].copyWith(
           priority: orderedTasks.length - index,
           updatedAt: now,
+          meta: await _stamp(orderedTasks[index].meta),
         ),
-    ];
+      );
+    }
     final others = current.tasks.where((task) => task.kind != kind).toList();
     await _persist(
       current.copyWith(tasks: _sortTasks([...others, ...reorderedTasks])),
@@ -91,17 +124,21 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
     final current = _current;
     final mustDo = List<TaskCategory>.from(current.mustDoCategories);
     final wantToDo = List<TaskCategory>.from(current.wantToDoCategories);
+    final previous = <TaskCategory>[...mustDo, ...wantToDo]
+        .where((item) => item.id == category.id)
+        .firstOrNull;
+    final stamped = category.copyWith(meta: await _stamp(previous?.meta));
 
     void updateList(List<TaskCategory> categories) {
       validateCategoryNameUniqueness(
-        category: category,
+        category: stamped,
         categories: categories,
       );
-      final index = categories.indexWhere((item) => item.id == category.id);
+      final index = categories.indexWhere((item) => item.id == stamped.id);
       if (index >= 0) {
-        categories[index] = category;
+        categories[index] = stamped;
       } else {
-        categories.add(category);
+        categories.add(stamped);
       }
       categories.sort((a, b) => a.name.compareTo(b.name));
     }
@@ -131,6 +168,8 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
       current,
       kind: kind,
       categoryId: categoryId,
+      clock: await _device.next(),
+      now: DateTime.now().toUtc(),
     );
     await _persist(updated);
   }
@@ -144,8 +183,15 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
       return;
     }
 
+    final settingsMeta = await _stamp(current.settingsMeta);
+
     if (enabled) {
-      await _persist(enableSharedCategories(current, strategy));
+      await _persist(
+        enableSharedCategories(
+          current,
+          strategy,
+        ).copyWith(settingsMeta: settingsMeta),
+      );
       return;
     }
 
@@ -159,6 +205,7 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
             .map((item) => item.copyWith())
             .toList(),
         shareCategories: false,
+        settingsMeta: settingsMeta,
       ),
     );
   }

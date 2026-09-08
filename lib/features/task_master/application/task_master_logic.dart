@@ -1,3 +1,4 @@
+import '../../../core/hlc.dart';
 import '../domain/task_models.dart';
 
 class TaskMasterValidationException implements Exception {
@@ -91,27 +92,50 @@ TaskMasterStateData deleteCategoryFromState(
   TaskMasterStateData state, {
   required TaskKind kind,
   required String categoryId,
+  required Hlc clock,
+  required DateTime now,
 }) {
-  final mustDoCategories = List<TaskCategory>.from(state.mustDoCategories);
-  final wantToDoCategories = List<TaskCategory>.from(state.wantToDoCategories);
+  final mustDo = List<TaskCategory>.from(state.mustDoCategories);
+  final wantToDo = List<TaskCategory>.from(state.wantToDoCategories);
+  final deletedMustDo = List<Tombstone>.from(state.deletedMustDoCategories);
+  final deletedWantToDo = List<Tombstone>.from(
+    state.deletedWantToDoCategories,
+  );
+
+  void remove(List<TaskCategory> list, List<Tombstone> graveyard) {
+    final index = list.indexWhere((category) => category.id == categoryId);
+    if (index < 0) {
+      return;
+    }
+    graveyard.add(
+      Tombstone(id: categoryId, meta: list[index].meta.tombstone(clock, now)),
+    );
+    list.removeAt(index);
+  }
 
   if (state.shareCategories || kind == TaskKind.mustDo) {
-    mustDoCategories.removeWhere((category) => category.id == categoryId);
+    remove(mustDo, deletedMustDo);
   }
   if (state.shareCategories || kind == TaskKind.wantToDo) {
-    wantToDoCategories.removeWhere((category) => category.id == categoryId);
+    remove(wantToDo, deletedWantToDo);
   }
 
   final tasks = state.tasks.map((task) {
     return task.categoryId == categoryId
-        ? task.copyWith(clearCategory: true, updatedAt: DateTime.now())
+        ? task.copyWith(
+            clearCategory: true,
+            updatedAt: now,
+            meta: task.meta.touch(clock, now),
+          )
         : task;
   }).toList();
 
   return state.copyWith(
     tasks: tasks,
-    mustDoCategories: mustDoCategories,
-    wantToDoCategories: wantToDoCategories,
+    mustDoCategories: mustDo,
+    wantToDoCategories: wantToDo,
+    deletedMustDoCategories: deletedMustDo,
+    deletedWantToDoCategories: deletedWantToDo,
   );
 }
 

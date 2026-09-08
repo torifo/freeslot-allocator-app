@@ -1,10 +1,11 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:frelocator/features/task_master/application/task_master_controller.dart';
 import 'package:frelocator/features/task_master/application/task_master_logic.dart';
 import 'package:frelocator/features/task_master/data/task_master_repository.dart';
 import 'package:frelocator/features/task_master/domain/task_models.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../../helpers/test_container.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -16,7 +17,7 @@ void main() {
         SharedPreferences.setMockInitialValues(<String, Object>{
           'task_master_state_v1': _sampleState().encode(),
         });
-        final container = ProviderContainer();
+        final container = await testContainer();
         addTearDown(container.dispose);
 
         await container.read(taskMasterControllerProvider.future);
@@ -47,7 +48,7 @@ void main() {
   group('persistence failures', () {
     test('leaves the published state unchanged when saving throws', () async {
       SharedPreferences.setMockInitialValues(<String, Object>{});
-      final container = ProviderContainer(
+      final container = await testContainer(
         overrides: [
           taskMasterRepositoryProvider.overrideWithValue(
             _FailingTaskMasterRepository(_sampleState()),
@@ -74,7 +75,7 @@ void main() {
   group('mutations before the state is ready', () {
     test('report a Japanese validation error instead of crashing', () async {
       SharedPreferences.setMockInitialValues(<String, Object>{});
-      final container = ProviderContainer(
+      final container = await testContainer(
         overrides: [
           taskMasterRepositoryProvider.overrideWithValue(
             _UnloadableTaskMasterRepository(),
@@ -107,6 +108,68 @@ void main() {
         notifier.deleteTask('must-1'),
         throwsA(isA<TaskMasterValidationException>()),
       );
+    });
+  });
+
+  group('tombstones', () {
+    test('deleteTask moves the task into deletedTasks with a newer clock', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'task_master_state_v1': _sampleState().encode(),
+      });
+      final container = await testContainer(now: () => 1000);
+      addTearDown(container.dispose);
+      await container.read(taskMasterControllerProvider.future);
+      final notifier = container.read(taskMasterControllerProvider.notifier);
+
+      await notifier.deleteTask('must-1');
+
+      final state = container.read(taskMasterControllerProvider).requireValue;
+      expect(state.tasks.any((t) => t.id == 'must-1'), isFalse);
+      expect(state.deletedTasks.single.id, 'must-1');
+      expect(state.deletedTasks.single.meta.isDeleted, isTrue);
+      expect(state.deletedTasks.single.meta.clock.deviceId, startsWith('test-'));
+    });
+
+    test('addOrUpdateTask stamps a fresh clock from the device', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final container = await testContainer(now: () => 1000);
+      addTearDown(container.dispose);
+      await container.read(taskMasterControllerProvider.future);
+      final notifier = container.read(taskMasterControllerProvider.notifier);
+
+      await notifier.addOrUpdateTask(
+        TaskMaster(
+          id: 'new',
+          title: 'x',
+          kind: TaskKind.mustDo,
+          priority: 3,
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+        ),
+      );
+
+      final task = container
+          .read(taskMasterControllerProvider)
+          .requireValue
+          .tasks
+          .singleWhere((t) => t.id == 'new');
+      expect(task.meta.migrated, isFalse);
+      expect(task.meta.clock.physical, 1000);
+    });
+
+    test('deleteCategory tombstones the category and detaches tasks with a new clock', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'task_master_state_v1': _sampleState().encode(),
+      });
+      final container = await testContainer(now: () => 1000);
+      addTearDown(container.dispose);
+      await container.read(taskMasterControllerProvider.future);
+      await container
+          .read(taskMasterControllerProvider.notifier)
+          .deleteCategory(kind: TaskKind.mustDo, categoryId: 'must-work');
+      final state = container.read(taskMasterControllerProvider).requireValue;
+      expect(state.mustDoCategories.any((c) => c.id == 'must-work'), isFalse);
+      expect(state.deletedMustDoCategories.single.id, 'must-work');
     });
   });
 }
@@ -169,7 +232,9 @@ TaskMasterStateData _sampleState() {
         updatedAt: now,
       ),
     ],
-    mustDoCategories: const <TaskCategory>[],
+    mustDoCategories: <TaskCategory>[
+      TaskCategory(id: 'must-work', name: '仕事'),
+    ],
     wantToDoCategories: const <TaskCategory>[],
     shareCategories: false,
   );
