@@ -6,8 +6,11 @@ import 'sync_document.dart';
 
 export 'file_exporter_common.dart';
 
+/// A [FormatException], not an [UnsupportedError]: every caller already shows
+/// the message of a failed export or import, and an `Error` would escape those
+/// handlers and crash the screen instead.
 Never _unsupported() =>
-    throw UnsupportedError('ファイルの書き出し・取り込みはこの環境では使えません');
+    throw const FormatException('ファイルの書き出し・取り込みはこの環境では使えません');
 
 Future<String> writeExportFile(SyncDocument doc, {String? directory}) async =>
     _unsupported();

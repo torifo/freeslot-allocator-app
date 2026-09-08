@@ -77,6 +77,11 @@ const int kQrChunkChars = 600;
 /// every allocation driven by a scanned `total`.
 const int kMaxQrFrames = 512;
 
+/// Hard ceiling on the *decompressed* payload, matching the `maxOutputLength`
+/// the hub passes to `gunzipSync`. Scanned frames are untrusted input, so a
+/// handful of QR codes must not be able to expand into gigabytes of memory.
+const int kMaxQrPayloadBytes = 64 * 1024 * 1024;
+
 /// What [QrFrameSet.add] made of a scanned frame.
 enum QrAddResult {
   /// A new chunk of the payload being collected.
@@ -171,7 +176,21 @@ Map<String, dynamic> decodeQrFrames(QrFrameSet set) {
   final text = <String>[
     for (var i = 0; i < set.total; i += 1) set.chunkAt(i)!,
   ].join();
-  final json = const GZipDecoder().decodeBytes(base45Decode(text));
+  // `total` is bounded by [kMaxQrFrames], but a single chunk is not, so bound
+  // the reassembled text before base45 allocates anything from it.
+  if (text.length > kMaxQrFrames * kQrChunkChars) {
+    throw FormatException(
+      'payload is ${text.length} characters, more than the hub can produce',
+    );
+  }
+  final gzip = base45Decode(text);
+  _checkGzipSize(gzip);
+  final json = const GZipDecoder().decodeBytes(gzip);
+  // ISIZE only carries the length modulo 2^32, so the real length is checked
+  // again now that it is known.
+  if (json.length > kMaxQrPayloadBytes) {
+    throw FormatException('payload expands to ${json.length} bytes, too large');
+  }
   final digest = sha256
       .convert(json)
       .toString()
@@ -192,6 +211,11 @@ Map<String, dynamic> decodeQrFrames(QrFrameSet set) {
 /// The app itself only ever *scans* frames; this exists so the codec can be
 /// checked against the hub's fixtures in both directions, and so a future
 /// phone→PC QR flow has the encoder ready.
+///
+/// Byte-for-byte equality with the hub holds on the Dart VM, for documents
+/// without floating-point numbers: `dart2js` numbers and `JSON.stringify`
+/// render doubles differently (`1.0` against `1`), which changes the gzip
+/// input and therefore every frame.
 List<String> encodeQrFrames(
   Object? value, {
   int chunkChars = kQrChunkChars,
@@ -231,4 +255,21 @@ String _frame(String hash, int i, int total, String chunk) {
     throw StateError('frame contains a non-alphanumeric-mode character');
   }
   return frame;
+}
+
+/// Rejects a gzip stream whose ISIZE trailer already promises more than
+/// [kMaxQrPayloadBytes], before the decoder is allowed to allocate it.
+void _checkGzipSize(Uint8List gzip) {
+  // ISIZE is the last four bytes, little-endian.
+  if (gzip.length < 4) {
+    throw const FormatException('gzip stream is too short to be valid');
+  }
+  final isize =
+      gzip[gzip.length - 4] |
+      (gzip[gzip.length - 3] << 8) |
+      (gzip[gzip.length - 2] << 16) |
+      (gzip[gzip.length - 1] << 24);
+  if (isize > kMaxQrPayloadBytes) {
+    throw FormatException('payload claims $isize bytes, more than the limit');
+  }
 }

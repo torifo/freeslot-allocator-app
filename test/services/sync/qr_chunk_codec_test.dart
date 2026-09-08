@@ -1,5 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:archive/archive.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frelocator/services/sync/qr_chunk_codec.dart';
@@ -19,6 +22,11 @@ void main() {
     expect(() => base45Decode('::'), throwsFormatException);
     expect(() => base45Decode('0'), throwsFormatException);
     expect(() => base45Decode('#'), throwsFormatException);
+  });
+
+  test('the empty string is the encoding of no bytes, and decodes back', () {
+    expect(base45Encode(const <int>[]), '');
+    expect(base45Decode(''), isEmpty);
   });
 
   test('base45 round-trips every byte, odd and even lengths alike', () {
@@ -141,6 +149,57 @@ void main() {
     }
     set.hash = '0000000000000000';
     expect(() => decodeQrFrames(set), throwsFormatException);
+  });
+
+  test('refuses a payload that is not a JSON object', () {
+    // The frames are well formed and the hash matches; only the shape is wrong.
+    final set = QrFrameSet();
+    for (final f in encodeQrFrames(<Object?>[1, 2, 3])) {
+      expect(set.add(f), QrAddResult.added);
+    }
+    expect(() => decodeQrFrames(set), throwsFormatException);
+  });
+
+  test('refuses more reassembled text than the hub could ever produce', () {
+    // Every character is valid base45 and the CRC is right, so only the length
+    // bound can reject this — before base45Decode allocates anything.
+    final chunk = '0' * (kMaxQrFrames * kQrChunkChars + 1);
+    final set = QrFrameSet();
+    expect(
+      set.add('FRL2:0123456789ABCDEF:0:1:${crc32Hex(utf8.encode(chunk))}:$chunk'),
+      QrAddResult.added,
+    );
+    expect(() => decodeQrFrames(set), throwsFormatException);
+  });
+
+  test('refuses a gzip stream that claims to expand past the payload cap', () {
+    // A gzip bomb announces its size in the ISIZE trailer, which is checked
+    // before the stream is handed to the decoder.
+    final gzip = Uint8List.fromList(
+      const GZipEncoder().encodeBytes(utf8.encode('{"version":2}'), level: 9),
+    );
+    final claimed = kMaxQrPayloadBytes + 1;
+    for (var b = 0; b < 4; b += 1) {
+      gzip[gzip.length - 4 + b] = (claimed >> (8 * b)) & 0xff;
+    }
+    final chunk = base45Encode(gzip);
+    final set = QrFrameSet();
+    expect(
+      set.add('FRL2:0123456789ABCDEF:0:1:${crc32Hex(utf8.encode(chunk))}:$chunk'),
+      QrAddResult.added,
+    );
+    // The decoder would also notice the lie, but only after inflating the
+    // stream; the ISIZE check is what keeps that allocation from happening.
+    expect(
+      () => decodeQrFrames(set),
+      throwsA(
+        isA<FormatException>().having(
+          (FormatException e) => e.message,
+          'message',
+          contains('claims ${kMaxQrPayloadBytes + 1} bytes'),
+        ),
+      ),
+    );
   });
 
   test('refuses to encode a payload that needs more frames than allowed', () {

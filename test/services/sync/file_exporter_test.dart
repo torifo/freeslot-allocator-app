@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frelocator/features/daily_plan/domain/daily_plan_models.dart';
 import 'package:frelocator/features/task_master/domain/task_models.dart';
@@ -28,6 +30,31 @@ Future<Directory> _tempDir(String prefix) async {
     if (dir.existsSync()) await dir.delete(recursive: true);
   });
   return dir;
+}
+
+/// Stands in for the desktop save dialog: it answers with a path and, like
+/// `file_picker` on Linux and Windows, writes nothing itself.
+class _FakeSaveFilePicker extends FilePicker {
+  _FakeSaveFilePicker(this.answer);
+
+  final String? answer;
+  Uint8List? bytes;
+  String? fileName;
+
+  @override
+  Future<String?> saveFile({
+    String? dialogTitle,
+    String? fileName,
+    String? initialDirectory,
+    FileType type = FileType.any,
+    List<String>? allowedExtensions,
+    Uint8List? bytes,
+    bool lockParentWindow = false,
+  }) async {
+    this.fileName = fileName;
+    this.bytes = bytes;
+    return answer;
+  }
 }
 
 void main() {
@@ -111,6 +138,35 @@ void main() {
     // `SyncService.applyReceived` re-parses this map with `strict: true`.
     expect(SyncDocument.fromJson(json, strict: true).deviceId, 'android-1');
   });
+
+  test('the desktop save writes the file at the chosen path', () async {
+    // `file_picker` writes the bytes itself on macOS but hands back an
+    // unwritten path on Linux and Windows, so the export must always write.
+    final dir = await _tempDir('frelocator-save-');
+    final target = '${dir.path}/chosen.json';
+    final picker = _FakeSaveFilePicker(target);
+    FilePicker.platform = picker;
+
+    expect(await shareExportFile(_doc()), isTrue);
+    expect(picker.fileName, 'frelocator-android-1-20260909-010203.json');
+    expect(picker.bytes, isNotNull);
+    expect(File(target).readAsStringSync(), encodeExport(_doc()));
+  }, skip: Platform.isAndroid || Platform.isIOS);
+
+  test('the desktop save overwrites a stale file of the same name', () async {
+    final dir = await _tempDir('frelocator-save-stale-');
+    final target = File('${dir.path}/chosen.json')
+      ..writeAsStringSync('{"version": 2, "stale": true}');
+    FilePicker.platform = _FakeSaveFilePicker(target.path);
+
+    expect(await shareExportFile(_doc()), isTrue);
+    expect(target.readAsStringSync(), encodeExport(_doc()));
+  }, skip: Platform.isAndroid || Platform.isIOS);
+
+  test('the desktop save reports the user backing out of the dialog', () async {
+    FilePicker.platform = _FakeSaveFilePicker(null);
+    expect(await shareExportFile(_doc()), isFalse);
+  }, skip: Platform.isAndroid || Platform.isIOS);
 
   test('refuses a file larger than the hub would accept', () async {
     final dir = await _tempDir('frelocator-big-');

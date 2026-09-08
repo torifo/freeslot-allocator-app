@@ -28,8 +28,8 @@ Future<String> writeExportFile(SyncDocument doc, {String? directory}) async {
 
 /// Hands the export to the platform: the share sheet on Android and iOS (the
 /// user picks Nearby Share, AirDrop, a cable, …), a save dialog everywhere
-/// else. Returns false when the user backed out without choosing a
-/// destination.
+/// else. Returns false only when the user backed out — dismissed the share
+/// sheet, or cancelled the save dialog without choosing a destination.
 ///
 /// On the PC side the file is read back by Claude Code's `import_file` tool or
 /// by the macOS build's 「ファイルから取り込む」.
@@ -46,7 +46,9 @@ Future<bool> shareExportFile(SyncDocument doc) async {
         text: guide,
       ),
     );
-    return result.status == ShareResultStatus.success;
+    // Android and several iOS targets report `unavailable` even when the hand-off
+    // worked, so only an explicit dismissal counts as the user backing out.
+    return result.status != ShareResultStatus.dismissed;
   }
   // `file_picker` only creates the file when it is handed the bytes, so the
   // desktop path never leaves a stray copy in the temporary directory.
@@ -58,11 +60,11 @@ Future<bool> shareExportFile(SyncDocument doc) async {
     bytes: utf8.encode(encodeExport(doc)),
   );
   if (saved == null) return false;
-  // Linux and Windows return the chosen path without writing anything.
-  final file = File(saved);
-  if (!file.existsSync() || file.lengthSync() == 0) {
-    await file.writeAsString(encodeExport(doc), flush: true);
-  }
+  // macOS writes the bytes itself, Linux and Windows hand back the chosen path
+  // without writing anything, and the path may already hold a stale export of
+  // the same name. Writing unconditionally is the only behaviour correct on all
+  // three.
+  await File(saved).writeAsString(encodeExport(doc), flush: true);
   return true;
 }
 
