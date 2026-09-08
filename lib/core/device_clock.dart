@@ -84,7 +84,7 @@ class DeviceClock {
         debugPrint('DeviceClock: failed to persist $_lastClockKey');
       }
     });
-    _persistChain = chained;
+    _persistChain = chained.catchError((_) {});
     return chained;
   }
 }
