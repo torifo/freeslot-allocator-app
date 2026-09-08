@@ -123,8 +123,9 @@ PC → スマホ（QR）
 ## ファイル所有と並行制御（macOS）
 
 - 書き込みは同一ディレクトリ内の一時ファイルに書いて `rename()` する（同一ボリューム内で原子的）。書き込み前に `data.json.bak` を 1 世代残す。
-- ハブと macOS アプリの両方が `data.lock` に POSIX advisory lock を取る（Dart は `RandomAccessFile.lock()`、Node は `proper-lockfile`）。読み出し時に mtime とサイズを記録し、書き込み直前に再検査して変わっていれば再読み込みしてマージし直す。
+- ハブと macOS アプリの両方が `proper-lockfile` 互換の mkdir センチネル方式でロックする（`<dir>/data.lock.lock` を排他的に `mkdir` し、保持中はハートビートで mtime を更新、10 秒間更新が無ければ stale とみなして奪取し、解放時に `rmdir` する）。Node 側は `proper-lockfile` パッケージがこの方式を実装しており、fcntl などの POSIX advisory lock は使わない。Dart 側もこの mkdir センチネル方式をネイティブに実装し、両者が確実に排他制御される。読み出し時に mtime とサイズを記録し、書き込み直前に再検査して変わっていれば再読み込みしてマージし直す。
 - JSON 破損時は `data.json.broken-<timestamp>` に退避して空データで起動し、MCP の応答と macOS アプリの画面に警告を出す。
+- Release ビルドは entitlements でサンドボックスを無効化しているため、Mac App Store 配布は対象外（App Store 配布には別途サンドボックス対応が必要）。
 
 ## MCP ツール一覧
 

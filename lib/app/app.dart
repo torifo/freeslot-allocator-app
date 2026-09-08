@@ -35,6 +35,7 @@ class _FrelocatorAppState extends ConsumerState<FrelocatorApp>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
+    // TODO(plan-2): defer reload while an edit dialog or in-flight save is active
     _reloadIfChanged();
   }
 
