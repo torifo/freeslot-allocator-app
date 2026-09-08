@@ -125,4 +125,62 @@ void main() {
       expect(find.text(label), findsOneWidget);
     }
   });
+
+  testWidgets('a QR transfer with hundreds of frames neither overflows nor lists them all', (tester) async {
+    final controller = await _pumpPanel(tester);
+    controller.start(SyncKind.qr);
+    controller.stage(SyncStage.scanning);
+    controller.frames(
+      received: 1,
+      total: 300,
+      missing: <int>[for (var i = 1; i < 300; i += 1) i],
+    );
+    await tester.pump();
+
+    // The panel scrolls its own body, so 300 squares cannot run off the sheet.
+    expect(tester.takeException(), isNull);
+    expect(find.byType(SingleChildScrollView), findsOneWidget);
+
+    // 12 numbers and a count, not 299 numbers.
+    expect(
+      find.text('未受信: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 他 287 コマ'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a short 未受信 list is spelled out in full', (tester) async {
+    final controller = await _pumpPanel(tester);
+    controller.start(SyncKind.qr);
+    controller.stage(SyncStage.scanning);
+    controller.frames(received: 2, total: 4, missing: <int>[2, 3]);
+    await tester.pump();
+    expect(find.text('未受信: 3, 4'), findsOneWidget);
+  });
+
+  testWidgets('the embedded panel leaves the scrolling to its host', (tester) async {
+    final controller = SyncProgressController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ListView(
+            children: <Widget>[
+              SyncProgressPanel(
+                controller: controller,
+                onCancel: () {},
+                onClose: () {},
+                scrollable: false,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    controller.start(SyncKind.qr);
+    await tester.pump();
+    // Only the host's list: a scrollable inside a scrollable would fight the
+    // user's finger for the gesture.
+    expect(find.byType(SingleChildScrollView), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 }

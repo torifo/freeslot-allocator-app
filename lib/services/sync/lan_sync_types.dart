@@ -108,5 +108,10 @@ String syncErrorMessage(String code, {String? fallback}) => switch (code) {
   'bad_request' => 'PC がこの要求を受け付けませんでした。アプリを更新してください。',
   'not_found' => 'PC のハブにこの機能がありません。PC のハブを更新してください。',
   'internal' => 'PC 側でエラーが起きました。PC のハブを再起動してからお試しください。',
+  // Not a hub code: the UI's catch-all for anything nothing else mapped. A
+  // plain Japanese sentence beats a Dart exception's `toString` on screen.
+  'unknown' => '同期に失敗しました。もう一度お試しください。',
+  // Also UI-side: the camera itself refused, so no sync ever started.
+  'camera' => 'カメラを使えませんでした。アプリを開き直すか、別の方法で受け取ってください。',
   _ => fallback ?? '同期に失敗しました（$code）。',
 };

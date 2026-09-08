@@ -131,4 +131,32 @@ void main() {
     expect(find.textContaining('pairing code rejected'), findsNothing);
     expect((await SyncSettingsStore().load()).isPaired, isFalse);
   });
+
+  testWidgets('an error nothing named still frees the button and says something', (tester) async {
+    // Without the catch-all the screen would sit on its progress bar with
+    // `_busy` stuck true, and the only way out would be the back arrow.
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final client = _FakeLanSyncClient(error: StateError('the socket went away'));
+    await _pump(tester, await _container(client));
+
+    await tester.enterText(find.byType(TextField), _pairUrl);
+    await tester.tap(find.text('この URL でペアリング'));
+    await tester.pumpAndSettle();
+
+    expect(find.text(syncErrorMessage('unknown')), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    expect(
+      tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, 'この URL でペアリング'))
+          .onPressed,
+      isNotNull,
+    );
+
+    // And the screen still works: a second, good attempt goes through.
+    await _pump(tester, await _container(_FakeLanSyncClient()));
+    await tester.enterText(find.byType(TextField), _pairUrl);
+    await tester.tap(find.text('この URL でペアリング'));
+    await tester.pumpAndSettle();
+    expect((await SyncSettingsStore().load()).isPaired, isTrue);
+  });
 }

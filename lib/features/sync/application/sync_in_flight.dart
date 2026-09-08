@@ -9,9 +9,31 @@ final syncInFlightProvider = NotifierProvider<SyncInFlight, bool>(
   SyncInFlight.new,
 );
 
+/// A counter rather than a boolean.
+///
+/// Two owners can hold a sync open at once — the settings screen behind its
+/// sheet and the QR screen it pushed — and with a plain `set(false)` whichever
+/// one finished first would clear the flag out from under the other, letting
+/// the foreground reload run into a merge that is still writing.
+///
+/// Callers must capture the notifier *before* their first `await`: once the
+/// owning widget is gone `ref.read` throws, and an [end] that never runs wedges
+/// the reload in `app.dart` for the rest of the app's life.
 class SyncInFlight extends Notifier<bool> {
-  @override
-  bool build() => false;
+  int _running = 0;
 
-  void update({required bool running}) => state = running;
+  @override
+  bool build() => _running > 0;
+
+  void begin() {
+    _running += 1;
+    state = true;
+  }
+
+  void end() {
+    // Never below zero: an unbalanced `end` must not make the next `begin`
+    // invisible to the listener in `app.dart`.
+    if (_running > 0) _running -= 1;
+    state = _running > 0;
+  }
 }

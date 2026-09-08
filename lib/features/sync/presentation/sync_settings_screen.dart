@@ -6,9 +6,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
+import '../../../core/confirm_dialog.dart';
 import '../../../core/device_clock.dart';
 import '../../../services/app_data_service.dart';
 import '../../../services/sync/file_exporter.dart';
+import '../../../services/sync/lan_sync_types.dart';
 import '../../../services/sync/sync_progress.dart';
 import '../../../services/sync/sync_service.dart';
 import '../../../services/sync/sync_settings.dart';
@@ -31,6 +33,9 @@ class SyncSettingsScreen extends ConsumerStatefulWidget {
 class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
   final SyncProgressController _progress = SyncProgressController();
 
+  TextEditingController? _hostField;
+  TextEditingController? _portField;
+
   SyncSettings? _settings;
   bool _hasBackup = false;
   bool _running = false;
@@ -45,6 +50,8 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
 
   @override
   void dispose() {
+    _hostField?.dispose();
+    _portField?.dispose();
     _progress.dispose();
     super.dispose();
   }
@@ -59,39 +66,87 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
     });
   }
 
+  /// The sheet's own context, so a pop targets the sheet's route rather than
+  /// whatever happens to be on top of this screen's navigator.
+  BuildContext? _sheetContext;
+
+  /// Pops the progress sheet, and only the progress sheet.
+  ///
+  /// `Navigator.of(screenContext).pop()` would take down whatever route is
+  /// currently on top — a dialog the user opened over the sheet, or the screen
+  /// itself once the sheet has already gone.
+  void _closeSheet() {
+    final ctx = _sheetContext;
+    if (ctx == null || !ctx.mounted) return;
+    final route = ModalRoute.of(ctx);
+    if (route == null || !route.isCurrent) return;
+    Navigator.of(ctx).pop();
+  }
+
   /// Runs one sync-shaped operation behind the progress panel.
   ///
   /// The panel stays up until the user dismisses it, so a summary or an error
   /// is never flashed past them; only a `purged_before` answer closes it early,
   /// because that outcome is a question rather than a result.
-  Future<void> _runWithPanel(Future<SyncOutcome> Function() run) async {
+  ///
+  /// [kind] starts the progress controller *before* the sheet is built: a sheet
+  /// that opens on `idle` shows a 閉じる button, and tapping it would walk away
+  /// from a run that is about to start rather than cancel it.
+  Future<void> _runWithPanel(
+    SyncKind kind,
+    Future<SyncOutcome> Function() run,
+  ) async {
     if (_running) return;
     setState(() => _running = true);
-    ref.read(syncInFlightProvider.notifier).update(running: true);
-    final navigator = Navigator.of(context);
+    // Captured before the first await: after this widget is disposed `ref.read`
+    // throws, and the `finally` below would never lower the flag — wedging the
+    // foreground reload in `app.dart` forever.
+    final inFlight = ref.read(syncInFlightProvider.notifier);
+    inFlight.begin();
+    _progress.start(kind);
+
     final Future<void> panel = showModalBottomSheet<void>(
       context: context,
       isDismissible: false,
       enableDrag: false,
-      builder: (_) => SyncProgressPanel(
-        controller: _progress,
-        onCancel: _progress.cancel,
-        onClose: () => Navigator.of(context).pop(),
-      ),
+      builder: (ctx) {
+        _sheetContext = ctx;
+        return ValueListenableBuilder<SyncProgress>(
+          valueListenable: _progress,
+          builder: (_, SyncProgress p, _) => PopScope<void>(
+            // A back gesture during the run would leave the sync writing with
+            // nothing on screen to say so; cancel is the way out instead.
+            canPop: !p.isActive,
+            child: SyncProgressPanel(
+              controller: _progress,
+              onCancel: _progress.cancel,
+              onClose: _closeSheet,
+            ),
+          ),
+        );
+      },
     );
 
-    final SyncOutcome outcome;
+    SyncOutcome outcome;
     try {
       outcome = await run();
+    } catch (error) {
+      // Nothing below `SyncService` is supposed to throw, but a plugin or a
+      // platform channel can; the panel must still land on a Japanese failure
+      // rather than an uncaught exception and a bar that never stops.
+      final message = syncErrorMessage('unknown');
+      _progress.fail('unknown', message);
+      outcome = SyncFailed('unknown', message);
     } finally {
-      ref.read(syncInFlightProvider.notifier).update(running: false);
+      inFlight.end();
       if (mounted) setState(() => _running = false);
     }
     if (!mounted) return;
 
     if (outcome is SyncNeedsReplace) {
-      navigator.pop();
+      _closeSheet();
       await panel;
+      _sheetContext = null;
       if (!mounted) return;
       await _askReplace(outcome.message);
       return;
@@ -102,12 +157,14 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
     }
     await _reload();
     await panel;
+    _sheetContext = null;
   }
 
   Future<void> _askReplace(String message) async {
     final mode = await SyncReplaceDialog.show(context, message);
     if (mode == null || !mounted) return;
     await _runWithPanel(
+      SyncKind.lan,
       () => ref.read(syncServiceProvider).syncNow(mode: mode, progress: _progress),
     );
   }
@@ -136,8 +193,7 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
       return;
     }
     if (path == null || !mounted) return;
-    _progress.start(SyncKind.file);
-    await _runWithPanel(() async {
+    await _runWithPanel(SyncKind.file, () async {
       final Map<String, dynamic> json;
       try {
         json = await readImportJson(path!);
@@ -152,6 +208,13 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
   }
 
   Future<void> _restoreBackup() async {
+    final ok = await confirmAction(
+      context,
+      title: '同期前に戻す',
+      message: '同期後にこの端末で行った変更は失われます。控えは 1 回しか使えません。',
+      confirmLabel: '戻す',
+    );
+    if (!ok || !mounted) return;
     final restored = await ref.read(syncServiceProvider).restoreBackup();
     if (restored) {
       ref.invalidate(taskMasterControllerProvider);
@@ -165,7 +228,18 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
   }
 
   Future<void> _unpair() async {
+    final ok = await confirmAction(
+      context,
+      title: 'ペアリングを解除',
+      message: 'この端末に保存した接続情報を消します。'
+          'もう一度同期するには PC の QR を読み直してください。',
+      confirmLabel: '解除',
+    );
+    if (!ok) return;
     await ref.read(syncSettingsStoreProvider).clear();
+    // The backup deliberately survives: it is this phone's own pre-sync state,
+    // not part of the connection, and unpairing right after a bad sync is
+    // exactly when the user still needs 直前の同期前に戻す.
     await _reload();
   }
 
@@ -237,6 +311,7 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
             // does nothing without saying why is worse than a greyed-out one.
             enabled: !_running,
             onTap: () => _runWithPanel(
+              SyncKind.lan,
               () => ref.read(syncServiceProvider).syncNow(progress: _progress),
             ),
           ),
@@ -309,43 +384,72 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
   );
 
   Future<void> _editHost(SyncSettings s) async {
-    final host = TextEditingController(text: s.host ?? '10.0.2.2');
-    final port = TextEditingController(text: '${s.port}');
+    // Owned by the State, not by this method: the dialog's exit animation keeps
+    // rebuilding the fields for a few frames after `showDialog` has answered,
+    // and a controller disposed on the way out would be used after disposal.
+    final host = _hostField ??= TextEditingController();
+    final port = _portField ??= TextEditingController();
+    host.text = s.host ?? '10.0.2.2';
+    port.text = '${s.port}';
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('接続先'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            TextField(
-              controller: host,
-              decoration: const InputDecoration(labelText: 'ホスト（IP）'),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          // Validated in the dialog rather than swallowed on the way out: an
+          // empty host or a port outside 1..65535 cannot be dialled at all, and
+          // silently keeping the old value would look like the edit was saved.
+          final hostError = host.text.trim().isEmpty ? 'ホストを入力してください' : null;
+          final parsed = int.tryParse(port.text.trim());
+          final portError = parsed == null || parsed < 1 || parsed > 65535
+              ? 'ポートは 1〜65535 の数字です'
+              : null;
+          return AlertDialog(
+            title: const Text('接続先'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                TextField(
+                  controller: host,
+                  autocorrect: false,
+                  onChanged: (_) => setDialogState(() {}),
+                  decoration: InputDecoration(
+                    labelText: 'ホスト（IP）',
+                    errorText: hostError,
+                  ),
+                ),
+                TextField(
+                  controller: port,
+                  keyboardType: TextInputType.number,
+                  onChanged: (_) => setDialogState(() {}),
+                  decoration: InputDecoration(
+                    labelText: 'ポート',
+                    errorText: portError,
+                  ),
+                ),
+              ],
             ),
-            TextField(
-              controller: port,
-              decoration: const InputDecoration(labelText: 'ポート'),
-              keyboardType: TextInputType.number,
-            ),
-          ],
-        ),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('やめる'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('保存'),
-          ),
-        ],
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('やめる'),
+              ),
+              FilledButton(
+                onPressed: hostError == null && portError == null
+                    ? () => Navigator.of(ctx).pop(true)
+                    : null,
+                child: const Text('保存'),
+              ),
+            ],
+          );
+        },
       ),
     );
     final newHost = host.text.trim();
-    final newPort = int.tryParse(port.text) ?? s.port;
-    host.dispose();
-    port.dispose();
+    final newPort = int.tryParse(port.text.trim());
     if (ok != true) return;
+    if (newHost.isEmpty || newPort == null || newPort < 1 || newPort > 65535) {
+      return;
+    }
     await ref.read(syncSettingsStoreProvider).save(
       s.copyWith(host: newHost, port: newPort),
     );

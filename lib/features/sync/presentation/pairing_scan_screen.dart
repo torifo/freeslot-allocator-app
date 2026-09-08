@@ -31,12 +31,15 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
     super.dispose();
   }
 
+  /// One code per camera frame is enough: pairing needs exactly one URL, and
+  /// [_pair] is guarded by `_busy` anyway.
+  ///
+  /// Returning the future rather than dropping it keeps `_pair`'s errors inside
+  /// `_pair` — where the catch-all turns them into a message on screen — rather
+  /// than surfacing as an unhandled async error from a camera callback.
   Future<void> _onCodes(List<String> codes) async {
-    if (_busy) return;
-    for (final raw in codes) {
-      await _pair(raw);
-      return;
-    }
+    if (codes.isEmpty) return;
+    await _pair(codes.first);
   }
 
   Future<void> _pair(String raw) async {
@@ -76,6 +79,15 @@ class _PairingScanScreenState extends ConsumerState<PairingScanScreen> {
     } on SyncHttpException catch (error) {
       // Never the hub's own `message`: it is English and written for logs.
       _fail(syncErrorMessage(error.code));
+    } catch (_) {
+      // A socket, a platform channel, shared_preferences: anything the two
+      // clauses above did not name. Without this the screen would sit at 「読み
+      // 取り中」 with `_busy` stuck true and no way back but the back arrow.
+      _fail(syncErrorMessage('unknown'));
+    } finally {
+      // `_fail` already cleared it on every error path; this covers the one
+      // where the widget went away mid-request and `_fail` returned early.
+      _busy = false;
     }
   }
 

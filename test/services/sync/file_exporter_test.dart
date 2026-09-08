@@ -24,6 +24,25 @@ Map<String, dynamic> _validJson() => <String, dynamic>{
   'dailyPlan': DailyPlanStateData.initial().toJson(),
 };
 
+/// Installs a fake picker for one test and puts the previous one back after.
+///
+/// `FilePicker.platform` is a global: a test that left its fake behind would
+/// hand it to every later test in the same file — and to any test file that
+/// shares the isolate. Reading it before anything has set it throws, so the
+/// "previous" is simply absent on the first use.
+void _usePicker(FilePicker picker) {
+  FilePicker? previous;
+  try {
+    previous = FilePicker.platform;
+  } on Error {
+    previous = null;
+  }
+  FilePicker.platform = picker;
+  addTearDown(() {
+    if (previous != null) FilePicker.platform = previous;
+  });
+}
+
 Future<Directory> _tempDir(String prefix) async {
   final dir = await Directory.systemTemp.createTemp(prefix);
   addTearDown(() async {
@@ -145,7 +164,7 @@ void main() {
     final dir = await _tempDir('frelocator-save-');
     final target = '${dir.path}/chosen.json';
     final picker = _FakeSaveFilePicker(target);
-    FilePicker.platform = picker;
+    _usePicker(picker);
 
     expect(await shareExportFile(_doc()), isTrue);
     expect(picker.fileName, 'frelocator-android-1-20260909-010203.json');
@@ -157,14 +176,14 @@ void main() {
     final dir = await _tempDir('frelocator-save-stale-');
     final target = File('${dir.path}/chosen.json')
       ..writeAsStringSync('{"version": 2, "stale": true}');
-    FilePicker.platform = _FakeSaveFilePicker(target.path);
+    _usePicker(_FakeSaveFilePicker(target.path));
 
     expect(await shareExportFile(_doc()), isTrue);
     expect(target.readAsStringSync(), encodeExport(_doc()));
   }, skip: Platform.isAndroid || Platform.isIOS);
 
   test('the desktop save reports the user backing out of the dialog', () async {
-    FilePicker.platform = _FakeSaveFilePicker(null);
+    _usePicker(_FakeSaveFilePicker(null));
     expect(await shareExportFile(_doc()), isFalse);
   }, skip: Platform.isAndroid || Platform.isIOS);
 

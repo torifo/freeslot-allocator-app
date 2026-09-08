@@ -77,10 +77,21 @@ const int kQrChunkChars = 600;
 /// every allocation driven by a scanned `total`.
 const int kMaxQrFrames = 512;
 
-/// Hard ceiling on the *decompressed* payload, matching the `maxOutputLength`
-/// the hub passes to `gunzipSync`. Scanned frames are untrusted input, so a
-/// handful of QR codes must not be able to expand into gigabytes of memory.
-const int kMaxQrPayloadBytes = 64 * 1024 * 1024;
+/// Hard ceiling on the *decompressed* payload. Scanned frames are untrusted
+/// input, so a handful of QR codes must not be able to expand into gigabytes of
+/// memory.
+///
+/// The same 20 MB as `kMaxImportBytes`: a document that arrives by QR and one
+/// that arrives from a file are the same document, so the tighter of the two
+/// bounds is the one that should actually hold.
+///
+/// The ISIZE pre-check this bounds is a hint, not a guarantee — gzip streams
+/// can be concatenated, and a multi-member stream's trailer describes only its
+/// last member. What keeps the decode finite either way is that the frames'
+/// own text is bounded first (`kMaxQrFrames * kQrChunkChars`), so the
+/// compressed input stays small even when its ISIZE lies; the length of the
+/// inflated bytes is then checked again for real.
+const int kMaxQrPayloadBytes = 20 * 1024 * 1024;
 
 /// What [QrFrameSet.add] made of a scanned frame.
 enum QrAddResult {
