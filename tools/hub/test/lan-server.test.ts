@@ -34,9 +34,31 @@ const call = (method: string, path: string, body?: unknown, token?: string, expe
     if (expectFp) expect(fingerprintOf(`-----BEGIN CERTIFICATE-----\n${(res.socket as any).getPeerCertificate().raw.toString('base64')}\n-----END CERTIFICATE-----`)).toBe(expectFp);
     let data = ''; res.on('data', (c) => (data += c)); res.on('end', () => resolve({ status: res.statusCode!, json: data ? JSON.parse(data) : null }));
   });
-  req.on('error', reject);
-  if (body) req.write(JSON.stringify(body));
-  req.end();
+  // The server may answer (e.g. 413) and close the socket while a large body is still
+  // being written; stop pumping once a response is in and ignore the resulting EPIPE.
+  let responded = false;
+  req.on('response', () => { responded = true; });
+  req.on('error', (e: NodeJS.ErrnoException) => {
+    if (responded && (e.code === 'EPIPE' || e.code === 'ECONNRESET')) return;
+    reject(e);
+  });
+  if (body) {
+    const text = JSON.stringify(body);
+    const CHUNK = 64 * 1024;
+    let off = 0;
+    const pump = () => {
+      while (off < text.length) {
+        if (responded) { req.end(); return; }
+        const ok = req.write(text.slice(off, off + CHUNK));
+        off += CHUNK;
+        if (!ok) { req.once('drain', pump); return; }
+      }
+      req.end();
+    };
+    pump();
+  } else {
+    req.end();
+  }
 });
 
 beforeEach(async () => {
