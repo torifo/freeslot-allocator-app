@@ -1,44 +1,48 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/device_clock.dart';
 import '../features/daily_plan/data/daily_plan_repository.dart';
-import '../features/daily_plan/domain/daily_plan_models.dart';
 import '../features/task_master/data/task_master_repository.dart';
-import '../features/task_master/domain/task_models.dart';
+import 'sync/sync_document.dart';
 
 final appDataServiceProvider = Provider<AppDataService>((ref) {
   return AppDataService(
     taskRepo: ref.read(taskMasterRepositoryProvider),
     dailyPlanRepo: ref.read(dailyPlanRepositoryProvider),
+    deviceClock: ref.read(deviceClockProvider),
   );
 });
 
 class AppDataService {
-  const AppDataService({required this.taskRepo, required this.dailyPlanRepo});
+  const AppDataService({
+    required this.taskRepo,
+    required this.dailyPlanRepo,
+    required this.deviceClock,
+  });
 
   final TaskMasterRepository taskRepo;
   final DailyPlanRepository dailyPlanRepo;
+  final DeviceClock deviceClock;
 
-  static const _schemaVersion = 1;
-
-  Future<Map<String, dynamic>> exportAll() async {
-    final taskState = await taskRepo.load();
-    final dailyPlanState = await dailyPlanRepo.load();
-    return {
-      'version': _schemaVersion,
-      'exported_at': DateTime.now().toUtc().toIso8601String(),
-      'task_master': taskState.toJson(),
-      'daily_plan': dailyPlanState.toJson(),
-    };
+  Future<SyncDocument> exportDocument() async {
+    return SyncDocument(
+      exportedAt: DateTime.now().toUtc(),
+      deviceId: deviceClock.deviceId,
+      taskMaster: await taskRepo.load(),
+      dailyPlan: await dailyPlanRepo.load(),
+    );
   }
 
-  Future<void> importAll(Map<String, dynamic> data) async {
-    final taskState = TaskMasterStateData.fromJson(
-      data['task_master'] as Map<String, dynamic>,
-    );
-    final dailyPlanState = DailyPlanStateData.fromJson(
-      data['daily_plan'] as Map<String, dynamic>,
-    );
-    await taskRepo.save(taskState);
-    await dailyPlanRepo.save(dailyPlanState);
+  Future<Map<String, dynamic>> exportAll() async =>
+      (await exportDocument()).toJson();
+
+  /// Replaces local state with [document]. Callers that merge must do so
+  /// before calling this (see SyncMerger).
+  Future<void> importDocument(SyncDocument document) async {
+    await taskRepo.save(document.taskMaster);
+    await dailyPlanRepo.save(document.dailyPlan);
   }
+
+  Future<void> importAll(Map<String, dynamic> data) =>
+      importDocument(SyncDocument.fromJson(data, strict: true));
 }
