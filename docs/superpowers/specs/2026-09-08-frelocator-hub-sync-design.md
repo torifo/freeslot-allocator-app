@@ -85,7 +85,7 @@
 ## LAN 同期プロトコル
 
 - 通信は HTTPS。ハブは初回起動時に自己署名証明書（10 年）を生成し `hub.json` に保持する。証明書の SHA-256 フィンガープリントをペアリング QR に載せ、スマホは以後そのフィンガープリントだけを信頼する（ピン留め）。cleartext 許可は行わない。
-- ペアリング: MCP ツール `sync_status` がローカル専用ページ `http://127.0.0.1:47821/pair` を返す。ページは `frelocator://pair?host=<LAN IP>&port=47820&fp=<sha256>&code=<短命コード>` を QR 表示する。短命コードは 5 分・1 回限り。スマホが `POST /pair` に code と自分の deviceId を送ると、ハブが端末別の長期トークンを返す。トークンは `hub.json` に端末ごとに保存し、`rotate_token` ツールで失効・再発行できる。
+- ペアリング: MCP ツール `sync_status` がローカル専用ページ `http://127.0.0.1:47821/pair` を返す。ページは `frelocator://pair?host=<LAN IP>&port=47820&fp=<sha256>&code=<短命コード>` を QR 表示する。短命コードは 5 分・1 回限り。スマホが `POST /pair` に code と自分の deviceId を送ると、ハブが端末別の長期トークンを返す。トークンは `hub.json` に端末ごとに保存し、`rotate_token` ツールで失効・再発行できる。スマホ側は端末トークンとフィンガープリントを `shared_preferences`（アプリのサンドボックス内、端末内のみ）に平文で保存する。OS のキーチェーンは使わない: 盗まれても影響は同じ LAN 上のハブに限られ、そのハブは `rotate_token` / `forget_device` でいつでも失効できるため、追加依存に見合わない。
 - エンドポイント（`/pair` 以外は `Authorization: Bearer <端末トークン>` 必須）
   - `POST /pair` → `{ token, hubDeviceId, fingerprint }`
   - `GET /sync` → `{ document, hubDeviceId }`（`document` は PC 側の全データ v2 JSON、`purgedBefore` 付き）
@@ -119,7 +119,7 @@ PC → スマホ（QR）
 - ファイル取り込み: 読み込み → 検証 → マージ → 保存の段階と件数。
 - macOS 版の再読み込み中はヘッダーにスピナー。編集ダイアログを開いている間は再読み込みを遅延し、閉じたときに同じマージ規則で取り込む。
 - `sync_status` に直近の同期の段階・経過時間・結果を含め、Claude 側からも進捗を確認できる。
-- 完了時は「追加 n / 更新 n / 削除 n / 警告 n」を表示する。失敗時は未接続、証明書不一致、トークン無効、JSON 破損、バージョン不一致、purge 後の長期オフライン、を別文言で表示する。
+- 完了時は「追加 n / 更新 n / 削除 n / 消去 n / 警告 n」を表示する（`消去` はハブが墓標ごと捨てた件数 = `summary.removed`。`削除` は墓標として残る件数）。失敗時は未接続、証明書不一致、トークン無効、JSON 破損、バージョン不一致、purge 後の長期オフライン、を別文言で表示する。
 
 ## ファイル所有と並行制御（macOS）
 

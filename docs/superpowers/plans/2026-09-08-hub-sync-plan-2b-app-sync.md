@@ -8,7 +8,7 @@
 
 **Tech Stack:** Flutter 3 / Dart 3、`http`（`IOClient` + `HttpClient.badCertificateCallback` でピン留め）、`mobile_scanner`、`archive`（gzip）、`share_plus`、`file_picker`、`multicast_dns`、`crypto`、`shared_preferences`。
 
-**設計書:** `docs/superpowers/specs/2026-09-08-frelocator-hub-sync-design.md`。ハブ側の HTTP 形式は Plan 2a に従う: `POST /pair {code, deviceId, name} → {token, hubDeviceId, fingerprint}`、`GET/POST /sync?mode=merge|take_hub|take_phone → {document, summary, warnings}`、`GET /health → {ok, serverTime, schema}`（`HEAD /health` も可）、エラー `{error:{code,message}}`（401 unauthorized、403 pairing_failed、409 purged_before、413 payload_too_large、426 upgrade_required）。
+**設計書:** `docs/superpowers/specs/2026-09-08-frelocator-hub-sync-design.md`。ハブ側の HTTP 形式は Plan 2a に従う: `POST /pair {code, deviceId, name} → {token, hubDeviceId, fingerprint}`、`GET/POST /sync?mode=merge|take_hub|take_phone → {document, summary, warnings}`（`summary` は `{added, updated, deleted, removed, warnings}`。`removed` はハブが墓標ごと捨てた件数で、墓標として残る `deleted` とは別に数える）、`GET /health → {ok, serverTime, schema}`（`HEAD /health` も可）、エラー `{error:{code,message}}`（401 unauthorized、403 pairing_failed、409 purged_before、413 payload_too_large、426 upgrade_required）。
 
 `POST /pair` のボディ上限は **8 KB**（`/sync` は 20 MB）で、フィールド長は `code` ≤ 64 文字、`deviceId` / `name` ≤ 128 文字。超過は `400 bad_request`、ボディ超過は `413 payload_too_large`。**413 応答はハブがボディを読み切らずに返すため `Connection: close` が付き、その接続は再利用できない**。クライアントは 413 を受けたら接続を張り直す（`IOClient` を使い回している場合は同一ソケットへの続けざまの送信を避ける）。
 
@@ -24,13 +24,14 @@
 - Create `lib/services/sync/sync_service.dart` — `SyncService`（export → post → apply）。`SyncOutcome`。
 - Create `lib/services/sync/qr_chunk_codec.dart` — base45、crc32、`QrFrameSet`、`decodeQrFrames`。
 - Create `lib/services/sync/file_exporter.dart` — JSON を一時ファイルに書いて共有シートへ。macOS はファイル選択→マージ取り込み。
-- Create `lib/services/sync/hub_discovery.dart` — mDNS で `_frelocator._tcp` を探す（任意フォールバック）。
+- Create `lib/services/sync/hub_discovery.dart` — mDNS で `_frelocator._tcp` を探す（任意フォールバック）。`dart:io` の有無で `hub_discovery_io.dart` / `hub_discovery_stub.dart` に条件付きエクスポートで分岐する（Web は常に `null`）。
+- Create `lib/services/sync/sync_backup_store.dart` — 置き換え直前の全書き出しを `sync_backup_v1`（SharedPreferences）に 1 件だけ保持する。
 - Create `lib/features/sync/presentation/sync_settings_screen.dart`、`pairing_scan_screen.dart`、`qr_receive_screen.dart`、`sync_progress_panel.dart`、`mcp_guide_section.dart`。
 - Modify `lib/app/router.dart` — `/sync`、`/sync/pair`、`/sync/qr`。
 - Modify `lib/features/home/presentation/home_screen.dart` と `lib/features/task_master/presentation/category_settings_screen.dart` — 「PC と同期」への導線。
 - Modify `lib/app/app.dart` — 保存中／ダイアログ表示中は再読み込みを遅延。
 - Modify `web/privacy.html`、`web/support.html`、`README.md`、`docs/android_store_assets_checklist.md`。
-- Tests: `test/services/sync/{sync_settings_test,sync_progress_test,lan_sync_client_test,sync_service_test,qr_chunk_codec_test,file_exporter_test}.dart`、`test/features/sync/sync_settings_screen_test.dart`。
+- Tests: `test/services/sync/{sync_settings_test,sync_progress_test,lan_sync_client_test,lan_sync_client_tls_test,sync_service_test,qr_chunk_codec_test,file_exporter_test}.dart`、`test/services/app_data_service_test.dart`、`test/fixtures/tls/{hub_cert,hub_key}.pem`、`test/features/sync/sync_settings_screen_test.dart`。
 - Cross-language fixture: `tools/hub/test/fixtures/qr/sample.frames.json`（Plan 2a の `encodeFrames` で生成した固定フレーム）を Dart 側の codec テストが読む。
 
 ---
@@ -583,8 +584,18 @@ git commit -m "feat(sync): pinned HTTPS LAN client with pairing, progress and ca
 ### Task 4: SyncService（export → sync → apply、置き換えフロー、mDNS フォールバック）
 
 **Files:**
-- Create: `lib/services/sync/sync_service.dart`、`lib/services/sync/hub_discovery.dart`
-- Test: `test/services/sync/sync_service_test.dart`
+- Create: `lib/services/sync/sync_service.dart`、`lib/services/sync/hub_discovery.dart`（`hub_discovery_io.dart` / `hub_discovery_stub.dart` に条件付きエクスポートで分岐）、`lib/services/sync/sync_backup_store.dart`
+- Modify: `lib/services/app_data_service.dart`、`lib/services/storage/state_store.dart`（`writeAll`）
+- Test: `test/services/sync/sync_service_test.dart`、`test/services/app_data_service_test.dart`
+
+この Task で確定した設計判断:
+
+- **置き換え前バックアップ（決定: 実装する）** — `take_hub` / `take_phone` は負けた側を捨てるので、`importDocument` の直前に `AppDataService.exportAll()` を `sync_backup_v1`（SharedPreferences、常に 1 件）へ退避する。`SyncService.hasBackup` / `restoreBackup()` を公開し、設定画面に「直前の同期前に戻す」を置く。復元は 1 回きり（成功したらスナップショットを消す）で、`merge` では取らない（捨てているものが無いため）。QR / ファイルの `applyReceived` は常にマージなのでバックアップ対象外。
+- **取り込みは 1 コミット** — タスクと日次計画は 1 つの文書の両半分（割当がタスク id を参照する）なので、`StateStore.writeAll(tasks, plans)` で一括に書く。`FileBackedStore` は 1 ファイル 1 ロックで本当に原子的、`PrefsStateStore` は両方をエンコードしてから書き、後半が失敗したら前半を戻す。
+- **`lastSyncAt` はハブの値** — 端末時計ではなく応答文書の `lastSyncAt`（無ければ現在 UTC）を保存する。時計が進んだ端末が未来の値を記録すると次の差分が空に見える。
+- **単一実行（single-flight）** — 実行中の `syncNow` があるあいだ、2 本目は即座に `SyncFailed('busy', …)` を返す。同じ文書を 2 回書き出して `importDocument` を競わせない。
+- **`applyReceived` は `Future<SyncOutcome>`** — 失敗マッピングを `_mapFailure` に切り出し、`syncNow` と共有する。壊れた文書は `SyncFailed('corrupt', …)` ＋ `progress.fail` になる。
+- **mDNS で見つけた住所は成功後に保存** — 再試行が通ってから `settingsStore.save`。通らなかった住所で上書きすると、手入力し直すまで復旧できない。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -1111,6 +1122,14 @@ git commit -m "feat(sync): export file to share sheet and strict file import / �
 
 UI の方針: 既存画面に合わせて `Scaffold` + `AppBar(title: Text('PC と同期'))`、`ListView` にカードを並べる。Riverpod は `ConsumerStatefulWidget`。色は既存の `AppColors` を使い、新しい色を作らない。
 
+画面側で守ること:
+
+- 進捗パネルの完了表示は「追加 n / 更新 n / 削除 n / 消去 n / 警告 n」。`消去`（`summary.removed`）はハブが墓標ごと捨てた件数で、墓標として残る `削除` と混ぜない。
+- エラー表示は例外の `message` を直接出さず、必ず `syncErrorMessage(code)` を通す（ハブの `message` は英語のログ用文言。`SyncFailed.message` には詳細として括弧で残っているが、画面には出さない）。ペアリング画面も同じ関数を使う。
+- 設定画面に「直前の同期前に戻す」を置く。`SyncService.hasBackup` が `true` のときだけ表示し、押すと `restoreBackup()`（1 回きり）。
+- 「今すぐ同期」は実行中に無効化する。押せてしまっても `SyncService` が `busy` を返すだけだが、ボタンが反応しない理由を出さないほうが不親切。
+- iOS は Play のリリース範囲外だが、`ios/Runner/Info.plist` には `NSCameraUsageDescription`（日本語）、`NSLocalNetworkUsageDescription`、`NSBonjourServices = [_frelocator._tcp]` を入れて正しい状態に保つ（後で iOS を出すときに権限だけ抜けている、を防ぐ）。
+
 - [ ] **Step 1: 失敗するウィジェットテストを書く**
 
 ```dart
@@ -1579,8 +1598,29 @@ git commit -m "docs(release): privacy policy for local sync, permissions notes, 
 
 ---
 
+## レビュー反映（Task 1-4）
+
+Task 1-4 実装後のレビューで入れた修正。番号はレビュー指摘の ID。
+
+- **C1** `HttpClient(context: SecurityContext(withTrustedRoots: false))` にする。既定のトラストストアが有効だと `badCertificateCallback` は OS が弾いた証明書にしか呼ばれず、公的 CA 署名の証明書やリダイレクト先はピンを素通りする。コールバック内で 64 桁の 16 進でないフィンガープリントは拒否し、リクエストは `followRedirects = false`（ハブはリダイレクトしない）。
+- **C2** `test/fixtures/tls/`（自己署名の PEM）＋ `HttpServer.bindSecure` の実 TLS テスト。正しいピン → 200、違うピン → `certificate`、64 桁でないピン → `certificate`、リダイレクト → 追随しない。`SecurityContext.defaultContext.setTrustedCertificatesBytes` でその証明書をプロセスに信頼させたうえで拒否されることを見て、`withTrustedRoots:false` が効いていることを証明する。
+- **I1 / I2** ハブ JSON の無検査キャストをやめ、形が違えば `SyncHttpException(0, 'corrupt', …)`。`TypeError` / `NoSuchMethodError` / `FormatException` も `corrupt` に寄せ、`unreachable` はソケット層の失敗だけに残す。
+- **I3** 応答ボディの読み出しに期限を付ける（`streamed.stream.timeout(_syncTimeout)`）。ヘッダだけ返して止まるハブでパネルが開いたままにならない。
+- **I4** チャンク送出の future を `finally` で待つ（`feeding` フラグでも止める）。413 のあとに `progress.bytes` が流れ続けない。
+- **I5** `AppDataService.importDocument` を `StateStore.writeAll` の 1 コミットに。
+- **I6** 置き換え前バックアップ `sync_backup_v1` と `SyncService.hasBackup` / `restoreBackup()`（Task 4・Task 7 参照）。
+- **I7** `lastSyncAt` はハブの応答文書から取る（フォールバックは現在 UTC）。
+- **I8** `syncNow` の single-flight ガード。2 本目は `SyncFailed('busy', …)`。
+- **I9** `applyReceived` が `Future<SyncOutcome>` を返し、`_mapFailure` を `syncNow` と共有する。
+- **I10** `TaskMasterStateData.fromJson(strict: true)` は `settings` オブジェクトを必須にする（無ければ `FormatException`）。非 strict は v1 互換のフォールバックのまま。
+- **I11** Android の mDNS は `MDnsClient(rawDatagramSocketFactory: …)` で `reusePort: false` を指定しないと `bind` に失敗する。iOS は `Info.plist` に `NSCameraUsageDescription` / `NSLocalNetworkUsageDescription` / `NSBonjourServices` を追加（リリース範囲外だが正しい状態を保つ）。
+- **I12** `bad_mode` / `bad_request` / `internal` / `not_found` / `unsupported_version` / `busy` / `corrupt` の日本語文言を追加し、ハブの英語 `message` を `fallback` に渡すのをやめる（`SyncFailed.message` の詳細としてのみ残す）。
+- **Task 2 レビュー（I-1 / M1〜M6）** `cancel()` は `{waitingHub, receiving, applying, saving}` かつ `kind == SyncKind.lan` のときだけ `hubMayHaveChanged`、非アクティブなら何もしない。`missingFrames` は `List.unmodifiable`、`copyWith` に `clearError` / `clearSummary`、`fraction` は `done` を先に 1 と判定、`sending` に入るたび `sentBytes` を 0 に戻す。`PairingInfo.parse` はポートを 1..65535 に制限。`retriable` は `retriableSyncCodes` 一箇所から導出し、`bad_timestamp` は `needsRepair` に入れない（文言も再ペアリングを約束しない表現に修正）。`health()` / `fetch()` は host / token 未設定なら `not_paired`。
+
+---
+
 ## 自己レビュー
 
 - 設計書カバレッジ: ペアリング（Task 1, 3, 7）、ピン留め TLS（Task 3）、同期 1 回で双方向（Task 4）、置き換えフロー（Task 4, 7）、mDNS フォールバック（Task 4）、エミュレーター用 host 手入力（Task 7）、QR 受信とコマグリッド（Task 5, 7）、ファイル書き出し／macOS 取り込み（Task 6, 7）、進捗の段階・経過秒・10 秒超の補足・キャンセルの意味（Task 2, 7）、再読み込みの遅延（Task 7）、プライバシーポリシー書き換え・CAMERA / INTERNET・データセーフティ（Task 1, 8）、macOS の MCP 案内（Task 7）。
-- 型の整合: `SyncSettings.isPaired/baseUrl`、`PairingInfo.parse`、`SyncProgressController.start/stage/bytes/received/frames/finish/fail/cancel`、`LanSyncClient.pair/health/fetch/sync`、`SyncHttpException(status, code, message)`、`SyncService.syncNow(mode:, progress:) → SyncOutcome`、`applyReceived`、`QrFrameSet.add → QrAddResult`、`decodeQrFrames`、`writeExportFile/shareExportFile/readImportFile/pickImportFile`。ハブ側の HTTP 形式は Plan 2a と一致（`/sync?mode=`、`{document, summary, warnings}`、エラーコード）。
-- 未決・注意: `share_plus` / `file_picker` / `mobile_scanner` の API はメジャー版で変わるので、実装時にインストール版の README を確認する。Web ビルドは LAN 同期を stub にして通す。iOS は範囲外。
+- 型の整合: `SyncSettings.isPaired/baseUrl`、`PairingInfo.parse`、`SyncProgressController.start/stage/bytes/received/frames/finish/fail/cancel`、`LanSyncClient.pair/health/fetch/sync`、`SyncHttpException(status, code, message)`、`SyncService.syncNow(mode:, progress:) → SyncOutcome`、`applyReceived(json, {progress}) → Future<SyncOutcome>`、`SyncService.hasBackup` / `restoreBackup() → Future<bool>`、`StateStore.writeAll(tasks, plans)`、`QrFrameSet.add → QrAddResult`、`decodeQrFrames`、`writeExportFile/shareExportFile/readImportFile/pickImportFile`。ハブ側の HTTP 形式は Plan 2a と一致（`/sync?mode=`、`{document, summary, warnings}`、エラーコード）。
+- 未決・注意: `share_plus` / `file_picker` / `mobile_scanner` の API はメジャー版で変わるので、実装時にインストール版の README を確認する。Web ビルドは LAN 同期を stub にして通す。iOS は Play のリリース範囲外だが、`Info.plist` の権限文言と `NSBonjourServices` だけは正しい状態に保つ。
