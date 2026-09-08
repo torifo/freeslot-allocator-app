@@ -300,4 +300,147 @@ void main() {
       expect(window.end, defaultEnd);
     });
   });
+
+  group('nextHalfHourBoundary', () {
+    test('keeps a time already on a boundary', () {
+      expect(
+        nextHalfHourBoundary(DateTime(2026, 4, 18, 9, 30)),
+        DateTime(2026, 4, 18, 9, 30),
+      );
+    });
+
+    test('rounds up to the next boundary', () {
+      expect(
+        nextHalfHourBoundary(DateTime(2026, 4, 18, 9, 1)),
+        DateTime(2026, 4, 18, 9, 30),
+      );
+      expect(
+        nextHalfHourBoundary(DateTime(2026, 4, 18, 9, 45)),
+        DateTime(2026, 4, 18, 10),
+      );
+    });
+
+    test('rounds up when only seconds have passed the boundary', () {
+      expect(
+        nextHalfHourBoundary(DateTime(2026, 4, 18, 9, 30, 1)),
+        DateTime(2026, 4, 18, 10),
+      );
+    });
+
+    test('rolls into the next day at the end of it', () {
+      expect(
+        nextHalfHourBoundary(DateTime(2026, 4, 18, 23, 40)),
+        DateTime(2026, 4, 19),
+      );
+    });
+  });
+
+  group('defaultFreeSlotRange', () {
+    test('is one hour long from the next boundary', () {
+      final range = defaultFreeSlotRange(DateTime(2026, 4, 18, 9, 12));
+      expect(range.start, DateTime(2026, 4, 18, 9, 30));
+      expect(range.end, DateTime(2026, 4, 18, 10, 30));
+    });
+  });
+
+  group('followingEndMinutes', () {
+    test('leaves the end alone while the start is still before it', () {
+      expect(
+        followingEndMinutes(
+          previousStartMinutes: 9 * 60,
+          previousEndMinutes: 11 * 60,
+          newStartMinutes: 10 * 60,
+        ),
+        11 * 60,
+      );
+    });
+
+    test('carries the previous length when the start passes the end', () {
+      expect(
+        followingEndMinutes(
+          previousStartMinutes: 9 * 60,
+          previousEndMinutes: 10 * 60,
+          newStartMinutes: 14 * 60,
+        ),
+        15 * 60,
+      );
+    });
+
+    test('falls back to an hour when there was no length', () {
+      expect(
+        followingEndMinutes(
+          previousStartMinutes: 9 * 60,
+          previousEndMinutes: 9 * 60,
+          newStartMinutes: 20 * 60,
+        ),
+        21 * 60,
+      );
+    });
+
+    test('may push the end into the next day', () {
+      expect(
+        followingEndMinutes(
+          previousStartMinutes: 60,
+          previousEndMinutes: 180,
+          newStartMinutes: 23 * 60,
+        ),
+        25 * 60,
+      );
+    });
+  });
+
+  group('assignmentEndForEstimate', () {
+    final slotEnd = DateTime(2026, 4, 18, 18);
+
+    test('uses the task estimate', () {
+      expect(
+        assignmentEndForEstimate(
+          start: DateTime(2026, 4, 18, 13),
+          estimatedMinutes: 90,
+          slotEnd: slotEnd,
+        ),
+        DateTime(2026, 4, 18, 14, 30),
+      );
+    });
+
+    test('falls back to 30 minutes when the task has no estimate', () {
+      expect(
+        assignmentEndForEstimate(
+          start: DateTime(2026, 4, 18, 13),
+          estimatedMinutes: 0,
+          slotEnd: slotEnd,
+        ),
+        DateTime(2026, 4, 18, 13, 30),
+      );
+    });
+
+    test('never runs past the slot', () {
+      expect(
+        assignmentEndForEstimate(
+          start: DateTime(2026, 4, 18, 17, 30),
+          estimatedMinutes: 240,
+          slotEnd: slotEnd,
+        ),
+        slotEnd,
+      );
+    });
+  });
+
+  group('remainingFreeMinutes', () {
+    test('subtracts the assigned minutes', () {
+      expect(remainingFreeMinutes(freeMinutes: 180, assignedMinutes: 45), 135);
+    });
+
+    test('clamps an over-booked day at zero', () {
+      expect(remainingFreeMinutes(freeMinutes: 60, assignedMinutes: 200), 0);
+    });
+  });
+
+  group('formatHoursMinutes', () {
+    test('splits into hours and minutes', () {
+      expect(formatHoursMinutes(150), '2 時間 30 分');
+      expect(formatHoursMinutes(0), '0 時間 0 分');
+      expect(formatHoursMinutes(-5), '0 時間 0 分');
+    });
+  });
 }

@@ -245,3 +245,80 @@ TimelineWindow resolveTimelineWindow({
 
   return TimelineWindow(start: start, end: end);
 }
+
+// ── Dialog defaults and follow-up maths ───────────────────────
+//
+// Kept here rather than in the dialogs so the arithmetic the walkthrough found
+// wrong (negative durations, an end time that ignores the task's estimate) can
+// be tested without pumping a widget.
+
+/// The next 30-minute boundary at or after [now].
+///
+/// A `now` that is already exactly on a boundary is that boundary; anything
+/// past it (even by a second) rounds up, so the default never starts in the
+/// past.
+DateTime nextHalfHourBoundary(DateTime now) {
+  final truncated = DateTime(now.year, now.month, now.day, now.hour, now.minute);
+  final remainder = truncated.minute % 30;
+  if (remainder == 0 && truncated.isAtSameMomentAs(now)) {
+    return truncated;
+  }
+  return truncated.add(Duration(minutes: 30 - remainder));
+}
+
+/// The free-time slot a user most likely wants when they tap 追加: the next
+/// half hour, one hour long.
+({DateTime start, DateTime end}) defaultFreeSlotRange(DateTime now) {
+  final start = nextHalfHourBoundary(now);
+  return (start: start, end: start.add(const Duration(hours: 1)));
+}
+
+/// Where the end of a slot has to move when its start is dragged past it.
+///
+/// Minutes are counted from midnight of the plan's own day, so an end on the
+/// following day is simply 1440 or more. The slot keeps the length it had; a
+/// slot with no length yet (a fresh one, or one already broken) gets an hour.
+int followingEndMinutes({
+  required int previousStartMinutes,
+  required int previousEndMinutes,
+  required int newStartMinutes,
+}) {
+  if (newStartMinutes < previousEndMinutes) {
+    return previousEndMinutes;
+  }
+  final previousLength = previousEndMinutes - previousStartMinutes;
+  return newStartMinutes + (previousLength > 0 ? previousLength : 60);
+}
+
+/// The end time an assignment should get when its source task is chosen.
+///
+/// The task's own estimate is the point of recording it; a task with no
+/// estimate falls back to half an hour. Never runs past the slot it lives in.
+DateTime assignmentEndForEstimate({
+  required DateTime start,
+  required int estimatedMinutes,
+  required DateTime slotEnd,
+}) {
+  final minutes = estimatedMinutes > 0 ? estimatedMinutes : 30;
+  final end = start.add(Duration(minutes: minutes));
+  if (end.isAfter(slotEnd) && slotEnd.isAfter(start)) {
+    return slotEnd;
+  }
+  return end;
+}
+
+/// Free minutes that nothing has been assigned to yet. Never negative: an
+/// over-booked day is 「残り 0 分」, not a minus sign the user has to decode.
+int remainingFreeMinutes({
+  required int freeMinutes,
+  required int assignedMinutes,
+}) {
+  final remaining = freeMinutes - assignedMinutes;
+  return remaining < 0 ? 0 : remaining;
+}
+
+/// 「2 時間 30 分」 — the shape used for every duration the user reads.
+String formatHoursMinutes(int minutes) {
+  final safe = minutes < 0 ? 0 : minutes;
+  return '${safe ~/ 60} 時間 ${safe % 60} 分';
+}

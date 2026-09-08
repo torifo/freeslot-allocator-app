@@ -33,6 +33,13 @@ abstract final class AppColors {
   static const deep = Color(0xFF2E1D0E); // hero card bg
   static const onDeep = Color(0xFFF5EBD8); // text on hero bg
   static const onDeepMt = Color(0xFFC4A07A); // muted text on hero bg
+
+  /// Destructive actions. Material's default red sits outside this palette
+  /// entirely and reads as a system error rather than as part of the app; a
+  /// deeper terracotta of the same family carries the same warning weight.
+  static const error = Color(0xFFB4472E);
+  static const errorSoft = Color(0xFFF7DCD3); // error container
+  static const onErrorSoft = Color(0xFF5E1D0E); // on error container
 }
 
 ThemeData buildAppTheme() {
@@ -54,6 +61,10 @@ ThemeData buildAppTheme() {
     onTertiary: Colors.white,
     tertiaryContainer: const Color(0xFFDFE8C0),
     onTertiaryContainer: AppColors.ink,
+    error: AppColors.error,
+    onError: Colors.white,
+    errorContainer: AppColors.errorSoft,
+    onErrorContainer: AppColors.onErrorSoft,
     surface: AppColors.cream,
     onSurface: AppColors.ink,
     surfaceContainerLowest: AppColors.bg,
@@ -95,6 +106,10 @@ ThemeData buildAppTheme() {
   return ThemeData(
     colorScheme: cs,
     scaffoldBackgroundColor: AppColors.bg,
+    // `DropdownButton`'s popup falls back to `canvasColor`, not to any of the
+    // scheme's surfaces: left at Material's default grey-white it was the one
+    // sheet of the app that did not belong to the palette.
+    canvasColor: AppColors.cream,
     useMaterial3: true,
     textTheme: textTheme,
     appBarTheme: AppBarTheme(
@@ -178,6 +193,20 @@ ThemeData buildAppTheme() {
         }
         return const TextStyle(color: AppColors.ink3, fontSize: 10.5);
       }),
+    ),
+    dropdownMenuTheme: DropdownMenuThemeData(
+      menuStyle: MenuStyle(
+        backgroundColor: const WidgetStatePropertyAll<Color>(AppColors.cream),
+        surfaceTintColor: const WidgetStatePropertyAll<Color>(
+          Colors.transparent,
+        ),
+        shape: WidgetStatePropertyAll<OutlinedBorder>(
+          RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: const BorderSide(color: AppColors.line),
+          ),
+        ),
+      ),
     ),
     popupMenuTheme: PopupMenuThemeData(
       color: AppColors.cream,
