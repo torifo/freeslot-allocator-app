@@ -54,7 +54,7 @@ describe('LanServer', () => {
   });
 
   it('pairs with a valid code and then syncs', async () => {
-    const code = await cfg.issuePairingCode();
+    const code = (await cfg.issuePairingCode()).code;
     const pair = await call('POST', '/pair', { code, deviceId: 'android-1', name: 'Pixel' });
     expect(pair.status).toBe(200);
     expect(pair.json.token).toMatch(/^[a-f0-9]{64}$/);
@@ -81,14 +81,14 @@ describe('LanServer', () => {
   });
 
   it('accepts deviceName as an alias for name on /pair', async () => {
-    const code = await cfg.issuePairingCode();
+    const code = (await cfg.issuePairingCode()).code;
     const pair = await call('POST', '/pair', { code, deviceId: 'android-9', deviceName: 'Galaxy' });
     expect(pair.status).toBe(200);
     expect(cfg.device('android-9')?.name).toBe('Galaxy');
   });
 
   it('maps engine rejections to their status codes', async () => {
-    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const token = await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-1', 'Pixel');
     const r = await call('POST', '/sync', { ...emptyDocument('android-1'), version: 1 }, token);
     expect(r.status).toBe(426);
     expect(r.json.error.code).toBe('upgrade_required');
@@ -103,7 +103,7 @@ describe('LanServer', () => {
   });
 
   it('rejects an oversized body with 413', async () => {
-    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const token = await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-1', 'Pixel');
     const doc = { ...emptyDocument('android-1'), blob: 'x'.repeat(21 * 1024 * 1024) };
     const r = await call('POST', '/sync', doc, token);
     expect(r.status).toBe(413);
@@ -112,7 +112,7 @@ describe('LanServer', () => {
 
   it('rejects wrong tokens and unknown routes', async () => {
     expect((await call('GET', '/sync', undefined, 'deadbeef')).status).toBe(401);
-    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const token = await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-1', 'Pixel');
     expect((await call('GET', '/nope', undefined, token)).status).toBe(404);
   });
 });
@@ -134,7 +134,7 @@ describe('LanServer input limits', () => {
 
   it('closes the connection after a 413 so a keep-alive agent does not desync', async () => {
     const agent = new Agent({ rejectUnauthorized: false, checkServerIdentity: () => undefined, keepAlive: true, maxSockets: 1 });
-    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const token = await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-1', 'Pixel');
     const big = await raw('POST', '/pair', { agent, body: JSON.stringify({ code: 'x'.repeat(9 * 1024) }) });
     expect(big.status).toBe(413);
     const after = await raw('GET', '/health', { agent, token });
@@ -144,7 +144,7 @@ describe('LanServer input limits', () => {
   });
 
   it('caps pairing field lengths', async () => {
-    const code = await cfg.issuePairingCode();
+    const code = (await cfg.issuePairingCode()).code;
     const long = await call('POST', '/pair', { code, deviceId: 'z'.repeat(200), name: 'Pixel' });
     expect(long.status).toBe(400);
     expect(long.json.error.code).toBe('bad_request');
@@ -166,14 +166,14 @@ describe('LanServer error handling', () => {
   });
 
   it('answers malformed JSON with 400 bad_request', async () => {
-    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const token = await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-1', 'Pixel');
     const r = await raw('POST', '/sync', { token, body: '{not json' });
     expect(r.status).toBe(400);
     expect(JSON.parse(r.text).error.code).toBe('bad_request');
   });
 
   it('rejects an unknown sync mode with 400 bad_mode', async () => {
-    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const token = await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-1', 'Pixel');
     const r = await call('POST', '/sync?mode=bogus', emptyDocument('android-1'), token);
     expect(r.status).toBe(400);
     expect(r.json.error.code).toBe('bad_mode');
@@ -194,14 +194,14 @@ describe('LanServer error handling', () => {
 
 describe('LanServer lifecycle and modes', () => {
   it('supports HEAD on /health', async () => {
-    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const token = await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-1', 'Pixel');
     const r = await raw('HEAD', '/health', { token });
     expect(r.status).toBe(200);
     expect(r.text).toBe('');
   });
 
   it('runs take_hub and take_phone end to end', async () => {
-    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const token = await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-1', 'Pixel');
     const phone = { ...emptyDocument('android-1'), lastSyncAt: new Date().toISOString() };
     const hub = await call('POST', '/sync?mode=take_hub', phone, token);
     expect(hub.status).toBe(200);
@@ -213,12 +213,23 @@ describe('LanServer lifecycle and modes', () => {
   });
 
   it('rejects a token after the device is forgotten', async () => {
-    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const token = await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-1', 'Pixel');
     expect((await call('GET', '/health', undefined, token)).status).toBe(200);
     await cfg.forgetDevice('android-1');
     const r = await call('GET', '/health', undefined, token);
     expect(r.status).toBe(401);
     expect(r.json.error.code).toBe('unauthorized');
+  });
+
+  it('stop() resolves promptly even with an idle keep-alive connection open', async () => {
+    const agent = new Agent({ keepAlive: true, rejectUnauthorized: false, checkServerIdentity: () => undefined });
+    // A keep-alive socket keeps `server.close()` pending until it times out.
+    expect((await call('GET', '/health')).status).toBe(401);
+    await raw('GET', '/health', { agent });
+    const started = Date.now();
+    await server.stop();
+    expect(Date.now() - started).toBeLessThan(2000);
+    agent.destroy();
   });
 
   it('tolerates stop() twice', async () => {

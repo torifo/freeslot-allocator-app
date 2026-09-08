@@ -1,9 +1,12 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, join, resolve as resolvePath, sep } from 'node:path';
 import { z } from 'zod';
 import type { DeviceRecord, HubConfig } from './config.js';
 import { Hlc, HlcClock } from './hlc.js';
 import { copyId, generateId } from './ids.js';
 import { checkInvariants } from './invariants.js';
+import { MAX_BODY } from './limits.js';
 import { isDeleted, TASK_KINDS, type Entity, type SyncDocumentJson } from './model.js';
 import { FileStore } from './store.js';
 import { SyncRejected, type SyncEngine, type SyncProgress, type SyncSummary } from './sync-engine.js';
@@ -11,6 +14,8 @@ import { SyncRejected, type SyncEngine, type SyncProgress, type SyncSummary } fr
 /** What `sync_status` reports about the LAN listener. Never carries a device token. */
 export interface LanInfo {
   listening: boolean;
+  /** True when FRELOCATOR_LAN=off: the hub never tried to listen, this is not a failure. */
+  disabled: boolean;
   url: string | null;
   addresses: string[];
   port: number | null;
@@ -18,7 +23,25 @@ export interface LanInfo {
   qrPage: string | null;
 }
 
-export interface HubToolsDeps { config: HubConfig; engine: SyncEngine; lan: () => LanInfo }
+export interface HubToolsDeps {
+  config: HubConfig;
+  engine: SyncEngine;
+  lan: () => LanInfo;
+  /** Replaces the default `import_file` allowlist (store dir, ~/Downloads, FRELOCATOR_IMPORT_DIRS). */
+  importDirs?: string[];
+}
+
+/** Expands a leading `~` and makes the path absolute; `import_file` compares only resolved paths. */
+function resolveUserPath(input: string): string {
+  const expanded = input === '~' || input.startsWith(`~${sep}`) || input.startsWith('~/')
+    ? join(homedir(), input.slice(1))
+    : input;
+  return resolvePath(expanded);
+}
+
+function isInside(child: string, parent: string): boolean {
+  return child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
+}
 
 export type DeviceStatus = Omit<DeviceRecord, 'token'> & { progress: SyncProgress | null };
 
@@ -778,38 +801,72 @@ export class HubTools {
     return this.store.undoLastWrite();
   }
 
+  /** Directories `import_file` may read from. Anything else is refused before the file is opened. */
+  private importDirs(): string[] {
+    const injected = this.deps?.importDirs;
+    const dirs = injected ?? [
+      dirname(resolveUserPath(this.store.filePath)),
+      join(homedir(), 'Downloads'),
+      ...(process.env.FRELOCATOR_IMPORT_DIRS ?? '').split(':').filter((d) => d.length > 0),
+    ];
+    return dirs.map(resolveUserPath);
+  }
+
   async importFile(input: z.infer<typeof schemas.importFile>): Promise<{
     summary: SyncSummary; warnings: string[]; deviceId: string;
   }> {
     const { config, engine } = this.requireDeps();
+    const path = resolveUserPath(input.path);
+    if (!this.importDirs().some((dir) => isInside(path, dir))) {
+      // Deliberately terse: a probe must not learn whether the file exists.
+      throw new ToolError(`path not allowed: ${path}`);
+    }
+    let size: number;
+    try {
+      size = (await stat(path)).size;
+    } catch {
+      // ENOENT and EACCES are collapsed: the difference is only useful to a prober.
+      throw new ToolError('cannot read file');
+    }
+    if (size > MAX_BODY) {
+      throw new ToolError(`file is larger than the ${MAX_BODY / (1024 * 1024)} MB import limit`);
+    }
     let text: string;
     try {
-      text = await readFile(input.path, 'utf8');
-    } catch (error) {
-      throw new ToolError(`file not found: ${input.path} (${String((error as Error).message)})`);
+      text = await readFile(path, 'utf8');
+    } catch {
+      throw new ToolError('cannot read file');
     }
     let json: unknown;
     try {
       json = JSON.parse(text);
-    } catch (error) {
-      throw new ToolError(`not valid JSON: ${String((error as Error).message)}`);
+    } catch {
+      // The parser message quotes the offending bytes, which would echo file content.
+      throw new ToolError('not valid JSON');
     }
     const doc = json as SyncDocumentJson;
     if (typeof doc.version !== 'number' || doc.version < 2) {
       throw new ToolError(`unsupported schema version ${String(doc.version)}: export the file from an app with schema v2`);
     }
     const deviceId = typeof doc.deviceId === 'string' && doc.deviceId ? doc.deviceId : 'file-import';
-    if (!config.device(deviceId)) {
-      // Registers the device so purge accounting sees it; this spends the current pairing code.
-      await config.redeemPairingCode(await config.issuePairingCode(), deviceId, 'file import');
-    }
+    const known = config.device(deviceId) !== undefined;
+    let result;
     try {
-      const result = await engine.sync(deviceId, doc, 'merge');
-      return { summary: result.summary, warnings: result.warnings, deviceId };
+      result = await engine.sync(deviceId, doc, 'merge');
     } catch (error) {
       if (error instanceof SyncRejected) throw new ToolError(`${error.code}: ${error.message}`);
       throw error;
     }
+    let { summary, warnings } = result;
+    if (!known) {
+      // Registered only now, so a rejected import leaves no device holding back purge.
+      await config.registerDevice(deviceId, 'file import');
+      await config.recordSync(deviceId, this.now().toISOString());
+      // `engine.sync` warned that it could not record the sync; we just did.
+      warnings = warnings.filter((w) => !w.startsWith('record_sync_failed:'));
+      summary = { ...summary, warnings: warnings.length };
+    }
+    return { summary, warnings, deviceId };
   }
 
   async purgeTombstones(): Promise<{ purged: number; purgedBefore: string | null }> {
@@ -825,17 +882,17 @@ export class HubTools {
     return { deviceId: input.deviceId, forgotten: true };
   }
 
-  async rotateToken(input: z.infer<typeof schemas.rotateToken>): Promise<{ deviceId: string; token: string; note: string }> {
-    let token: string;
+  /** The new token is never returned: MCP results end up in logs and chat, and only the phone needs it. */
+  async rotateToken(input: z.infer<typeof schemas.rotateToken>): Promise<{ deviceId: string; rotated: true; note: string }> {
     try {
-      token = await this.requireDeps().config.rotateToken(input.deviceId);
+      await this.requireDeps().config.rotateToken(input.deviceId);
     } catch (error) {
       throw error instanceof ToolError ? error : new ToolError(String((error as Error).message));
     }
     return {
       deviceId: input.deviceId,
-      token,
-      note: 'the phone must pair again with the new token (or scan a new pairing QR)',
+      rotated: true,
+      note: 'the old token is invalid; the phone must pair again by scanning a new pairing QR',
     };
   }
 

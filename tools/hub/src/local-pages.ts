@@ -1,4 +1,5 @@
-import { createServer, type Server } from 'node:http';
+import { randomBytes } from 'node:crypto';
+import { createServer, type IncomingMessage, type Server } from 'node:http';
 import QRCode from 'qrcode';
 import type { HubConfig } from './config.js';
 import { lanAddresses } from './net.js';
@@ -11,6 +12,8 @@ export interface LocalPagesOptions {
   lanUrl: () => string | null;
   /** Every reachable LAN IPv4, best candidate first; the phone may need one the URL does not carry. */
   lanAddresses?: () => string[];
+  /** Hard frame ceiling for `/qr`; injectable so the 413 path is testable without a huge document. */
+  maxFrames?: number;
 }
 
 /** Frames above this are still served, but the page warns that LAN sync is the better route. */
@@ -23,14 +26,22 @@ const esc = (s: string): string =>
 
 interface Reply { status: number; type: string; body: string }
 
-/**
- * Loopback-only pages. Never bind this to a LAN interface: `/pair` prints the
- * pairing code in clear text, and anyone who can read it can pair a device.
- */
+const jsonError = (status: number, code: string, message: string): Reply => ({
+  status,
+  type: 'application/json',
+  body: JSON.stringify({ error: { code, message } }),
+});
+
+interface FrameCache { hash: string; body: string }
+
+/** Loopback-only pages: `/pair` prints the pairing code in clear text, so never bind this to a LAN interface. Routes live under a random secret prefix and `guard()` rejects non-loopback navigations. */
 export class LocalPages {
   private server: Server | null = null;
+  private frameCache: FrameCache | null = null;
   readonly host = '127.0.0.1';
   port = 0;
+  /** Random per-process path prefix. Empty until `start()` mints one. */
+  private secret = '';
 
   constructor(
     private readonly config: HubConfig,
@@ -40,19 +51,24 @@ export class LocalPages {
 
   get listening(): boolean { return this.server !== null; }
 
+  /** `http://127.0.0.1:<port>/<secret>/pair`; the secret is only handed out by `sync_status`. */
+  get pairingPage(): string { return `http://${this.host}:${this.port}/${this.secret}/pair`; }
+  get qrPage(): string { return `http://${this.host}:${this.port}/${this.secret}/qr`; }
+
   private addresses(): string[] {
     return (this.options.lanAddresses ?? (() => lanAddresses()))();
   }
 
   async start(): Promise<void> {
+    this.secret = randomBytes(16).toString('hex');
     const server = createServer((req, res) => {
-      void this.handle(req.url ?? '/')
+      void this.handle(req)
         .then(({ status, type, body }) => { res.writeHead(status, { 'content-type': type }); res.end(body); })
         .catch((error: unknown) => {
           // Diagnostics go to stderr: stdout carries the MCP stdio protocol.
           process.stderr.write(`[local-pages] request failed: ${String((error as Error).stack ?? error)}\n`);
-          res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
-          res.end('internal error');
+          res.writeHead(500, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { code: 'internal', message: 'internal error' } }));
         });
     });
     this.server = server;
@@ -73,7 +89,13 @@ export class LocalPages {
   async stop(): Promise<void> {
     const server = this.server;
     this.server = null;
-    await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+    if (!server) return;
+    // `close()` alone waits for every idle keep-alive socket to go away, which
+    // hangs shutdown for as long as a browser keeps its connection open.
+    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+    server.closeIdleConnections();
+    server.closeAllConnections();
+    await closed;
   }
 
   pairingUrl(code: string): string | null {
@@ -83,21 +105,42 @@ export class LocalPages {
     return `frelocator://pair?host=${u.hostname}&port=${u.port}&fp=${this.config.fingerprint}&code=${code}`;
   }
 
-  private async handle(path: string): Promise<Reply> {
+  /** Blocks DNS rebinding (`Host: evil.com`) and cross-origin fetches, which always carry `Origin` or a cross-site `Sec-Fetch-Site`. */
+  private guard(req: IncomingMessage): Reply | null {
+    const method = req.method ?? 'GET';
+    if (method !== 'GET' && method !== 'HEAD') {
+      return jsonError(405, 'method_not_allowed', 'only GET and HEAD are accepted');
+    }
+    const host = String(req.headers.host ?? '');
+    if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) {
+      return jsonError(403, 'forbidden_host', 'this page is only reachable as 127.0.0.1 or localhost');
+    }
+    if (req.headers.origin !== undefined) {
+      return jsonError(403, 'forbidden_origin', 'cross-origin requests are not accepted');
+    }
+    const site = req.headers['sec-fetch-site'];
+    if (site !== undefined && site !== 'none' && site !== 'same-origin') {
+      return jsonError(403, 'forbidden_site', 'cross-site requests are not accepted');
+    }
+    return null;
+  }
+
+  private async handle(req: IncomingMessage): Promise<Reply> {
+    const blocked = this.guard(req);
+    if (blocked) return blocked;
     // Query strings and fragments are ignored: these pages take no input.
-    const route = path.split('?')[0].split('#')[0];
-    if (route === '/' || route === '/pair') return this.pairPage();
-    if (route === '/qr/frames.json') return this.framesJson();
-    if (route === '/qr') return this.qrPage();
-    return { status: 404, type: 'text/plain; charset=utf-8', body: 'not found' };
+    const route = (req.url ?? '/').split('?')[0].split('#')[0];
+    const prefix = `/${this.secret}`;
+    if (route === prefix || route === `${prefix}/pair`) return this.pairPage();
+    if (route === `${prefix}/qr/frames.json`) return this.framesJson();
+    if (route === `${prefix}/qr`) return this.qrPageHtml();
+    return jsonError(404, 'not_found', 'not found');
   }
 
   private async pairPage(): Promise<Reply> {
     // Reuse a code that is still valid: reloading this page (or opening it in a
     // second tab) must not silently invalidate the QR already on screen.
-    const existing = this.config.pairingCode();
-    const code = existing ? existing.code : await this.config.issuePairingCode();
-    const expiresAt = existing ? existing.expiresAt : this.config.pairingCode()?.expiresAt ?? null;
+    const { code, expiresAt } = this.config.pairingCode() ?? await this.config.issuePairingCode();
     const url = this.pairingUrl(code);
     if (!url) {
       return {
@@ -114,7 +157,7 @@ export class LocalPages {
       ? `<p class="small">LAN アドレス候補: <span class="mono">${candidates.map(esc).join(' / ')}</span>${
         others.length > 0 ? '<br>QR が繋がらない場合は、別の候補のアドレスを手入力してください。' : ''}</p>`
       : `<p class="small">LAN アドレス: <span class="mono">${esc(candidates[0] ?? lanUrl.hostname)}</span></p>`;
-    const expiry = expiresAt === null ? '' : `<p class="small">有効期限: <span class="mono">${esc(new Date(expiresAt).toISOString())}</span></p>`;
+    const expiry = `<p class="small">有効期限: <span class="mono">${esc(new Date(expiresAt).toISOString())}</span></p>`;
     return {
       status: 200,
       type: 'text/html; charset=utf-8',
@@ -134,23 +177,26 @@ export class LocalPages {
     const doc = await this.store.read();
     let frames: string[];
     try {
-      frames = encodeFrames(doc, { maxFrames: QR_MAX_FRAMES });
+      frames = encodeFrames(doc, { maxFrames: this.options.maxFrames ?? QR_MAX_FRAMES });
     } catch (error) {
-      return {
-        status: 413,
-        type: 'application/json',
-        body: JSON.stringify({ error: { code: 'too_many_frames', message: String((error as Error).message ?? error) } }),
+      return jsonError(413, 'too_many_frames', String((error as Error).message ?? error));
+    }
+    // Every frame carries the document's content hash, so an unchanged document
+    // means the rendered SVGs are still valid — and rendering them is the slow part.
+    const hash = frames[0].split(':')[1];
+    if (this.frameCache?.hash !== hash) {
+      const svgs = await Promise.all(
+        frames.map((f) => QRCode.toString(f, { type: 'svg', errorCorrectionLevel: 'M', margin: 1 })),
+      );
+      this.frameCache = {
+        hash,
+        body: JSON.stringify({ total: frames.length, warn: frames.length > QR_WARN_FRAMES, svgs }),
       };
     }
-    const svgs = await Promise.all(frames.map((f) => QRCode.toString(f, { type: 'svg', errorCorrectionLevel: 'M', margin: 1 })));
-    return {
-      status: 200,
-      type: 'application/json',
-      body: JSON.stringify({ total: frames.length, warn: frames.length > QR_WARN_FRAMES, svgs }),
-    };
+    return { status: 200, type: 'application/json', body: this.frameCache.body };
   }
 
-  private qrPage(): Reply {
+  private qrPageHtml(): Reply {
     return {
       status: 200,
       type: 'text/html; charset=utf-8',
@@ -158,25 +204,41 @@ export class LocalPages {
         <p>スマホの「設定 › PC と同期 › QR で受け取る」でカメラをこの画面に向け続けてください。コマは繰り返し表示されます。</p>
         <div class="qr" id="frame"></div>
         <p class="mono" id="status">読み込み中…</p>
+        <p><button id="reload" type="button">再読み込み</button></p>
         <label>表示間隔 <input id="interval" type="range" min="200" max="1000" step="50" value="400"> <span id="ms">400</span> ms</label>
         <script>
           const status = document.getElementById('status'); const frame = document.getElementById('frame');
           const slider = document.getElementById('interval'); const ms = document.getElementById('ms');
+          const reload = document.getElementById('reload');
           slider.oninput = () => { ms.textContent = slider.value; };
-          fetch('/qr/frames.json')
-            .then(async (r) => { const j = await r.json(); if (!r.ok) throw new Error(j.error ? j.error.message : r.status); return j; })
-            .then(({ total, svgs, warn }) => {
-              let i = 0;
-              if (warn) status.textContent = 'コマ数が多いため時間がかかります。可能なら LAN 同期を使ってください。';
-              const tick = () => {
-                frame.innerHTML = svgs[i];
-                status.textContent = 'コマ ' + (i + 1) + ' / ' + total + (warn ? '（多い）' : '');
-                i = (i + 1) % total;
-                setTimeout(tick, Number(slider.value));
-              };
-              tick();
-            })
-            .catch((e) => { status.textContent = 'エラー: ' + e.message; });
+          let run = 0;
+          const load = () => {
+            const mine = ++run;
+            frame.innerHTML = ''; status.textContent = '読み込み中…';
+            // Relative on purpose: this page lives under a random secret prefix.
+            fetch('./qr/frames.json')
+              .then(async (r) => {
+                let j = null;
+                try { j = await r.json(); } catch (e) { j = null; }
+                if (!r.ok) throw new Error(j && j.error ? j.error.message : 'HTTP ' + r.status);
+                return j;
+              })
+              .then(({ total, svgs, warn }) => {
+                let i = 0;
+                if (warn) status.textContent = 'コマ数が多いため時間がかかります。可能なら LAN 同期を使ってください。';
+                const tick = () => {
+                  if (mine !== run) return;
+                  frame.innerHTML = svgs[i];
+                  status.textContent = 'コマ ' + (i + 1) + ' / ' + total + (warn ? '（多い）' : '');
+                  i = (i + 1) % total;
+                  setTimeout(tick, Number(slider.value));
+                };
+                tick();
+              })
+              .catch((e) => { if (mine === run) status.textContent = 'エラー: ' + e.message; });
+          };
+          reload.onclick = load;
+          load();
         </script>`),
     };
   }

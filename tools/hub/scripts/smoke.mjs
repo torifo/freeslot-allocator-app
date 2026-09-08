@@ -2,6 +2,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -38,7 +39,9 @@ try {
   const status = json(await client.callTool({ name: 'sync_status', arguments: {} }));
   console.log(`sync_status: ${JSON.stringify(status)}`);
   check('LAN not listening', status.lan.listening === false && status.lan.url === null);
-  check('no lanError / configError', status.lanError === null && status.configError === null);
+  check('LAN reported as deliberately disabled', status.lan.disabled === true);
+  check('lanError names FRELOCATOR_LAN=off', status.lanError === 'LAN disabled by FRELOCATOR_LAN=off', status.lanError);
+  check('no configError', status.configError === null);
   check('fingerprint present', typeof status.fingerprint === 'string' && status.fingerprint.length === 64);
   check('no devices paired', Array.isArray(status.devices) && status.devices.length === 0);
   check('pairing code not issued', status.pairing.state === 'none');
@@ -67,12 +70,41 @@ try {
   check('pairing page on loopback', String(status.lan.pairingPage).startsWith('http://127.0.0.1:'), status.lan.pairingPage);
   check('QR page on loopback', String(status.lan.qrPage).startsWith('http://127.0.0.1:'), status.lan.qrPage);
   check('no lanError', status.lanError === null, status.lanError);
+  check('LAN not reported as disabled', status.lan.disabled === false);
   // A host with no LAN address (offline CI) legitimately reports url: null.
   check(
     'LAN url matches the address candidates',
     status.lan.addresses.length === 0 ? status.lan.url === null : String(status.lan.url).startsWith('https://'),
     `${status.lan.url} ${JSON.stringify(status.lan.addresses)}`,
   );
+
+  // The page URLs carry a random secret path segment; nothing else can guess them.
+  const localOrigin = new URL(status.lan.pairingPage).origin;
+  // `fetch` refuses to set Host, so the rebinding check needs a raw request.
+  const page = (url, headers = {}) => new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = httpRequest(
+      { host: u.hostname, port: u.port, path: u.pathname, method: 'GET', headers: { host: u.host, ...headers } },
+      (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+  const pair = await page(status.lan.pairingPage);
+  check('pairing page renders a QR', pair.status === 200 && pair.body.includes('<svg'), pair.status);
+
+  const frames = await page(new URL('./qr/frames.json', status.lan.qrPage).href);
+  const framesJson = frames.status === 200 ? JSON.parse(frames.body) : null;
+  check('QR frames served', frames.status === 200 && framesJson.total >= 1, `${frames.status} ${framesJson?.total}`);
+
+  const rebound = await page(status.lan.pairingPage, { host: 'evil.com' });
+  check('rebound Host refused', rebound.status === 403, rebound.status);
+  const unprefixed = await page(`${localOrigin}/pair`);
+  check('pages are not served without the secret prefix', unprefixed.status === 404, unprefixed.status);
 } finally {
   await client.close().catch(() => {});
   rmSync(dir2, { recursive: true, force: true });

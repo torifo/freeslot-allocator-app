@@ -2,7 +2,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { HubConfig } from '../src/config.js';
+import { HubConfig, MAX_PAIR_FAILURES } from '../src/config.js';
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'hub-config-')); });
@@ -19,11 +19,11 @@ describe('HubConfig', () => {
   it('issues a single-use pairing code that expires', async () => {
     let now = 1_000_000;
     const cfg = await HubConfig.load(dir, () => now);
-    const code = await cfg.issuePairingCode();
+    const code = (await cfg.issuePairingCode()).code;
     expect(code).toMatch(/^[A-Z0-9]{8}$/);
     now += 6 * 60 * 1000;
     await expect(cfg.redeemPairingCode(code, 'android-1', 'Pixel')).rejects.toThrow(/expired/);
-    const fresh = await cfg.issuePairingCode();
+    const fresh = (await cfg.issuePairingCode()).code;
     const token = await cfg.redeemPairingCode(fresh, 'android-1', 'Pixel');
     expect(token).toMatch(/^[a-f0-9]{64}$/);
     await expect(cfg.redeemPairingCode(fresh, 'android-2', 'x')).rejects.toThrow(/invalid/);
@@ -32,7 +32,7 @@ describe('HubConfig', () => {
 
   it('rotates, forgets and records lastSyncAt', async () => {
     const cfg = await HubConfig.load(dir, () => 5_000);
-    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const token = await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-1', 'Pixel');
     const rotated = await cfg.rotateToken('android-1');
     expect(rotated).not.toBe(token);
     expect(cfg.deviceForToken(token)).toBeUndefined();
@@ -75,7 +75,7 @@ describe('HubConfig', () => {
   it('serializes concurrent recordSync calls into one parseable hub.json', async () => {
     const cfg = await HubConfig.load(dir, () => 5_000);
     const ids = Array.from({ length: 12 }, (_, i) => `android-${i}`);
-    for (const id of ids) await cfg.redeemPairingCode(await cfg.issuePairingCode(), id, id);
+    for (const id of ids) await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, id, id);
     await Promise.all(ids.map((id, i) => cfg.recordSync(id, `2026-09-0${(i % 9) + 1}T00:00:00.000Z`)));
     const json = JSON.parse(readFileSync(join(dir, 'hub.json'), 'utf8'));
     expect(json.devices).toHaveLength(ids.length);
@@ -84,7 +84,7 @@ describe('HubConfig', () => {
 
   it('keeps a valid pairing code usable after a wrong attempt', async () => {
     const cfg = await HubConfig.load(dir, () => 5_000);
-    const code = await cfg.issuePairingCode();
+    const code = (await cfg.issuePairingCode()).code;
     await expect(cfg.redeemPairingCode('WRONGWRO', 'android-1', 'Pixel')).rejects.toThrow(/invalid/);
     expect(cfg.pairingCode()?.code).toBe(code);
     await expect(cfg.redeemPairingCode(code, 'android-1', 'Pixel')).resolves.toMatch(/^[a-f0-9]{64}$/);
@@ -101,14 +101,14 @@ describe('HubConfig', () => {
 
   it('disables a pairing code after too many failed attempts', async () => {
     const cfg = await HubConfig.load(dir, () => 5_000);
-    const code = await cfg.issuePairingCode();
+    const code = (await cfg.issuePairingCode()).code;
     for (let i = 0; i < 9; i += 1) {
       await expect(cfg.redeemPairingCode('WRONGWRO', 'android-1', 'Pixel')).rejects.toThrow(/invalid/);
     }
     expect(cfg.pairingCode()?.code).toBe(code);
     await expect(cfg.redeemPairingCode(code, 'android-1', 'Pixel')).resolves.toMatch(/^[a-f0-9]{64}$/);
 
-    const again = await cfg.issuePairingCode();
+    const again = (await cfg.issuePairingCode()).code;
     for (let i = 0; i < 10; i += 1) {
       await expect(cfg.redeemPairingCode('WRONGWRO', 'android-1', 'Pixel')).rejects.toThrow();
     }
@@ -122,9 +122,46 @@ describe('HubConfig', () => {
     await expect(cfg.redeemPairingCode('WRONGWRO', 'android-1', 'Pixel')).rejects.toMatchObject({ status: 403, code: 'pairing_failed' });
   });
 
+  it('reports the pairing state as expired once the TTL passes and locked once the budget is spent', async () => {
+    let now = 1_000_000;
+    const cfg = await HubConfig.load(dir, () => now);
+    expect(cfg.pairingState()).toEqual({ state: 'none', expiresAt: null, failures: 0 });
+    const issued = await cfg.issuePairingCode();
+    expect(cfg.pairingState()).toEqual({ state: 'issued', expiresAt: new Date(issued.expiresAt).toISOString(), failures: 0 });
+
+    now += 6 * 60 * 1000;
+    expect(cfg.pairingState()).toEqual({ state: 'expired', expiresAt: new Date(issued.expiresAt).toISOString(), failures: 0 });
+
+    const relocked = await cfg.issuePairingCode();
+    for (let i = 0; i < MAX_PAIR_FAILURES; i += 1) await cfg.recordPairFailure();
+    // Locked wins over expired: the caller needs a new code either way, but the
+    // reason it must issue one is the spent budget, not the clock.
+    expect(cfg.pairingState()).toEqual({
+      state: 'locked',
+      expiresAt: new Date(relocked.expiresAt).toISOString(),
+      failures: MAX_PAIR_FAILURES,
+    });
+    expect(cfg.pairingCode()).toBeNull();
+  });
+
+  it('registerDevice adds a device without touching pairing state', async () => {
+    const cfg = await HubConfig.load(dir, () => 5_000);
+    const issued = await cfg.issuePairingCode();
+    const record = await cfg.registerDevice('android-9', 'file import');
+    expect(record).toMatchObject({ deviceId: 'android-9', name: 'file import', lastSyncAt: null });
+    expect(record.token).toMatch(/^[a-f0-9]{64}$/);
+    // The on-screen code survives: a file import must not invalidate it.
+    expect(cfg.pairingCode()?.code).toBe(issued.code);
+    expect(cfg.pairingState()).toMatchObject({ state: 'issued', failures: 0 });
+
+    await cfg.registerDevice('android-9', 'renamed');
+    expect(cfg.devices().filter((d) => d.deviceId === 'android-9')).toHaveLength(1);
+    expect(cfg.device('android-9')!.name).toBe('renamed');
+  });
+
   it('forgets a device token', async () => {
     const cfg = await HubConfig.load(dir, () => 5_000);
-    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const token = await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-1', 'Pixel');
     expect(cfg.deviceForToken(token)?.deviceId).toBe('android-1');
     await cfg.forgetDevice('android-1');
     expect(cfg.deviceForToken(token)).toBeUndefined();

@@ -4,14 +4,13 @@ import { z } from 'zod';
 import type { HubConfig } from './config.js';
 import { SCHEMA_VERSION, type SyncDocumentJson } from './model.js';
 import { MdnsAdvertiser, lanAddress } from './net.js';
+import { MAX_BODY, MAX_PAIR_BODY } from './limits.js';
 import { SyncRejected, type SyncEngine, type SyncMode } from './sync-engine.js';
+
+export { MAX_BODY, MAX_PAIR_BODY };
 
 export interface LanServerOptions { port: number; host: string; advertise: boolean; hubDeviceId?: string }
 
-/** Bodies above this are refused with 413 rather than buffered. */
-export const MAX_BODY = 20 * 1024 * 1024;
-/** `/pair` is unauthenticated, so its budget is far smaller than `/sync`'s. */
-export const MAX_PAIR_BODY = 8 * 1024;
 
 /** Diagnostics go to stderr: stdout carries the MCP stdio protocol. */
 function logError(context: string, error: unknown): void {
@@ -80,8 +79,15 @@ export class LanServer {
 
   async stop(): Promise<void> {
     await this.mdns.stop();
-    await new Promise<void>((resolve) => (this.server ? this.server.close(() => resolve()) : resolve()));
+    const server = this.server;
     this.server = null;
+    if (!server) return;
+    // `close()` alone waits out every idle keep-alive socket, so a phone that
+    // keeps its connection open would stall hub shutdown.
+    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+    server.closeIdleConnections();
+    server.closeAllConnections();
+    await closed;
   }
 
   // No CORS headers, by design: the hub's self-signed certificate already stops

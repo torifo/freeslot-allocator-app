@@ -17,7 +17,7 @@ beforeEach(async () => {
   cfg = await HubConfig.load(dir, () => now);
   store = new FileStore(dir, 'hub-0000');
   engine = new SyncEngine(store, cfg, new HlcClock('hub-0000', () => now), () => new Date(now));
-  await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+  await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-1', 'Pixel');
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -140,7 +140,7 @@ describe('SyncEngine.purge', () => {
 
   it('takes the earliest lastSyncAt across devices regardless of string form', async () => {
     now = Date.parse('2026-09-10T00:00:00.000Z');
-    await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-2', 'Tab');
+    await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-2', 'Tab');
     await cfg.recordSync('android-1', '2026-09-08T00:00:00.000Z');
     await cfg.recordSync('android-2', '2026-09-06T09:00:00+09:00'); // 2026-09-06T00:00Z, the true minimum
     expect((await engine.purge()).purgedBefore).toBe('2026-09-05T00:00:00.000Z');
@@ -188,7 +188,7 @@ describe('SyncEngine timestamp handling', () => {
 
 describe('SyncEngine concurrency', () => {
   it('does not lose an entity when two devices sync at once', async () => {
-    await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-2', 'Tab');
+    await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-2', 'Tab');
     const [a, b] = await Promise.all([
       engine.sync('android-1', phoneDoc([task('from-1', '11-0-android-1')])),
       engine.sync('android-2', { ...phoneDoc([task('from-2', '12-0-android-2')]), deviceId: 'android-2' }),
@@ -199,7 +199,7 @@ describe('SyncEngine concurrency', () => {
   });
 
   it('tracks progress per device and exposes the most recent as lastSync', async () => {
-    await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-2', 'Tab');
+    await cfg.redeemPairingCode((await cfg.issuePairingCode()).code, 'android-2', 'Tab');
     await engine.sync('android-1', phoneDoc([]));
     await engine.sync('android-2', { ...phoneDoc([]), deviceId: 'android-2' });
     expect(engine.lastSync?.deviceId).toBe('android-2');

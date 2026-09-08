@@ -87,11 +87,35 @@ export class HubConfig {
     return { state: 'issued', expiresAt, failures: p.failures };
   }
 
-  async issuePairingCode(): Promise<string> {
+  /** Returns the issued record so callers (the pairing page) need no second read. */
+  async issuePairingCode(): Promise<{ code: string; expiresAt: number }> {
     const code = Array.from({ length: 8 }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]).join('');
-    this.json.pairing = { code, expiresAt: this.now() + PAIRING_TTL_MS, failures: 0 };
+    const expiresAt = this.now() + PAIRING_TTL_MS;
+    this.json.pairing = { code, expiresAt, failures: 0 };
     await this.save();
-    return code;
+    return { code, expiresAt };
+  }
+
+  /**
+   * Adds or updates a device WITHOUT touching pairing state: file imports must not
+   * spend the code shown on the pairing page, nor reset its failure budget.
+   * A token is still minted because `DeviceRecord` requires one; the device only
+   * learns it by pairing over the LAN, so this grants no new access.
+   */
+  async registerDevice(deviceId: string, name: string): Promise<DeviceRecord> {
+    const existing = this.json.devices.find((d) => d.deviceId === deviceId);
+    if (existing) existing.name = name;
+    else {
+      this.json.devices.push({
+        deviceId,
+        name,
+        token: randomBytes(32).toString('hex'),
+        pairedAt: new Date(this.now()).toISOString(),
+        lastSyncAt: null,
+      });
+    }
+    await this.save();
+    return { ...this.device(deviceId)! };
   }
 
   /**

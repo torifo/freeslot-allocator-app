@@ -16,8 +16,20 @@ const log = (message: string): void => void process.stderr.write(`[hub] ${messag
 const directory = process.env.FRELOCATOR_DATA_DIR ?? FileStore.defaultDirectory();
 const store = new FileStore(directory, `hub-${process.env.FRELOCATOR_HUB_ID ?? 'macos'}`);
 const clock = new HlcClock(store.deviceId);
-const lanPort = Number(process.env.FRELOCATOR_LAN_PORT ?? 47820);
-const localPort = Number(process.env.FRELOCATOR_LOCAL_PORT ?? 47821);
+/** A bad port must not silently become NaN and bind an arbitrary ephemeral port. */
+const port = (name: string, fallback: number): number => {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0 || value > 65535) {
+    log(`${name}=${raw} is not a port number (0-65535); using ${fallback}`);
+    return fallback;
+  }
+  return value;
+};
+
+const lanPort = port('FRELOCATOR_LAN_PORT', 47820);
+const localPort = port('FRELOCATOR_LOCAL_PORT', 47821);
 const lanEnabled = process.env.FRELOCATOR_LAN !== 'off';
 
 // A quarantined hub.json rejects here. The MCP server still starts so the local
@@ -43,7 +55,9 @@ const pages = config && lan
     })
   : null;
 
-let lanError: string | null = configError ? 'hub.json is unusable; LAN sync is disabled' : null;
+let lanError: string | null = configError
+  ? 'hub.json is unusable; LAN sync is disabled'
+  : (lanEnabled ? null : 'LAN disabled by FRELOCATOR_LAN=off');
 let listening = false;
 if (lanEnabled && lan && pages) {
   try {
@@ -64,11 +78,14 @@ const tools = config && engine && lan && pages
       engine,
       lan: () => ({
         listening,
+        disabled: !lanEnabled,
         url: listening && lan.address ? `https://${lan.address}:${lan.port}` : null,
         addresses: lanAddresses(),
         port: listening ? lan.port : null,
-        pairingPage: listening ? `http://127.0.0.1:${pages.port}/pair` : null,
-        qrPage: listening ? `http://127.0.0.1:${pages.port}/qr` : null,
+        // The secret path prefix lives in these URLs: it is the only thing that
+        // stops another local process from reading the pairing code.
+        pairingPage: listening ? pages.pairingPage : null,
+        qrPage: listening ? pages.qrPage : null,
       }),
     })
   : new HubTools(store, clock);
@@ -126,10 +143,10 @@ register('weekly_report', 'Aggregate time by kind/category for a week', schemas.
 register('export_data', 'Return the full v2 document', {}, () => wrap(() => tools.exportData()));
 register('undo_last_write', 'Restore data.json.bak (one generation)', {}, () => wrap(() => tools.undoLastWrite()));
 register('sync_status', 'Data file, LAN URL and certificate fingerprint, pairing/QR page URLs (localhost), paired devices, last sync progress', {}, () => wrap(async () => ({ ...(await tools.syncStatus()), lanError, configError })));
-register('import_file', 'Merge a v2 JSON file exported from the phone into the hub data (records the file\'s deviceId for purge accounting; invalidates any pairing code on screen)', schemas.importFile.shape, (i) => wrap(() => tools.importFile(i)));
+register('import_file', 'Merge a v2 JSON file exported from the phone into the hub data (the file must live under the data dir, ~/Downloads or FRELOCATOR_IMPORT_DIRS; its deviceId is registered for purge accounting only after the merge succeeds, and no pairing code is consumed)', schemas.importFile.shape, (i) => wrap(() => tools.importFile(i)));
 register('purge_tombstones', 'Physically delete tombstones deleted before min(lastSyncAt of paired devices) - 24h; sets purgedBefore', {}, () => wrap(() => tools.purgeTombstones()));
 register('forget_device', 'Remove a paired device so it no longer holds back tombstone purge', schemas.forgetDevice.shape, (i) => wrap(() => tools.forgetDevice(i)));
-register('rotate_token', 'Invalidate a device token; the phone must pair again', schemas.rotateToken.shape, (i) => wrap(() => tools.rotateToken(i)));
+register('rotate_token', 'Invalidate a device token and issue a new one; the new token is not returned, so the phone must pair again', schemas.rotateToken.shape, (i) => wrap(() => tools.rotateToken(i)));
 
 let shuttingDown = false;
 const shutdown = async (): Promise<void> => {
@@ -137,7 +154,10 @@ const shutdown = async (): Promise<void> => {
   shuttingDown = true;
   await pages?.stop().catch(() => {});
   await lan?.stop().catch(() => {}); // also stops the mDNS advertisement
-  process.exit(0);
+  await server.close().catch(() => {});
+  // Exit on an empty event loop so in-flight writes finish; the timer is only
+  // a backstop for a handle that refuses to close.
+  setTimeout(() => process.exit(0), 3000).unref();
 };
 process.on('SIGINT', () => void shutdown());
 process.on('SIGTERM', () => void shutdown());
