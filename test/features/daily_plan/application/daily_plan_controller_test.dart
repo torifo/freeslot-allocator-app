@@ -140,6 +140,33 @@ void main() {
         );
       },
     );
+
+    test('says which day is missing in the words of the button', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'daily_plan_state_v1': _sampleState().encode(),
+      });
+      final container = await testContainer();
+      addTearDown(container.dispose);
+
+      await container.read(dailyPlanControllerProvider.future);
+      final notifier = container.read(dailyPlanControllerProvider.notifier);
+
+      // 「複製元の DailyPlan」 named a class the user has never seen; the button
+      // they pressed says 「別日から取り込む」 (M-3).
+      await expectLater(
+        () => notifier.duplicatePlan(
+          sourceDate: DateTime(2026, 4, 1),
+          targetDate: DateTime(2026, 4, 20),
+        ),
+        throwsA(
+          isA<DailyPlanValidationException>().having(
+            (error) => error.message,
+            'message',
+            '取り込み元の日次計画が見つかりません。',
+          ),
+        ),
+      );
+    });
   });
 
   group('upsertSlot', () {

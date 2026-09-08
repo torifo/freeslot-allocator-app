@@ -267,9 +267,31 @@ DateTime nextHalfHourBoundary(DateTime now) {
 }
 
 /// The free-time slot a user most likely wants when they tap 追加: the next
-/// half hour, one hour long.
-({DateTime start, DateTime end}) defaultFreeSlotRange(DateTime now) {
+/// half hour on [planDate], one hour long.
+///
+/// 「次の 30 分」 only means anything on the day the user is actually living
+/// through: on any other day the default is a plain 09:00–10:00, rather than
+/// tonight's clock time stamped onto next Tuesday (M-1). Late in the evening
+/// the range is squeezed into 23:00–23:59 instead of rolling into the day
+/// after — the dialog reads clock times only, so a start of 00:30 would
+/// silently mean this morning, in the past.
+({DateTime start, DateTime end}) defaultFreeSlotRange(
+  DateTime now,
+  DateTime planDate,
+) {
+  final day = dateOnly(planDate);
+  final lateStart = day.add(const Duration(hours: 23));
+  final lateEnd = day.add(const Duration(hours: 23, minutes: 59));
+  if (!dateOnly(now).isAtSameMomentAs(day)) {
+    return (
+      start: day.add(const Duration(hours: 9)),
+      end: day.add(const Duration(hours: 10)),
+    );
+  }
   final start = nextHalfHourBoundary(now);
+  if (!dateOnly(start).isAtSameMomentAs(day) || !start.isBefore(lateStart)) {
+    return (start: lateStart, end: lateEnd);
+  }
   return (start: start, end: start.add(const Duration(hours: 1)));
 }
 
@@ -301,10 +323,10 @@ DateTime assignmentEndForEstimate({
 }) {
   final minutes = estimatedMinutes > 0 ? estimatedMinutes : 30;
   final end = start.add(Duration(minutes: minutes));
-  if (end.isAfter(slotEnd) && slotEnd.isAfter(start)) {
-    return slotEnd;
-  }
-  return end;
+  // Including a start already at or past the slot's end: the doc says never
+  // past the slot, and the old guard quietly made an exception of the one case
+  // where the result was furthest outside it (M-2).
+  return end.isAfter(slotEnd) ? slotEnd : end;
 }
 
 /// Free minutes that nothing has been assigned to yet. Never negative: an
@@ -318,7 +340,15 @@ int remainingFreeMinutes({
 }
 
 /// 「2 時間 30 分」 — the shape used for every duration the user reads.
+///
+/// The empty half is dropped: under an hour is 「45 分」 and a whole number of
+/// hours is 「1 時間」, because 「0 時間 45 分」 and 「1 時間 0 分」 are how a clock
+/// counts, not how anyone says it (I-5). Nothing at all is still 「0 分」.
 String formatHoursMinutes(int minutes) {
   final safe = minutes < 0 ? 0 : minutes;
-  return '${safe ~/ 60} 時間 ${safe % 60} 分';
+  final hours = safe ~/ 60;
+  final remainder = safe % 60;
+  if (hours == 0) return '$remainder 分';
+  if (remainder == 0) return '$hours 時間';
+  return '$hours 時間 $remainder 分';
 }

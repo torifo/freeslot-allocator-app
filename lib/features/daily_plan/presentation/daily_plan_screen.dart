@@ -520,6 +520,14 @@ class _DateSummaryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasConfiguredSlots = plan != null && slotCount > 0;
+    // Three states, not two: a day with no plan at all and a plan with no
+    // slots in it are different problems with different next steps, and 「枠
+    // 未設定」 on a day that has no plan pointed at the wrong one (M-6).
+    final badgeLabel = plan == null
+        ? '未作成'
+        : hasConfiguredSlots
+        ? '枠 $slotCount 件'
+        : '枠 未設定';
 
     return Container(
       padding: const EdgeInsets.all(22),
@@ -601,7 +609,7 @@ class _DateSummaryCard extends StatelessWidget {
                       // 「作成済み」 was true of a plan with no slots in it,
                       // which is the state the user most needs to notice
                       // (I-14).
-                      hasConfiguredSlots ? '枠 $slotCount 件' : '枠 未設定',
+                      badgeLabel,
                       style: japaneseSerifTextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.w600,
@@ -1277,55 +1285,69 @@ class _SlotCard extends StatelessWidget {
             const SizedBox(height: 12),
             if (assignments.isEmpty) ...[
               const Text('まだ予定は入っていません。'),
-              if (isDragging) ...[
-                const SizedBox(height: 8),
-                _AssignmentDropZone(
-                  onAccept: (assignment) => onMoveAssignment(assignment),
-                  label: 'ここにドロップして先頭から配置',
-                ),
-              ],
+              const SizedBox(height: 8),
+              _AssignmentDropZone(
+                active: isDragging,
+                onAccept: (assignment) => onMoveAssignment(assignment),
+                label: 'ここにドロップして先頭から配置',
+              ),
             ] else ...[
               const Text('長押しでドラッグすると、各予定の手前か末尾に再配置できます。'),
-              if (containsDraggedAssignment) ...[
-                const SizedBox(height: 8),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
-                  ),
-                  decoration: BoxDecoration(
-                    color: colorScheme.primaryContainer.withValues(alpha: 0.55),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    '移動中: ドロップ先を選ぶと、この枠の予定順を組み替えます。',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: colorScheme.onPrimaryContainer,
-                    ),
-                  ),
-                ),
-              ],
+              // Like the drop zones, this grows out of nothing rather than
+              // appearing at full height under the finger that just started
+              // the drag (I-6).
+              AnimatedSize(
+                duration: const Duration(milliseconds: 140),
+                curve: Curves.easeOut,
+                alignment: Alignment.topCenter,
+                child: !containsDraggedAssignment
+                    ? const SizedBox(width: double.infinity, height: 0)
+                    : Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: colorScheme.primaryContainer.withValues(
+                              alpha: 0.55,
+                            ),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            '移動中: ドロップ先を選ぶと、この枠の予定順を組み替えます。',
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(
+                                  color: colorScheme.onPrimaryContainer,
+                                ),
+                          ),
+                        ),
+                      ),
+              ),
               const SizedBox(height: 8),
               ...assignments.indexed.expand((entry) {
                 final (index, assignment) = entry;
                 return <Widget>[
-                  // Drop targets are scaffolding for a gesture in progress:
-                  // outside a drag they were five extra rows of chrome between
-                  // the user and their actual plan (M-16).
-                  if (isDragging)
-                    _AssignmentDropZone(
-                      onAccept: (dragged) => onMoveAssignment(
-                        dragged,
-                        beforeAssignmentId: assignment.id,
-                      ),
-                      label:
-                          '${DateFormat('HH:mm').format(assignment.startAt)} の前に挿入',
-                      noOpAssignmentIds: <String>{
-                        assignment.id,
-                        if (index > 0) assignments[index - 1].id,
-                      },
+                  // Drop targets are scaffolding for a gesture in progress, so
+                  // outside a drag they show nothing (M-16) — but they stay in
+                  // the tree at zero height and grow into place, because a row
+                  // of them appearing on long-press moved the list out from
+                  // under the finger that started the drag (I-6).
+                  _AssignmentDropZone(
+                    active: isDragging,
+                    onAccept: (dragged) => onMoveAssignment(
+                      dragged,
+                      beforeAssignmentId: assignment.id,
                     ),
+                    label:
+                        '${DateFormat('HH:mm').format(assignment.startAt)} の前に挿入',
+                    noOpAssignmentIds: <String>{
+                      assignment.id,
+                      if (index > 0) assignments[index - 1].id,
+                    },
+                  ),
                   LongPressDraggable<SlotTaskAssignment>(
                     data: assignment,
                     onDragStarted: () => onDragStateChanged(assignment.id),
@@ -1381,12 +1403,12 @@ class _SlotCard extends StatelessWidget {
                   ),
                 ];
               }),
-              if (isDragging)
-                _AssignmentDropZone(
-                  onAccept: (assignment) => onMoveAssignment(assignment),
-                  label: '末尾に移動',
-                  noOpAssignmentIds: <String>{assignments.last.id},
-                ),
+              _AssignmentDropZone(
+                active: isDragging,
+                onAccept: (assignment) => onMoveAssignment(assignment),
+                label: '末尾に移動',
+                noOpAssignmentIds: <String>{assignments.last.id},
+              ),
             ],
           ],
         ),
@@ -1395,21 +1417,46 @@ class _SlotCard extends StatelessWidget {
   }
 }
 
+/// A place to drop an assignment, present at all times and visible only while
+/// a drag is running.
+///
+/// It used to be added to the tree on drag start, which reflowed the list at
+/// the moment the user's finger was resting on a row: the tile they had picked
+/// up slid away under them. Staying put at zero height and animating open
+/// keeps the layout still (I-6).
 class _AssignmentDropZone extends StatelessWidget {
   const _AssignmentDropZone({
     required this.onAccept,
     required this.label,
+    required this.active,
     this.noOpAssignmentIds = const <String>{},
   });
 
   final ValueChanged<SlotTaskAssignment> onAccept;
   final String label;
 
+  /// Whether a drag is running. Collapsed and untouchable otherwise.
+  final bool active;
+
   /// Assignments whose drop here would not change the order.
   final Set<String> noOpAssignmentIds;
 
   @override
   Widget build(BuildContext context) {
+    return IgnorePointer(
+      ignoring: !active,
+      child: AnimatedSize(
+        duration: const Duration(milliseconds: 140),
+        curve: Curves.easeOut,
+        alignment: Alignment.topCenter,
+        child: active
+            ? _buildTarget(context)
+            : const SizedBox(width: double.infinity, height: 0),
+      ),
+    );
+  }
+
+  Widget _buildTarget(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     return DragTarget<SlotTaskAssignment>(
       onWillAcceptWithDetails: (details) =>
@@ -1778,7 +1825,7 @@ class _SlotEditDialogState extends State<_SlotEditDialog> {
     if (initial == null) {
       // A new slot opens on the next half hour rather than on 00:00, which is
       // never what anyone wanted and cost two pickers to get away from (M-6).
-      final range = defaultFreeSlotRange(DateTime.now());
+      final range = defaultFreeSlotRange(DateTime.now(), widget.planDate);
       _startTime = TimeOfDay.fromDateTime(range.start);
       _endTime = _startTime;
       _endNextDay = false;

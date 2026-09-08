@@ -336,10 +336,54 @@ void main() {
   });
 
   group('defaultFreeSlotRange', () {
-    test('is one hour long from the next boundary', () {
-      final range = defaultFreeSlotRange(DateTime(2026, 4, 18, 9, 12));
+    final today = DateTime(2026, 4, 18);
+
+    test('is one hour long from the next boundary on the day being planned', () {
+      final range = defaultFreeSlotRange(DateTime(2026, 4, 18, 9, 12), today);
       expect(range.start, DateTime(2026, 4, 18, 9, 30));
       expect(range.end, DateTime(2026, 4, 18, 10, 30));
+    });
+
+    test('opens at 09:00 on any day but today', () {
+      // 「次の 30 分」 is a statement about now, and now is not on the day being
+      // planned: a slot at 23:30 tonight is nonsense on next Tuesday
+      // (M-1).
+      final range = defaultFreeSlotRange(
+        DateTime(2026, 4, 18, 22, 40),
+        DateTime(2026, 4, 21),
+      );
+      expect(range.start, DateTime(2026, 4, 21, 9));
+      expect(range.end, DateTime(2026, 4, 21, 10));
+
+      final past = defaultFreeSlotRange(
+        DateTime(2026, 4, 18, 9, 12),
+        DateTime(2026, 4, 10),
+      );
+      expect(past.start, DateTime(2026, 4, 10, 9));
+      expect(past.end, DateTime(2026, 4, 10, 10));
+    });
+
+    test('stays on the day being planned at the end of it', () {
+      // The boundary itself rolls into tomorrow; the dialog only reads the
+      // clock times, so a start of 00:00 would silently be this morning.
+      final range = defaultFreeSlotRange(DateTime(2026, 4, 18, 23, 40), today);
+      expect(range.start, DateTime(2026, 4, 18, 23));
+      expect(range.end, DateTime(2026, 4, 18, 23, 59));
+    });
+
+    test('gives up the full hour rather than the day when it is nearly over', () {
+      final range = defaultFreeSlotRange(DateTime(2026, 4, 18, 22, 45), today);
+      expect(range.start, DateTime(2026, 4, 18, 23));
+      expect(range.end, DateTime(2026, 4, 18, 23, 59));
+    });
+
+    test('never starts in the past on the day being planned', () {
+      for (final minute in <int>[0, 1, 29, 30, 31, 59]) {
+        final now = DateTime(2026, 4, 18, 14, minute);
+        final range = defaultFreeSlotRange(now, today);
+        expect(range.start.isBefore(now), isFalse, reason: '\$now');
+        expect(range.end.isAfter(range.start), isTrue, reason: '\$now');
+      }
     });
   });
 
@@ -424,6 +468,27 @@ void main() {
         slotEnd,
       );
     });
+
+    test('clamps a start that is already at or past the end of the slot', () {
+      // The old guard gave up here and handed back start + estimate, an
+      // assignment sitting outside the slot it belongs to (M-2).
+      expect(
+        assignmentEndForEstimate(
+          start: slotEnd,
+          estimatedMinutes: 30,
+          slotEnd: slotEnd,
+        ),
+        slotEnd,
+      );
+      expect(
+        assignmentEndForEstimate(
+          start: DateTime(2026, 4, 18, 19),
+          estimatedMinutes: 30,
+          slotEnd: slotEnd,
+        ),
+        slotEnd,
+      );
+    });
   });
 
   group('remainingFreeMinutes', () {
@@ -437,10 +502,21 @@ void main() {
   });
 
   group('formatHoursMinutes', () {
-    test('splits into hours and minutes', () {
-      expect(formatHoursMinutes(150), '2 時間 30 分');
-      expect(formatHoursMinutes(0), '0 時間 0 分');
-      expect(formatHoursMinutes(-5), '0 時間 0 分');
+    test('says it the way a person would', () {
+      // 「0 時間 45 分」 and 「1 時間 0 分」 are what a clock says, not what a
+      // reader says (I-5).
+      const cases = <int, String>{
+        0: '0 分',
+        45: '45 分',
+        60: '1 時間',
+        90: '1 時間 30 分',
+        150: '2 時間 30 分',
+        1500: '25 時間',
+        -5: '0 分',
+      };
+      cases.forEach((minutes, expected) {
+        expect(formatHoursMinutes(minutes), expected, reason: '\$minutes');
+      });
     });
   });
 }

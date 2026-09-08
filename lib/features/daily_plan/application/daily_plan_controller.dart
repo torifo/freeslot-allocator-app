@@ -163,7 +163,9 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
 
     final sourcePlan = current.planForDate(normalizedSource);
     if (sourcePlan == null) {
-      throw const DailyPlanValidationException('複製元の DailyPlan が見つかりません。');
+      // 「DailyPlan」 is the class name, not a word on any screen: the button
+      // the user pressed says 「別日から取り込む」 (M-3).
+      throw const DailyPlanValidationException('取り込み元の日次計画が見つかりません。');
     }
 
     final existingTargetPlan = current.planForDate(normalizedTarget);
