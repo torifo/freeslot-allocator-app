@@ -13,6 +13,8 @@
 **Plan 2b への申し送り（バッチ 1 レビュー）:**
 - クライアントは**フィンガープリントでピン留め**し、ホスト名検証はバイパスする（Dart は `HttpClient.badCertificateCallback` で証明書の SHA-256 を照合して判定する）。証明書には SAN（`frelocator-hub.local` / `localhost` / `127.0.0.1`）が入っているが、LAN の IP 直打ちでは一致しないため。
 - **ワイヤ上の時刻は必ず UTC ISO-8601（`Z` 付き）**で送る。ハブは `Date.parse` の瞬間比較で判定するが、オフセット無しの文字列はハブのローカル時刻として解釈されるため、`Z` 無しの送信は禁止。
+- **Dart 側のマージも `purgedBefore` を「瞬間の最大値」で扱う**こと（ハブの `merge.ts` と同じ規則）。文字列の辞書順比較にすると `+09:00` 付きの値が `Z` の値より新しく見えて `purgedBefore` を巻き戻し、墓標が復活する。採用した値は UTC ISO へ正規化して保存する。
+- **`taskMaster.settings` はワイヤ上必須**。ハブのスキーマは `settings`（`shareCategories: boolean` を含む）が無い文書を `400 invalid_document` で拒否する。`take_phone` は受信文書をそのまま保存するため、欠落した文書を通すと以降のマージが全て壊れる。
 
 ---
 
@@ -844,7 +846,8 @@ git commit -m "feat(hub): sync engine with purgedBefore guard and tombstone purg
 **Files:**
 - Create: `src/lan-server.ts`、`src/net.ts`
 - Modify: `package.json`（`bonjour-service: ^1.3.0`）
-- Test: `test/lan-server.test.ts`
+- Modify: `src/config.ts`（`recordPairFailure()`、ペアリング失敗の拒否を `SyncRejected(403, ...)` 化）
+- Test: `test/lan-server.test.ts`、`test/config.test.ts`（追記）
 
 > **NOTE（バッチ 1 レビューの申し送り）:** 以下は本タスクの実装時に必ず入れること。
 > - `/pair` の失敗回数に上限を設ける（例: 10 回失敗でそのコードを無効化）。`HubConfig` 側でコード単位に失敗回数を持つ。
@@ -989,7 +992,9 @@ export class LanServer {
   get address(): string | null { return this.options.host === '0.0.0.0' ? lanAddress() : this.options.host; }
 
   async start(): Promise<void> {
-    this.server = createServer({ cert: this.config.certPem, key: this.config.keyPem }, (req, res) => void this.handle(req, res).catch((e) => send(res, 500, { error: { code: 'internal', message: String(e) } })));
+    this.server = createServer({ cert: this.config.certPem, key: this.config.keyPem }, (req, res) => void this.handle(req, res).catch((e) => (e instanceof SyncRejected
+      ? send(res, e.status, { error: { code: e.code, message: e.message } })
+      : send(res, 500, { error: { code: 'internal', message: String(e) } }))));
     await new Promise<void>((resolve, reject) => { this.server!.once('error', reject); this.server!.listen(this.options.port, this.options.host, () => resolve()); });
     this.port = (this.server.address() as { port: number }).port;
     if (this.options.advertise) this.mdns.start(this.port, this.hubDeviceId);
@@ -1034,7 +1039,10 @@ export class LanServer {
       const token = await this.config.redeemPairingCode(parsed.data.code, parsed.data.deviceId, parsed.data.name);
       return send(res, 200, { token, hubDeviceId: this.hubDeviceId, fingerprint: this.config.fingerprint });
     } catch (error) {
-      return send(res, 403, { error: { code: 'pairing_failed', message: String((error as Error).message) } });
+      // 不正・期限切れ・試行回数超過は SyncRejected(403)。それ以外（hub.json の
+      // 書き込み失敗など）はクライアントの落ち度ではないので 500 で返す。
+      if (error instanceof SyncRejected) return send(res, error.status, { error: { code: error.code, message: error.message } });
+      return send(res, 500, { error: { code: 'internal', message: String((error as Error).message) } });
     }
   }
 }
@@ -1047,13 +1055,24 @@ function send(res: ServerResponse, status: number, body: unknown): void {
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = []; let size = 0;
-  for await (const chunk of req) { size += (chunk as Buffer).length; if (size > MAX_BODY) throw new Error('body too large'); chunks.push(chunk as Buffer); }
+  // 上限超過は 413（NOTE の要求）。汎用 500 に落ちないよう SyncRejected で投げ、
+  // トップレベルの catch がエンベロープにマップする。
+  for await (const chunk of req) { size += (chunk as Buffer).length; if (size > MAX_BODY) throw new SyncRejected(413, 'payload_too_large', `request body exceeds ${MAX_BODY} bytes`); chunks.push(chunk as Buffer); }
   const text = Buffer.concat(chunks).toString('utf8');
   return text ? JSON.parse(text) : {};
 }
 ```
 
 `SyncEngine` に `get store()` を公開して `this.engine['store']` のブラケットアクセスをやめる（`readonly store` を public にする）。
+
+- [ ] **Step 3b: `HubConfig` に `/pair` 失敗回数の上限を入れる（NOTE の要求）**
+
+`hub.json` の `pairing` に `failures: number` を持たせ、`HubConfig.recordPairFailure()` で加算する。
+`redeemPairingCode` はコード不一致のたびに `recordPairFailure()` を呼び、**10 回失敗した時点で `this.json.pairing = null`**（そのコードを無効化）して保存する。
+失敗系の拒否は plain `Error` ではなく `SyncRejected(403, 'pairing_failed' | 'pairing_code_expired' | 'too_many_attempts', …)` で投げ、`pair()` がそのままエンベロープにマップできるようにする。
+成功時は `pairing` ごと破棄されるのでカウンタも消える。
+
+テスト（`test/config.test.ts`）: 誤コードを 9 回入れても正しいコードはまだ通る／10 回目の失敗後は正しいコードでも `too_many_attempts` で拒否される。
 
 - [ ] **Step 4: テストを通す**
 
@@ -1063,7 +1082,7 @@ Expected: PASS（`bonjour-service` はテストでは `advertise: false`）
 - [ ] **Step 5: コミット**
 
 ```bash
-git add tools/hub/package.json tools/hub/package-lock.json tools/hub/src/net.ts tools/hub/src/lan-server.ts tools/hub/src/sync-engine.ts tools/hub/test/lan-server.test.ts
+git add tools/hub/package.json tools/hub/package-lock.json tools/hub/src/net.ts tools/hub/src/lan-server.ts tools/hub/src/sync-engine.ts tools/hub/src/config.ts tools/hub/test/lan-server.test.ts tools/hub/test/config.test.ts
 git commit -m "feat(hub): HTTPS LAN server with pairing, bearer tokens and mDNS / LAN サーバーとペアリング"
 ```
 
@@ -1542,6 +1561,10 @@ export class HubTools {
   }
 
   async purgeTombstones() { return this.requireDeps().engine.purge(); }
+
+  // 注意: 未登録端末の `import_file` は `issuePairingCode()` を呼ぶため、
+  // 発行済みで未使用のペアリングコードがあれば上書きされて無効になる。
+  // ペアリング操作中のファイル取り込みは避けるか、取り込み後にコードを再発行する。
   async forgetDevice(input: z.infer<typeof schemas.forgetDevice>) { await this.requireDeps().config.forgetDevice(input.deviceId).catch((e) => { throw new ToolError(String((e as Error).message)); }); return { deviceId: input.deviceId, forgotten: true }; }
   async rotateToken(input: z.infer<typeof schemas.rotateToken>) { const token = await this.requireDeps().config.rotateToken(input.deviceId).catch((e) => { throw new ToolError(String((e as Error).message)); }); return { deviceId: input.deviceId, token, note: 'the phone must pair again with the new token (or scan a new pairing QR)' }; }
 
@@ -1578,33 +1601,46 @@ const lanEnabled = process.env.FRELOCATOR_LAN !== 'off';
 
 const store = new FileStore(directory, hubDeviceId);
 const clock = new HlcClock(hubDeviceId);
-const config = await HubConfig.load(directory);
-const engine = new SyncEngine(store, config, clock);
-const lan = new LanServer(config, engine, { port: lanPort, host: '0.0.0.0', advertise: true, hubDeviceId });
-const pages = new LocalPages(config, store, { port: localPort, lanUrl: () => (lan.address ? `https://${lan.address}:${lan.port}` : null) });
+// hub.json が壊れて隔離された場合 `HubConfig.load` は reject する。MCP サーバー
+// 自体は起動を続け（ローカルの読み書きツールは使える）、LAN 系だけを無効にして
+// エラーを configError として `sync_status` に出す（lanError と同じ扱い）。
+let configError: string | null = null;
+let config: HubConfig | null = null;
+try {
+  config = await HubConfig.load(directory);
+} catch (error) {
+  configError = String((error as Error).message);
+}
+const engine = config ? new SyncEngine(store, config, clock) : null;
+const lan = config && engine ? new LanServer(config, engine, { port: lanPort, host: '0.0.0.0', advertise: true, hubDeviceId }) : null;
+const pages = config && lan ? new LocalPages(config, store, { port: localPort, lanUrl: () => (lan.address ? `https://${lan.address}:${lan.port}` : null) }) : null;
 
-let lanError: string | null = null;
-if (lanEnabled) {
+let lanError: string | null = configError ? 'hub.json is unusable; LAN sync is disabled' : null;
+if (lanEnabled && lan && pages) {
   try { await lan.start(); await pages.start(); } catch (error) { lanError = String((error as Error).message); }
 }
 
-const tools = new HubTools(store, clock, () => new Date(), {
-  config, engine,
-  lan: () => ({
-    url: lanError ? null : (lan.address ? `https://${lan.address}:${lan.port}` : null),
-    pairingPage: lanError ? null : `http://127.0.0.1:${pages.port}/pair`,
-    qrPage: lanError ? null : `http://127.0.0.1:${pages.port}/qr`,
-  }),
-});
+// config が無いときは deps 無しで組み立てる（LAN 系ツールは requireDeps() の
+// ToolError になり、ローカルのタスク編集ツールはそのまま使える）。
+const tools = config && engine && lan && pages
+  ? new HubTools(store, clock, () => new Date(), {
+      config, engine,
+      lan: () => ({
+        url: lanError ? null : (lan.address ? `https://${lan.address}:${lan.port}` : null),
+        pairingPage: lanError ? null : `http://127.0.0.1:${pages.port}/pair`,
+        qrPage: lanError ? null : `http://127.0.0.1:${pages.port}/qr`,
+      }),
+    })
+  : new HubTools(store, clock, () => new Date());
 
 // …既存の text / wrap / register 定義と 22 個の register(...) 呼び出しはそのまま…
 register('import_file', 'Merge a v2 JSON file exported from the phone into the hub data (records the file\'s deviceId for purge accounting)', schemas.importFile.shape, (i) => wrap(() => tools.importFile(i)));
-register('purge_tombstones', 'Physically delete tombstones older than every paired device\'s last sync; sets purgedBefore', {}, () => wrap(() => tools.purgeTombstones()));
+register('purge_tombstones', 'Physically delete tombstones deleted before min(lastSyncAt of paired devices) - 24h; sets purgedBefore', {}, () => wrap(() => tools.purgeTombstones()));
 register('forget_device', 'Remove a paired device so it no longer holds back tombstone purge', schemas.forgetDevice.shape, (i) => wrap(() => tools.forgetDevice(i)));
 register('rotate_token', 'Invalidate a device token; the phone must pair again', schemas.rotateToken.shape, (i) => wrap(() => tools.rotateToken(i)));
-register('sync_status', 'Data file, LAN URL and certificate fingerprint, pairing/QR page URLs (localhost), paired devices, last sync progress', {}, () => wrap(async () => ({ ...(await tools.syncStatus()), lanError })));
+register('sync_status', 'Data file, LAN URL and certificate fingerprint, pairing/QR page URLs (localhost), paired devices, last sync progress', {}, () => wrap(async () => ({ ...(await tools.syncStatus()), lanError, configError })));
 
-const shutdown = async () => { await pages.stop().catch(() => {}); await lan.stop().catch(() => {}); process.exit(0); };
+const shutdown = async () => { await pages?.stop().catch(() => {}); await lan?.stop().catch(() => {}); process.exit(0); };
 process.on('SIGINT', () => void shutdown());
 process.on('SIGTERM', () => void shutdown());
 process.stdin.on('close', () => void shutdown());
@@ -1644,6 +1680,7 @@ git commit -m "feat(hub): implement import_file, purge, device tools and LAN-awa
 - QR でスマホに送る: `lan.qrPage`（`http://127.0.0.1:47821/qr`）。
 - スマホから PC へは、スマホの「PC へ書き出す」で作った JSON を `import_file` で取り込む。
 - 端末管理: `forget_device`、`rotate_token`、`purge_tombstones`。
+- `purge_tombstones` のカットオフは「ペアリング済み端末の `lastSyncAt` の最小値 − 24 時間」（時計ずれ吸収の余裕 `PURGE_SKEW_MS`）。未同期の端末が 1 台でもあれば何も削除しない。
 - 環境変数: `FRELOCATOR_LAN=off`（LAN を開かない）、`FRELOCATOR_LAN_PORT`、`FRELOCATOR_LOCAL_PORT`。
 - `hub.json`（証明書・端末トークン）は `data.json` と同じディレクトリ。権限 600。
 ```
@@ -1659,6 +1696,6 @@ git commit -m "docs(hub): LAN sync, pairing and device management / LAN 同期�
 
 ## 自己レビュー
 
-- 設計書カバレッジ: 自己署名 TLS＋フィンガープリント（Task 1, 3）、短命コード→端末トークン（Task 1, 3）、`/pair` `/sync` `/health`・426・`purgedBefore` 判定・置き換えモード（Task 2, 3）、mDNS（Task 3）、ローカル限定ページ（Task 5）、QR フレーム形式と 80 コマ警告（Task 4, 5）、purge＝既知端末の最小 lastSyncAt・初回同期免除・forget_device（Task 2, 6）、rotate_token / import_file / sync_status の進捗（Task 6）。
+- 設計書カバレッジ: 自己署名 TLS＋フィンガープリント（Task 1, 3）、短命コード→端末トークン（Task 1, 3）、`/pair` `/sync` `/health`・426・`purgedBefore` 判定・置き換えモード（Task 2, 3）、mDNS（Task 3）、ローカル限定ページ（Task 5）、QR フレーム形式と 80 コマ警告（Task 4, 5）、purge＝既知端末の最小 lastSyncAt から 24 時間（`PURGE_SKEW_MS`）引いたカットオフ・初回同期免除・forget_device（Task 2, 6）、rotate_token / import_file / sync_status の進捗（Task 6）。
 - 型の整合: `SyncEngine.sync(deviceId, doc, mode) → SyncResult{document, summary, warnings}`、`SyncRejected(status, code)`、`HubConfig` のメソッド名、`LanServer(config, engine, options)`、`LocalPages(config, store, {port, lanUrl})`、`HubTools(store, clock, now, deps)`、`FrameSet.add → AddResult`。Plan 2b の Flutter 側はこれらの HTTP 形式（`/pair` の戻り `{token, hubDeviceId, fingerprint}`、`/sync?mode=` の戻り `{document, summary, warnings}`、エラー `{error:{code,message}}`、426/409/401/403）を前提にする。
 - 未決: `lanAddress()` は最初の非内部 IPv4 を返すだけなので、複数インターフェースがある Mac では意図しない IP になり得る。`sync_status` に全候補を出す改善は 2b の手入力 host で吸収する。
