@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../core/confirm_dialog.dart';
 import '../../../core/error_view.dart';
@@ -69,6 +70,16 @@ class CategorySettingsScreen extends ConsumerWidget {
                 categories: data.wantToDoCategories,
               ),
             ],
+            const SizedBox(height: 16),
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.devices),
+                title: const Text('PC と同期'),
+                subtitle: const Text('同じ Wi-Fi の PC・QR・ファイルでデータをやり取りします'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => context.push('/sync'),
+              ),
+            ),
           ],
         ),
         loading: () => const Center(child: CircularProgressIndicator()),

@@ -3,6 +3,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../features/daily_plan/application/daily_plan_controller.dart';
+import '../features/sync/application/sync_in_flight.dart';
 import '../features/task_master/application/task_master_controller.dart';
 import '../features/task_master/data/task_master_repository.dart' show stateStoreProvider;
 import 'router.dart';
@@ -32,10 +33,17 @@ class _FrelocatorAppState extends ConsumerState<FrelocatorApp>
     super.dispose();
   }
 
+  /// Set when a resume arrived while a sync was running: reloading then would
+  /// race the import that sync is about to commit.
+  bool _pendingReload = false;
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
-    // TODO(plan-2): defer reload while an edit dialog or in-flight save is active
+    if (ref.read(syncInFlightProvider)) {
+      _pendingReload = true;
+      return;
+    }
     _reloadIfChanged();
   }
 
@@ -49,6 +57,11 @@ class _FrelocatorAppState extends ConsumerState<FrelocatorApp>
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<bool>(syncInFlightProvider, (previous, next) {
+      if (next || !_pendingReload) return;
+      _pendingReload = false;
+      _reloadIfChanged();
+    });
     return MaterialApp.router(
       title: 'Frelocator',
       locale: const Locale('ja'),
