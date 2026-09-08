@@ -6,14 +6,14 @@
 
 - PC（macOS）で Claude Code から MCP ツール経由で FRELOCATOR のデータ（タスク・カテゴリ・自由時間枠・割当・日次計画）を追加・更新・削除できるようにする。
 - スマホ（Android）と PC のデータを、第三者サーバーを経由せずに連携する。主経路は同一ネットワーク内の LAN 同期、ネットワークが一致しないときの副経路として PC→スマホの QR 転送とスマホ→PC のファイル持ち込みを用意する。
-- ローカルファーストの方針を維持し、通信相手はユーザー自身の PC に限定する。
+- ローカルファーストの方針を維持する。アプリ自身が通信する相手はユーザー自身の PC に限定し、運営者を含む第三者のサーバーには送信しない。ユーザーが共有シートで明示的に選んだ送付先（Nearby Share、USB 転送など）はアプリの通信には含めない。
 
 ## 範囲外（v1）
 
 - 差分転送・自動同期・バックグラウンド同期（プロトコルに `since` は予約するだけ）。
 - iOS 対応。
 - launchd 常駐。ハブは Claude Code から MCP として起動している間だけ動く。
-- 3 台以上の端末間の同期。
+- 3 台以上の端末での動作保証（端末管理の機能自体は複数端末前提で持つが、動作確認は PC 1 台とスマホ 1 台）。
 - macOS 版アプリのカメラによる QR 読み取り（スマホ→PC はファイル持ち込みで代替）。
 
 ## 構成
@@ -65,7 +65,7 @@
 ## 削除とゴミ掃除
 
 - 削除はすべて墓標化する。現行の物理削除（task_master_controller の deleteTask、daily_plan_controller の deleteSlot / unassign / copyDailyPlan の replaceExisting / deletePlan）を全て `deletedAt` 付与に書き換え、Repository の読み出しで墓標を除外する。
-- 墓標の物理削除（purge）はハブだけが行う。ハブは既知端末ごとの `lastSyncAt` を持ち、`min(全端末の lastSyncAt)` より古い墓標だけを消す。消した時刻を `purgedBefore` としてファイルと `/sync` の応答に含める。
+- 墓標の物理削除（purge）はハブだけが行う。ハブは既知端末ごとの `lastSyncAt` を持ち、`min(全端末の lastSyncAt)` より古い墓標だけを消す。消した時刻を `purgedBefore` としてファイルと `/sync` の応答に含める。紛失した端末や使わなくなった端末は `forget_device(deviceId)` で既知端末から外し、purge が止まらないようにする。ペアリング直後の端末は `lastSyncAt` をペアリング時刻で初期化し、初回同期は `purgedBefore` 判定を免除する（実データを持つ新しいスマホの初回同期が置き換えフローに落ちない）。
 - クライアントは `自分の lastSyncAt < purgedBefore` なら通常マージを行わず、「PC の状態で置き換える」か「自分の状態で PC を置き換える」をユーザーに選ばせる（長期オフライン端末からの復活を防ぐ）。
 - `purge_tombstones` は MCP ツールとして明示実行もできる。
 
@@ -73,11 +73,11 @@
 
 1. 両側のエンティティを id で突き合わせる。
 2. 片側にしか無い id はそのまま採用する（相手の `purgedBefore` より古い墓標由来の欠落は上記の置き換えフローで扱う）。
-3. 両側にある id は `clock` が大きい方を採用する。
+3. 両側にある id は `clock` が大きい方を採用する。`clock` が同値（実質的に移行由来同士のみ）の場合は内容ハッシュが一致すれば変更なし、不一致なら内容ハッシュの辞書順で大きい方を採用する（両側で同じ結果になる決定的規則）。
 4. 墓標も通常の更新として扱う（削除の clock が編集より大きければ削除が勝つ）。
 5. 参照整合は非破壊。存在しないカテゴリを指すタスクは保存データを変えず、表示層で「未分類」扱いにする。存在しない枠や日次計画を指す割当は表示層で非表示にし、保存データは保持する（後から枠が届けば復元される）。
 6. マージ結果は両側で同一になる（可換・冪等）。property test で検証する。
-7. `copyDailyPlan` は決定的 id（`sha256(sourcePlanId + targetDate + sourceEntityId)` の先頭 16 文字）を使い、両端末で同じ複製をしても二重化しない。
+7. `copyDailyPlan` は決定的 id（`sha256(sourcePlanId + targetDate + sourceEntityId + generation)` の先頭 16 文字）を使い、両端末で同じ複製をしても二重化しない。`generation` は対象日の plan が持つ複製世代カウンタで、墓標を含めて同じ id が既に存在するときに +1 する（複製→削除→再複製で墓標と衝突しない）。
 8. マージ後に不変条件チェッカ（枠内の割当、割当の重なり無し、sortOrder 連番、同名カテゴリ無し）を通し、違反はマージ結果に含めず警告として返す。
 
 テストは `test/fixtures/sync_merge/` にケース単位の JSON（`入力 A`、`入力 B`、`期待結果`）とマニフェストを置き、Dart（`flutter test`）と TS（`vitest`）の両方が同じファイルを読んで検証する。
@@ -91,7 +91,7 @@
   - `GET /sync` → PC 側の全データ（v2 JSON、`purgedBefore` 付き）
   - `POST /sync` body: スマホ側の全データ → ハブがマージし、ファイルに保存してから同じ結果を返す。`version < 2` は 426 で拒否しアプリ更新を促す
   - `GET /health` → `{ ok: true, serverTime }`（deviceId は返さない）
-- リプレイ対策は TLS に委ねる。加えて `POST /sync` は `X-Sync-Nonce` と `serverTime` ±5 分の窓を検査する。
+- リプレイ対策は TLS と端末別トークンに委ねる（nonce は持たない）。
 - 接続先の解決順: 保存済み host → mDNS（`_frelocator._tcp`、ハブが広告）→ ペアリングし直し。
 - スマホの「同期」ボタン 1 回で `POST /sync` → 返ってきた結果で自分を置き換える、まで行う。
 - ハブが見つからない（タイムアウト 3 秒）場合は「同じ Wi-Fi に接続されているか確認するか、QR で連携してください」と案内し、QR 画面へのボタンを出す。
@@ -100,13 +100,13 @@
 ## ネットワーク不一致時の副経路
 
 PC → スマホ（QR）
-- ペイロード: v2 JSON を gzip → base45（QR 英数モード互換）。1 コマ 600 文字、誤り訂正レベル M。各コマは `FRL2|<全体 sha256 先頭 16 文字>|<index>/<total>|<crc32>|<chunk>`。
+- ペイロード: v2 JSON を gzip → base45。1 コマ 600 文字、誤り訂正レベル M。各コマは `FRL2:<全体 SHA-256 先頭 16 文字（大文字 hex）>:<index>:<total>:<CRC32（大文字 hex）>:<chunk>` とし、区切りの `:` を含めて全文字を QR 英数モードの文字集合（0-9 A-Z 空白 $%*+-./:）に収める。1 文字でも外れるとバイトモードに落ちて容量が約 1.5 倍悪化するため、エンコーダはフレーム生成後に文字集合検査を行う。
 - ハブのローカルページ `http://127.0.0.1:47821/qr` が全コマを繰り返し表示する。表示間隔は既定 400ms でスライダーで変更できる。
 - スマホの「QR で受け取る」がカメラを向け続け、全コマが揃ったら復元してマージする。コマ単位の crc32 不一致は捨て、全体 hash が途中で変わったら「別のデータです。最初からやり直しますか」と確認する。
 - 目安: タスク 300 件で約 8KB（gzip 後）→ 約 14 コマ。80 コマを超える場合は警告し、LAN 同期を勧める。
 
 スマホ → PC（ファイル持ち込み）
-- スマホの「PC へ書き出す」が v2 JSON をファイルとして共有シートに渡す（Nearby Share、メール、クラウドドライブなどユーザーの手段で Mac へ運ぶ）。
+- スマホの「PC へ書き出す」が v2 JSON をファイルとして共有シートに渡す。画面では Nearby Share や USB 転送など第三者サーバーを経由しない手段を推奨し、「共有先はご自身で選んだものであり、アプリは送信しません」と明示する。
 - Mac 側は MCP ツール `import_file(path)` か、macOS 版アプリの「ファイルから取り込む」で読み込み、同じマージ規則で JSON ファイルに反映する。
 
 ## 進捗と待ち状態の可視化（LAN・QR・ファイル共通）
@@ -143,7 +143,7 @@ PC → スマホ（QR）
 | `weekly_report` | weekStart | 週の時間配分集計（読み取り専用） |
 | `export_data` / `import_file` | path | v2 JSON の書き出し / 取り込み（マージ） |
 | `undo_last_write` | なし | `.bak` を復元（1 世代） |
-| `purge_tombstones` / `rotate_token` | なし / deviceId | 明示的な掃除 / トークン失効と再発行 |
+| `purge_tombstones` / `rotate_token` / `forget_device` | なし / deviceId / deviceId | 明示的な掃除 / トークン失効と再発行 / 既知端末からの除外 |
 | `sync_status` | なし | LAN 待ち受け先、ペアリングページ URL、既知端末と lastSyncAt、直近同期の段階・結果 |
 
 - id は Dart と同じ `<prefix>-<microsSinceEpoch>-<deviceId 先頭 4 文字>-<6 hex>` にする（Dart 側も device 成分を追加）。
@@ -156,9 +156,9 @@ PC → スマホ（QR）
 - `lib/services/sync/`: `SyncMerger`、`InvariantChecker`、`LanSyncClient`（http、証明書ピン留め）、`QrChunkCodec`（base45・crc32）、`SyncProgress`、`FileExporter`。
 - `lib/features/settings/`: 「PC と同期」画面。ペアリング（QR 読み取り）、同期、QR で受け取る、PC へ書き出す、host 手入力、進捗パネル。
 - 保存層: v2 マイグレーション、墓標化、`extra` 保持、厳格パース。macOS は `FileBackedStore` に切り替え、ロックと再検査を実装。
-- 依存追加: `http`、`mobile_scanner`、`qr_flutter`、`archive`、`path_provider`、`share_plus`、`file_picker`、`crypto`、`multicast_dns`。
+- 依存追加: `http`（証明書ピン留めは `dart:io` の `HttpClient.badCertificateCallback` で SHA-256 を照合し `IOClient` で包む）、`mobile_scanner`、`qr_flutter`、`archive`、`path_provider`、`share_plus`、`file_picker`、`crypto`、`multicast_dns`。
 - Android: `INTERNET` と `CAMERA` 権限を追加。カメラは初回に用途（QR 読み取り）を説明してから要求する。cleartext 設定は追加しない。
-- `web/privacy.html`: 「ネットワーク通信をしない」「クラウド同期なし」の既存文を削除し、「同一ネットワーク内のユーザー自身の PC とのみ通信し、運営者を含む第三者のサーバーには送信しない。通信は暗号化される」に書き換える。Play のデータセーフティは「収集なし」を維持し、提出時に質問票を再確認する。
+- `web/privacy.html`: 「ネットワーク通信をしない」「クラウド同期なし」の既存文を削除し、「アプリは同一ネットワーク内のユーザー自身の PC とのみ通信し、運営者を含む第三者のサーバーには送信しない。通信は暗号化される。ユーザーが共有機能で選んだ送付先はユーザー自身の管理下にある」に書き換える。Play のデータセーフティは「収集なし」を維持し、提出時に質問票を再確認する。
 
 ## テスト
 
@@ -176,7 +176,7 @@ PC → スマホ（QR）
 4. PC→スマホ QR とスマホ→PC ファイル持ち込み。
 5. プライバシーポリシー書き換え、権限追加、ドキュメント、Play 向けリリース。
 
-## レビュー反映（2026-09-08、Opus と Fable）
+## レビュー反映（2026-09-08、Opus と Fable、二次パス含む）
 
 採用した指摘
 - 削除の墓標化を全経路に拡大し、purge を「既知端末の lastSyncAt の最小値」基準に変更。長期オフライン端末は置き換えフローに落とす。
@@ -192,3 +192,14 @@ PC → スマホ（QR）
 不採用または修正した指摘
 - 「mobile_scanner は macOS 非対応」は誤り（7.4.0 で macOS 対応）。ただし Mac 内蔵カメラにスマホをかざす運用が現実的でない点は同意し、スマホ→PC はファイル持ち込みにした。macOS のカメラ受信は範囲外として残す。
 - `/sync` のジョブ化（POST → jobId → GET）は v1 では見送り。「PC で処理中」を不確定インジケータで出すことで足りる。
+
+二次パスで追加した修正
+- 「第三者サーバーを経由しない」の主語を「アプリ自身の通信」に限定し、共有シートの送付先はユーザー管理下と明記。画面でも Nearby Share / USB を推奨。
+- QR フレームを英数モードの文字集合に収める形式に変更し、エンコーダに文字集合検査を追加。
+- マージ規則 3 に clock 同値時の決定的な勝敗（内容ハッシュ）を明記。
+- purge の停滞対策として `forget_device` を追加し、ペアリング直後の端末は初回同期で `purgedBefore` 判定を免除。
+- copyDailyPlan の決定的 id に世代カウンタを追加し、墓標との衝突を回避。
+- nonce は撤回し、リプレイ対策は TLS と端末別トークンに一本化。
+- 範囲外を「3 台以上の動作保証」に緩め、端末管理機能は複数端末前提のままとする。
+- 証明書ピン留めの実装手段（`HttpClient.badCertificateCallback` + `IOClient`）を依存欄に明記。
+
