@@ -1,0 +1,45 @@
+{
+  "name": "two must-do categories share a name",
+  "document": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "a",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [
+        {
+          "id": "c1",
+          "name": "仕事",
+          "clock": "10-0-a",
+          "updatedAt": "2026-09-08T00:00:10.000Z",
+          "deletedAt": null,
+          "migrated": false
+        },
+        {
+          "id": "c2",
+          "name": "仕事",
+          "clock": "10-0-a",
+          "updatedAt": "2026-09-08T00:00:10.000Z",
+          "deletedAt": null,
+          "migrated": false
+        }
+      ],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expectedCodes": [
+    "duplicate_category_name"
+  ]
+}

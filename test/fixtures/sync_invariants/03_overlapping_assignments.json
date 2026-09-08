@@ -1,0 +1,87 @@
+{
+  "name": "two assignments in one slot that overlap",
+  "document": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "a",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [
+        {
+          "id": "p1",
+          "date": "2026-09-08",
+          "createdAt": "2026-09-08T00:00:00.000Z",
+          "clock": "10-0-a",
+          "updatedAt": "2026-09-08T00:00:10.000Z",
+          "deletedAt": null,
+          "migrated": false
+        }
+      ],
+      "slots": [
+        {
+          "id": "s1",
+          "dailyPlanId": "p1",
+          "startAt": "2026-09-08T09:00:00.000Z",
+          "endAt": "2026-09-08T12:00:00.000Z",
+          "label": "",
+          "clock": "10-0-a",
+          "updatedAt": "2026-09-08T00:00:10.000Z",
+          "deletedAt": null,
+          "migrated": false
+        }
+      ],
+      "assignments": [
+        {
+          "id": "a1",
+          "dailyPlanId": "p1",
+          "slotId": "s1",
+          "taskId": "t-a1",
+          "taskTitle": "a1",
+          "taskKind": "must_do",
+          "startAt": "2026-09-08T09:00:00.000Z",
+          "endAt": "2026-09-08T10:00:00.000Z",
+          "sortOrder": 0,
+          "categoryId": null,
+          "categoryName": null,
+          "memo": "",
+          "clock": "10-0-a",
+          "updatedAt": "2026-09-08T00:00:10.000Z",
+          "deletedAt": null,
+          "migrated": false
+        },
+        {
+          "id": "a2",
+          "dailyPlanId": "p1",
+          "slotId": "s1",
+          "taskId": "t-a2",
+          "taskTitle": "a2",
+          "taskKind": "must_do",
+          "startAt": "2026-09-08T09:30:00.000Z",
+          "endAt": "2026-09-08T10:30:00.000Z",
+          "sortOrder": 1,
+          "categoryId": null,
+          "categoryName": null,
+          "memo": "",
+          "clock": "10-0-a",
+          "updatedAt": "2026-09-08T00:00:10.000Z",
+          "deletedAt": null,
+          "migrated": false
+        }
+      ]
+    }
+  },
+  "expectedCodes": [
+    "assignment_overlap"
+  ]
+}

@@ -1,0 +1,8 @@
+[
+  "01_clean.json",
+  "02_assignment_outside_slot.json",
+  "03_overlapping_assignments.json",
+  "04_sort_order_gap.json",
+  "05_duplicate_category_name.json",
+  "06_slot_time_reversed.json"
+]
