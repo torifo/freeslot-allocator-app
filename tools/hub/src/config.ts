@@ -2,16 +2,22 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { SyncRejected } from './sync-engine.js';
 import { createSelfSignedCert, fingerprintOf } from './tls.js';
 
 export interface DeviceRecord { deviceId: string; name: string; token: string; pairedAt: string; lastSyncAt: string | null; }
 interface HubJson {
   certPem: string; keyPem: string; fingerprint: string;
-  pairing: { code: string; expiresAt: number } | null;
+  pairing: PairingState | null;
   devices: DeviceRecord[];
 }
 
+/** `code` is wiped once the attempt budget is spent, so the record only remembers the lockout. */
+interface PairingState { code: string; expiresAt: number; failures: number }
+
 const PAIRING_TTL_MS = 5 * 60 * 1000;
+/** Wrong-code attempts allowed per issued pairing code before it is burned. */
+export const MAX_PAIR_FAILURES = 10;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 /** Constant-time secret comparison over sha256 digests (fixed length, leaks no length). */
@@ -64,24 +70,44 @@ export class HubConfig {
 
   device(deviceId: string): DeviceRecord | undefined { return this.json.devices.find((d) => d.deviceId === deviceId); }
 
+  /** The usable code, or null once it expired or spent its attempt budget. */
   pairingCode(): { code: string; expiresAt: number } | null {
     const p = this.json.pairing;
-    return p && p.expiresAt > this.now() ? { ...p } : null;
+    if (!p || p.expiresAt <= this.now() || p.failures >= MAX_PAIR_FAILURES) return null;
+    return { code: p.code, expiresAt: p.expiresAt };
   }
 
   async issuePairingCode(): Promise<string> {
     const code = Array.from({ length: 8 }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]).join('');
-    this.json.pairing = { code, expiresAt: this.now() + PAIRING_TTL_MS };
+    this.json.pairing = { code, expiresAt: this.now() + PAIRING_TTL_MS, failures: 0 };
     await this.save();
     return code;
   }
 
-  /** Single use: cleared on success and once expired (even on a wrong code); a wrong attempt on a valid code leaves it usable. */
+  /**
+   * Counts a wrong attempt against the current code and burns the code once the
+   * budget is spent: the secret is wiped but the record is kept, so later
+   * attempts are answered `too_many_attempts` instead of a bare `pairing_failed`.
+   */
+  async recordPairFailure(): Promise<number> {
+    const p = this.json.pairing;
+    if (!p) return 0;
+    p.failures += 1;
+    if (p.failures >= MAX_PAIR_FAILURES) p.code = '';
+    await this.save();
+    return p.failures;
+  }
+
+  /** Single use: cleared on success and once expired (even on a wrong code); a wrong attempt on a valid code leaves it usable until the failure budget runs out. */
   async redeemPairingCode(code: string, deviceId: string, name: string): Promise<string> {
     const p = this.json.pairing;
-    if (!p) throw new Error('invalid pairing code');
-    if (p.expiresAt <= this.now()) { this.json.pairing = null; await this.save(); throw new Error('pairing code expired'); }
-    if (!secretEquals(p.code, code)) throw new Error('invalid pairing code');
+    if (!p) throw new SyncRejected(403, 'pairing_failed', 'invalid pairing code');
+    if (p.expiresAt <= this.now()) { this.json.pairing = null; await this.save(); throw new SyncRejected(403, 'pairing_code_expired', 'pairing code expired'); }
+    if (p.failures >= MAX_PAIR_FAILURES) throw new SyncRejected(403, 'too_many_attempts', `too many failed pairing attempts; issue a new code`);
+    if (!secretEquals(p.code, code)) {
+      await this.recordPairFailure();
+      throw new SyncRejected(403, 'pairing_failed', 'invalid pairing code');
+    }
     this.json.pairing = null;
     const token = randomBytes(32).toString('hex');
     const existing = this.json.devices.find((d) => d.deviceId === deviceId);
@@ -148,6 +174,8 @@ async function readHubJson(path: string): Promise<HubJson> {
   const json = parsed as HubJson;
   json.devices ??= [];
   json.pairing ??= null;
+  // Older hub.json files predate the attempt counter.
+  if (json.pairing) json.pairing.failures ??= 0;
   try {
     // Never trust the stored fingerprint: it is only a cache of the certificate.
     json.fingerprint = fingerprintOf(json.certPem);

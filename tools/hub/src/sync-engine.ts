@@ -51,7 +51,7 @@ export class SyncEngine {
   private readonly progress = new Map<string, SyncProgress>();
 
   constructor(
-    private readonly store: FileStore,
+    readonly store: FileStore,
     private readonly config: HubConfig,
     private readonly clock: HlcClock,
     private readonly now: () => Date = () => new Date(),

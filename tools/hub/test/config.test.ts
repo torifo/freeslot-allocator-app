@@ -99,6 +99,29 @@ describe('HubConfig', () => {
     expect(JSON.parse(readFileSync(join(dir, 'hub.json'), 'utf8')).pairing).toBeNull();
   });
 
+  it('disables a pairing code after too many failed attempts', async () => {
+    const cfg = await HubConfig.load(dir, () => 5_000);
+    const code = await cfg.issuePairingCode();
+    for (let i = 0; i < 9; i += 1) {
+      await expect(cfg.redeemPairingCode('WRONGWRO', 'android-1', 'Pixel')).rejects.toThrow(/invalid/);
+    }
+    expect(cfg.pairingCode()?.code).toBe(code);
+    await expect(cfg.redeemPairingCode(code, 'android-1', 'Pixel')).resolves.toMatch(/^[a-f0-9]{64}$/);
+
+    const again = await cfg.issuePairingCode();
+    for (let i = 0; i < 10; i += 1) {
+      await expect(cfg.redeemPairingCode('WRONGWRO', 'android-1', 'Pixel')).rejects.toThrow();
+    }
+    expect(cfg.pairingCode()).toBeNull();
+    await expect(cfg.redeemPairingCode(again, 'android-1', 'Pixel')).rejects.toThrow(/too many/i);
+  });
+
+  it('rejects pairing failures as SyncRejected(403)', async () => {
+    const cfg = await HubConfig.load(dir, () => 5_000);
+    await cfg.issuePairingCode();
+    await expect(cfg.redeemPairingCode('WRONGWRO', 'android-1', 'Pixel')).rejects.toMatchObject({ status: 403, code: 'pairing_failed' });
+  });
+
   it('forgets a device token', async () => {
     const cfg = await HubConfig.load(dir, () => 5_000);
     const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
