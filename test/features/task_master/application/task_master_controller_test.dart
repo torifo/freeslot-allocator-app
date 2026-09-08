@@ -4,6 +4,7 @@ import 'package:frelocator/features/task_master/application/task_master_controll
 import 'package:frelocator/features/task_master/application/task_master_logic.dart';
 import 'package:frelocator/features/task_master/data/task_master_repository.dart';
 import 'package:frelocator/features/task_master/domain/task_models.dart';
+import 'package:frelocator/services/storage/prefs_state_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../helpers/test_container.dart';
@@ -343,6 +344,8 @@ void main() {
 }
 
 class _UnloadableTaskMasterRepository extends TaskMasterRepository {
+  _UnloadableTaskMasterRepository() : super(PrefsStateStore());
+
   @override
   Future<TaskMasterStateData> load() async {
     throw StateError('storage unavailable');
@@ -350,7 +353,7 @@ class _UnloadableTaskMasterRepository extends TaskMasterRepository {
 }
 
 class _FailingTaskMasterRepository extends TaskMasterRepository {
-  _FailingTaskMasterRepository(this._state);
+  _FailingTaskMasterRepository(this._state) : super(PrefsStateStore());
 
   final TaskMasterStateData _state;
 

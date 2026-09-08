@@ -1,34 +1,19 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../services/storage/state_store.dart';
+import '../../task_master/data/task_master_repository.dart' show stateStoreProvider;
 import '../domain/daily_plan_models.dart';
 
 final dailyPlanRepositoryProvider = Provider<DailyPlanRepository>((ref) {
-  return DailyPlanRepository();
+  return DailyPlanRepository(ref.read(stateStoreProvider));
 });
 
 class DailyPlanRepository {
-  static const _storageKey = 'daily_plan_state_v1';
+  DailyPlanRepository(this._store);
 
-  Future<SharedPreferences>? _preferences;
+  final StateStore _store;
 
-  /// Resolves the shared preferences instance once and reuses it, instead of
-  /// awaiting `getInstance()` on every read and write.
-  Future<SharedPreferences> _prefs() {
-    return _preferences ??= SharedPreferences.getInstance();
-  }
+  Future<DailyPlanStateData> load() => _store.readDailyPlan();
 
-  Future<DailyPlanStateData> load() async {
-    final preferences = await _prefs();
-    final rawState = preferences.getString(_storageKey);
-    if (rawState == null || rawState.isEmpty) {
-      return DailyPlanStateData.initial();
-    }
-    return DailyPlanStateData.decode(rawState);
-  }
-
-  Future<void> save(DailyPlanStateData state) async {
-    final preferences = await _prefs();
-    await preferences.setString(_storageKey, state.encode());
-  }
+  Future<void> save(DailyPlanStateData state) => _store.writeDailyPlan(state);
 }

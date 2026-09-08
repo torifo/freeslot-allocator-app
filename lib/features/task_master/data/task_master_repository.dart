@@ -1,34 +1,36 @@
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../../core/device_clock.dart';
+import '../../../services/storage/file_backed_store.dart';
+import '../../../services/storage/prefs_state_store.dart';
+import '../../../services/storage/state_store.dart';
 import '../domain/task_models.dart';
 
+/// One store instance shared by both repositories (the file store keeps a
+/// single document, so both must go through the same lock and cache).
+final stateStoreProvider = Provider<StateStore>((ref) {
+  if (!kIsWeb && Platform.isMacOS) {
+    return FileBackedStore(
+      directory: FileBackedStore.defaultDirectory(),
+      deviceId: ref.read(deviceClockProvider).deviceId,
+    );
+  }
+  return PrefsStateStore();
+});
+
 final taskMasterRepositoryProvider = Provider<TaskMasterRepository>((ref) {
-  return TaskMasterRepository();
+  return TaskMasterRepository(ref.read(stateStoreProvider));
 });
 
 class TaskMasterRepository {
-  static const _storageKey = 'task_master_state_v1';
+  TaskMasterRepository(this._store);
 
-  Future<SharedPreferences>? _preferences;
+  final StateStore _store;
 
-  /// Resolves the shared preferences instance once and reuses it, instead of
-  /// awaiting `getInstance()` on every read and write.
-  Future<SharedPreferences> _prefs() {
-    return _preferences ??= SharedPreferences.getInstance();
-  }
+  Future<TaskMasterStateData> load() => _store.readTaskMaster();
 
-  Future<TaskMasterStateData> load() async {
-    final preferences = await _prefs();
-    final rawState = preferences.getString(_storageKey);
-    if (rawState == null || rawState.isEmpty) {
-      return TaskMasterStateData.initial();
-    }
-    return TaskMasterStateData.decode(rawState);
-  }
-
-  Future<void> save(TaskMasterStateData state) async {
-    final preferences = await _prefs();
-    await preferences.setString(_storageKey, state.encode());
-  }
+  Future<void> save(TaskMasterStateData state) => _store.writeTaskMaster(state);
 }

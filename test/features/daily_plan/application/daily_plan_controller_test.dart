@@ -6,6 +6,7 @@ import 'package:frelocator/features/daily_plan/data/daily_plan_repository.dart';
 import 'package:frelocator/features/daily_plan/application/daily_plan_logic.dart';
 import 'package:frelocator/features/daily_plan/domain/daily_plan_models.dart';
 import 'package:frelocator/features/task_master/domain/task_models.dart';
+import 'package:frelocator/services/storage/prefs_state_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../helpers/test_container.dart';
@@ -431,6 +432,8 @@ void main() {
 }
 
 class _UnloadableDailyPlanRepository extends DailyPlanRepository {
+  _UnloadableDailyPlanRepository() : super(PrefsStateStore());
+
   @override
   Future<DailyPlanStateData> load() async {
     throw StateError('storage unavailable');
@@ -438,7 +441,7 @@ class _UnloadableDailyPlanRepository extends DailyPlanRepository {
 }
 
 class _FailingDailyPlanRepository extends DailyPlanRepository {
-  _FailingDailyPlanRepository(this._state);
+  _FailingDailyPlanRepository(this._state) : super(PrefsStateStore());
 
   final DailyPlanStateData _state;
 

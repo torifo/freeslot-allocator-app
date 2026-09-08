@@ -1,11 +1,50 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../features/daily_plan/application/daily_plan_controller.dart';
+import '../features/task_master/application/task_master_controller.dart';
+import '../features/task_master/data/task_master_repository.dart' show stateStoreProvider;
 import 'router.dart';
 import 'theme.dart';
 
-class FrelocatorApp extends StatelessWidget {
+class FrelocatorApp extends ConsumerStatefulWidget {
   const FrelocatorApp({super.key});
+
+  @override
+  ConsumerState<FrelocatorApp> createState() => _FrelocatorAppState();
+}
+
+/// Reloads task-master and daily-plan state when the app resumes and the
+/// backing store (the macOS `FileBackedStore`) changed while it was
+/// backgrounded — e.g. the hub or another process wrote `data.json`.
+class _FrelocatorAppState extends ConsumerState<FrelocatorApp>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    _reloadIfChanged();
+  }
+
+  Future<void> _reloadIfChanged() async {
+    final store = ref.read(stateStoreProvider);
+    if (await store.changedSinceLastRead()) {
+      ref.invalidate(taskMasterControllerProvider);
+      ref.invalidate(dailyPlanControllerProvider);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
