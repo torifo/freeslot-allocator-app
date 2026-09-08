@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frelocator/core/hlc.dart';
+import 'package:frelocator/core/sync_meta.dart';
 import 'package:frelocator/features/daily_plan/application/daily_plan_controller.dart';
 import 'package:frelocator/features/daily_plan/data/daily_plan_repository.dart';
 import 'package:frelocator/features/daily_plan/application/daily_plan_logic.dart';
@@ -290,6 +291,46 @@ void main() {
         <String>['assignment-source-2', 'assignment-source-1'],
       );
     });
+
+    test('an assignment whose sortOrder did not change keeps its clock', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'daily_plan_state_v1': _threeInOneSlotState().encode(),
+      });
+      final container = await testContainer(now: () => 1000);
+      addTearDown(container.dispose);
+
+      await container.read(dailyPlanControllerProvider.future);
+      final notifier = container.read(dailyPlanControllerProvider.notifier);
+
+      Hlc clockOf(DailyPlanStateData state, String id) =>
+          state.assignments.singleWhere((item) => item.id == id).meta.clock;
+
+      final before = container.read(dailyPlanControllerProvider).requireValue;
+      final beforeStay = clockOf(before, 'a0');
+      final beforeMoved = clockOf(before, 'a2');
+
+      // a0 stays at sortOrder 0; a1 and a2 swap places behind it.
+      await notifier.moveAssignmentToSlot(
+        assignmentId: 'a2',
+        targetSlotId: 'slot-1',
+        beforeAssignmentId: 'a1',
+      );
+
+      final after = container.read(dailyPlanControllerProvider).requireValue;
+      expect(
+        after.assignmentsForSlot('slot-1').map((item) => item.id).toList(),
+        <String>['a0', 'a2', 'a1'],
+      );
+      expect(
+        clockOf(after, 'a0'),
+        beforeStay,
+        reason: '同じスロットでも sortOrder が変わらない予定はスタンプしない',
+      );
+      expect(
+        clockOf(after, 'a2').compareTo(beforeMoved),
+        greaterThan(0),
+      );
+    });
   });
 
   group('tombstone / live id coexistence', () {
@@ -501,6 +542,56 @@ DailyPlanStateData _sampleState() {
         endAt: DateTime(2026, 4, 20, 9, 30),
         sortOrder: 0,
       ),
+    ],
+  );
+}
+
+/// One slot holding three explicitly stamped assignments, so a reorder can be
+/// observed against real clocks rather than the migrated sentinel.
+DailyPlanStateData _threeInOneSlotState() {
+  final plan = DailyPlan(
+    id: 'plan-1',
+    date: DateTime(2026, 4, 18),
+    createdAt: DateTime(2026, 4, 18, 8),
+    updatedAt: DateTime(2026, 4, 18, 8),
+    meta: SyncMeta.stamp(const Hlc(physical: 5, counter: 0, deviceId: 'seed'),
+        DateTime.utc(2026, 4, 18, 8)),
+  );
+  SlotTaskAssignment assignment(String id, int order, DateTime start) =>
+      SlotTaskAssignment(
+        id: id,
+        dailyPlanId: plan.id,
+        slotId: 'slot-1',
+        taskId: 'task-$id',
+        taskTitle: id,
+        taskKind: TaskKind.mustDo,
+        startAt: start,
+        endAt: start.add(const Duration(minutes: 30)),
+        sortOrder: order,
+        meta: SyncMeta.stamp(
+          Hlc(physical: 5, counter: order, deviceId: 'seed'),
+          DateTime.utc(2026, 4, 18, 8),
+        ),
+      );
+  return DailyPlanStateData(
+    plans: <DailyPlan>[plan],
+    slots: <FreeTimeSlot>[
+      FreeTimeSlot(
+        id: 'slot-1',
+        dailyPlanId: plan.id,
+        startAt: DateTime(2026, 4, 18, 9),
+        endAt: DateTime(2026, 4, 18, 11),
+        label: '午前',
+        meta: SyncMeta.stamp(
+          const Hlc(physical: 5, counter: 9, deviceId: 'seed'),
+          DateTime.utc(2026, 4, 18, 8),
+        ),
+      ),
+    ],
+    assignments: <SlotTaskAssignment>[
+      assignment('a0', 0, DateTime(2026, 4, 18, 9)),
+      assignment('a1', 1, DateTime(2026, 4, 18, 9, 30)),
+      assignment('a2', 2, DateTime(2026, 4, 18, 10)),
     ],
   );
 }

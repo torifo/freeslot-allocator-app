@@ -101,14 +101,14 @@ TaskMasterStateData enableSharedCategories(
       clock,
       now,
     ),
-    deletedMustDoCategories: _graveyardAfterMerge(
+    deletedMustDoCategories: graveyardAfterMerge(
       state.deletedMustDoCategories,
       state.mustDoCategories,
       mergedIds,
       clock,
       now,
     ),
-    deletedWantToDoCategories: _graveyardAfterMerge(
+    deletedWantToDoCategories: graveyardAfterMerge(
       state.deletedWantToDoCategories,
       state.wantToDoCategories,
       mergedIds,
@@ -139,7 +139,7 @@ List<TaskCategory> _adoptCategories(
 
 /// Tombstones every category of [previous] that [keptIds] discards, and drops
 /// tombstones whose id came back to life.
-List<Tombstone> _graveyardAfterMerge(
+List<Tombstone> graveyardAfterMerge(
   List<Tombstone> graveyard,
   List<TaskCategory> previous,
   Set<String> keptIds,

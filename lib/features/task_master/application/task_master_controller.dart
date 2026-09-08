@@ -282,9 +282,14 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
       current.copyWith(
         mustDoCategories: mustDo,
         wantToDoCategories: wantToDo,
-        deletedWantToDoCategories: withoutTombstonesFor(
+        // Every want-to-do category the must-do snapshot does not carry
+        // disappears here; without a tombstone a peer would resurrect it.
+        deletedWantToDoCategories: graveyardAfterMerge(
           current.deletedWantToDoCategories,
-          wantToDo.map((item) => item.id),
+          current.wantToDoCategories,
+          wantToDo.map((item) => item.id).toSet(),
+          clock,
+          now,
         ),
         shareCategories: false,
         settingsMeta: settingsMeta,

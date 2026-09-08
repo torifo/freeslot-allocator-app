@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:frelocator/core/hlc.dart';
 import 'package:frelocator/features/task_master/application/task_master_controller.dart';
 import 'package:frelocator/features/task_master/application/task_master_logic.dart';
 import 'package:frelocator/features/task_master/data/task_master_repository.dart';
@@ -240,6 +241,90 @@ void main() {
       expect(task.meta.clock.physical, 1000);
     });
 
+    test('mutation chain survives a validation failure', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'task_master_state_v1': _sampleState().encode(),
+      });
+      final container = await testContainer(now: () => 1000);
+      addTearDown(container.dispose);
+      await container.read(taskMasterControllerProvider.future);
+      final notifier = container.read(taskMasterControllerProvider.notifier);
+
+      // Duplicate name: the mutation body throws after being queued.
+      await expectLater(
+        notifier.upsertCategory(
+          kind: TaskKind.mustDo,
+          category: TaskCategory(id: 'must-other', name: '仕事'),
+        ),
+        throwsA(isA<TaskMasterValidationException>()),
+      );
+
+      await notifier.upsertCategory(
+        kind: TaskKind.mustDo,
+        category: TaskCategory(id: 'must-admin', name: '雑務'),
+      );
+
+      final state = container.read(taskMasterControllerProvider).requireValue;
+      expect(state.mustDoCategories.map((c) => c.id), contains('must-admin'));
+      expect(state.mustDoCategories.map((c) => c.id), isNot(contains('must-other')));
+    });
+
+    test('turning sharing off tombstones want-to-do categories the must-do list drops', () async {
+      // Sharing is on but the lists diverged (e.g. a peer added a category to
+      // only one of them); mirroring must not silently swallow the extra.
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'task_master_state_v1': TaskMasterStateData(
+          tasks: const <TaskMaster>[],
+          mustDoCategories: <TaskCategory>[
+            TaskCategory(id: 'shared-work', name: '仕事'),
+          ],
+          wantToDoCategories: <TaskCategory>[
+            TaskCategory(id: 'shared-work', name: '仕事'),
+            TaskCategory(id: 'want-only', name: '趣味'),
+          ],
+          shareCategories: true,
+        ).encode(),
+      });
+      final container = await testContainer(now: () => 1000);
+      addTearDown(container.dispose);
+      await container.read(taskMasterControllerProvider.future);
+
+      await container
+          .read(taskMasterControllerProvider.notifier)
+          .setShareCategories(enabled: false);
+
+      final state = container.read(taskMasterControllerProvider).requireValue;
+      expect(state.wantToDoCategories.map((c) => c.id), <String>['shared-work']);
+      final tombstone = state.deletedWantToDoCategories.singleWhere(
+        (item) => item.id == 'want-only',
+      );
+      expect(tombstone.meta.isDeleted, isTrue);
+      expect(tombstone.meta.clock, isNot(Hlc.migrated));
+    });
+
+    test('enabling shared categories stamps the dropped category tombstone', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'task_master_state_v1': _shareableState().encode(),
+      });
+      final container = await testContainer(now: () => 1000);
+      addTearDown(container.dispose);
+      await container.read(taskMasterControllerProvider.future);
+      final notifier = container.read(taskMasterControllerProvider.notifier);
+
+      await notifier.setShareCategories(
+        enabled: true,
+        strategy: CategoryMergeStrategy.keepMustDo,
+      );
+
+      final state = container.read(taskMasterControllerProvider).requireValue;
+      final tombstone = state.deletedWantToDoCategories.singleWhere(
+        (item) => item.id == 'want-hobby',
+      );
+      expect(tombstone.meta.isDeleted, isTrue);
+      expect(tombstone.meta.clock, isNot(Hlc.migrated));
+      expect(tombstone.meta.clock.deviceId, startsWith('test-'));
+    });
+
     test('deleteCategory tombstones the category and detaches tasks with a new clock', () async {
       SharedPreferences.setMockInitialValues(<String, Object>{
         'task_master_state_v1': _sampleState().encode(),
@@ -319,6 +404,15 @@ TaskMasterStateData _sampleState() {
       TaskCategory(id: 'must-work', name: '仕事'),
     ],
     wantToDoCategories: const <TaskCategory>[],
+    shareCategories: false,
+  );
+}
+
+TaskMasterStateData _shareableState() {
+  return TaskMasterStateData(
+    tasks: const <TaskMaster>[],
+    mustDoCategories: <TaskCategory>[TaskCategory(id: 'must-work', name: '仕事')],
+    wantToDoCategories: <TaskCategory>[TaskCategory(id: 'want-hobby', name: '趣味')],
     shareCategories: false,
   );
 }
