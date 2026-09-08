@@ -77,6 +77,16 @@ export class HubConfig {
     return { code: p.code, expiresAt: p.expiresAt };
   }
 
+  /** Reportable pairing state. Never carries the code itself: `sync_status` output ends up in logs and chat. */
+  pairingState(): { state: 'none' | 'issued' | 'expired' | 'locked'; expiresAt: string | null; failures: number } {
+    const p = this.json.pairing;
+    if (!p) return { state: 'none', expiresAt: null, failures: 0 };
+    const expiresAt = new Date(p.expiresAt).toISOString();
+    if (p.failures >= MAX_PAIR_FAILURES) return { state: 'locked', expiresAt, failures: p.failures };
+    if (p.expiresAt <= this.now()) return { state: 'expired', expiresAt, failures: p.failures };
+    return { state: 'issued', expiresAt, failures: p.failures };
+  }
+
   async issuePairingCode(): Promise<string> {
     const code = Array.from({ length: 8 }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]).join('');
     this.json.pairing = { code, expiresAt: this.now() + PAIRING_TTL_MS, failures: 0 };

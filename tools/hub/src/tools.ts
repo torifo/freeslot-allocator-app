@@ -1,9 +1,40 @@
+import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
+import type { DeviceRecord, HubConfig } from './config.js';
 import { Hlc, HlcClock } from './hlc.js';
 import { copyId, generateId } from './ids.js';
 import { checkInvariants } from './invariants.js';
 import { isDeleted, TASK_KINDS, type Entity, type SyncDocumentJson } from './model.js';
 import { FileStore } from './store.js';
+import { SyncRejected, type SyncEngine, type SyncProgress, type SyncSummary } from './sync-engine.js';
+
+/** What `sync_status` reports about the LAN listener. Never carries a device token. */
+export interface LanInfo {
+  listening: boolean;
+  url: string | null;
+  addresses: string[];
+  port: number | null;
+  pairingPage: string | null;
+  qrPage: string | null;
+}
+
+export interface HubToolsDeps { config: HubConfig; engine: SyncEngine; lan: () => LanInfo }
+
+export type DeviceStatus = Omit<DeviceRecord, 'token'> & { progress: SyncProgress | null };
+
+export interface SyncStatus {
+  dataFile: string;
+  modifiedAt: string | null;
+  warning: string | null;
+  purgedBefore: string | null;
+  lan: LanInfo | null;
+  fingerprint: string | null;
+  pairing: ReturnType<HubConfig['pairingState']>;
+  devices: DeviceStatus[];
+  lastSync: SyncProgress | null;
+  lanError: string | null;
+  configError: string | null;
+}
 
 /** A user-facing failure: the request was rejected, nothing was written. */
 export class ToolError extends Error {
@@ -113,7 +144,14 @@ export class HubTools {
     private readonly store: FileStore,
     private readonly clock: HlcClock,
     private readonly now: () => Date = () => new Date(),
+    /** Absent when hub.json is unusable: the local task tools still work, the LAN ones refuse. */
+    private readonly deps?: HubToolsDeps,
   ) {}
+
+  private requireDeps(): HubToolsDeps {
+    if (!this.deps) throw new ToolError('LAN sync is not configured in this hub process');
+    return this.deps;
+  }
 
   private stamp(previous?: Entity): Pick<Entity, 'clock' | 'updatedAt' | 'deletedAt' | 'migrated'> {
     return {
@@ -740,17 +778,91 @@ export class HubTools {
     return this.store.undoLastWrite();
   }
 
-  async syncStatus(): Promise<{
-    dataFile: string;
-    modifiedAt: string | null;
-    warning: string | null;
-    lan: string;
+  async importFile(input: z.infer<typeof schemas.importFile>): Promise<{
+    summary: SyncSummary; warnings: string[]; deviceId: string;
   }> {
+    const { config, engine } = this.requireDeps();
+    let text: string;
+    try {
+      text = await readFile(input.path, 'utf8');
+    } catch (error) {
+      throw new ToolError(`file not found: ${input.path} (${String((error as Error).message)})`);
+    }
+    let json: unknown;
+    try {
+      json = JSON.parse(text);
+    } catch (error) {
+      throw new ToolError(`not valid JSON: ${String((error as Error).message)}`);
+    }
+    const doc = json as SyncDocumentJson;
+    if (typeof doc.version !== 'number' || doc.version < 2) {
+      throw new ToolError(`unsupported schema version ${String(doc.version)}: export the file from an app with schema v2`);
+    }
+    const deviceId = typeof doc.deviceId === 'string' && doc.deviceId ? doc.deviceId : 'file-import';
+    if (!config.device(deviceId)) {
+      // Registers the device so purge accounting sees it; this spends the current pairing code.
+      await config.redeemPairingCode(await config.issuePairingCode(), deviceId, 'file import');
+    }
+    try {
+      const result = await engine.sync(deviceId, doc, 'merge');
+      return { summary: result.summary, warnings: result.warnings, deviceId };
+    } catch (error) {
+      if (error instanceof SyncRejected) throw new ToolError(`${error.code}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  async purgeTombstones(): Promise<{ purged: number; purgedBefore: string | null }> {
+    return this.requireDeps().engine.purge();
+  }
+
+  async forgetDevice(input: z.infer<typeof schemas.forgetDevice>): Promise<{ deviceId: string; forgotten: true }> {
+    try {
+      await this.requireDeps().config.forgetDevice(input.deviceId);
+    } catch (error) {
+      throw error instanceof ToolError ? error : new ToolError(String((error as Error).message));
+    }
+    return { deviceId: input.deviceId, forgotten: true };
+  }
+
+  async rotateToken(input: z.infer<typeof schemas.rotateToken>): Promise<{ deviceId: string; token: string; note: string }> {
+    let token: string;
+    try {
+      token = await this.requireDeps().config.rotateToken(input.deviceId);
+    } catch (error) {
+      throw error instanceof ToolError ? error : new ToolError(String((error as Error).message));
+    }
     return {
+      deviceId: input.deviceId,
+      token,
+      note: 'the phone must pair again with the new token (or scan a new pairing QR)',
+    };
+  }
+
+  async syncStatus(): Promise<SyncStatus> {
+    const base = {
       dataFile: this.store.filePath,
       modifiedAt: (await this.store.modifiedAt())?.toISOString() ?? null,
       warning: this.store.lastWarning,
-      lan: 'not started (Plan 2)',
+      purgedBefore: (await this.store.read()).purgedBefore ?? null,
+      lanError: null as string | null,
+      configError: null as string | null,
+    };
+    if (!this.deps) {
+      return { ...base, lan: null, fingerprint: null, pairing: { state: 'none', expiresAt: null, failures: 0 }, devices: [], lastSync: null };
+    }
+    const { config, engine, lan } = this.deps;
+    return {
+      ...base,
+      lan: lan(),
+      fingerprint: config.fingerprint,
+      pairing: config.pairingState(),
+      // Tokens never leave hub.json: they are dropped here, not merely omitted from a type.
+      devices: config.devices().map(({ token: _token, ...device }) => ({
+        ...device,
+        progress: engine.progressFor(device.deviceId) ?? null,
+      })),
+      lastSync: engine.lastSync,
     };
   }
 }

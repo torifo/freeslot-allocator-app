@@ -273,7 +273,7 @@ describe('durability', () => {
     expect(await tools.listTasks({})).toHaveLength(1);
     const status = await tools.syncStatus();
     expect(status.dataFile).toContain('data.json');
-    expect(status).toMatchObject({ warning: null, lan: 'not started (Plan 2)' });
+    expect(status).toMatchObject({ warning: null, lan: null, fingerprint: null, devices: [] });
     expect(typeof status.modifiedAt).toBe('string');
   });
 });
