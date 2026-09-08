@@ -6,6 +6,22 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:frelocator/features/task_master/domain/task_models.dart';
 import 'package:frelocator/services/storage/file_backed_store.dart';
 
+/// dart:io's `Directory` has no `setLastModified`, so backdating a
+/// directory's own mtime (as opposed to a file's) has to shell out.
+Future<void> _setDirModifiedTime(String path, DateTime time) async {
+  final stamp =
+      '${time.year.toString().padLeft(4, '0')}'
+      '${time.month.toString().padLeft(2, '0')}'
+      '${time.day.toString().padLeft(2, '0')}'
+      '${time.hour.toString().padLeft(2, '0')}'
+      '${time.minute.toString().padLeft(2, '0')}'
+      '.${time.second.toString().padLeft(2, '0')}';
+  final result = await Process.run('/usr/bin/touch', ['-t', stamp, path]);
+  if (result.exitCode != 0) {
+    throw StateError('touch -t failed: ${result.stderr}');
+  }
+}
+
 void main() {
   late Directory tmp;
   setUp(() async {
@@ -113,8 +129,11 @@ void main() {
   });
 
   test('defaultDirectory falls back to system temp when HOME is unset', () {
-    // We cannot unset Platform.environment (it is immutable in tests), so
-    // this just asserts the normal case resolves under HOME when set.
+    // We cannot unset Platform.environment (it is immutable in Dart test
+    // isolates, and mutating the real process environment is unsafe/
+    // unsupported), so this just asserts the normal case resolves under
+    // HOME when set. A HOME-unset case is intentionally skipped per the
+    // task's guidance not to mutate the process environment.
     final dir = FileBackedStore.defaultDirectory();
     expect(dir, isNotEmpty);
   });
@@ -152,14 +171,13 @@ void main() {
     );
 
     test(
-      'a stale sentinel (old mtime) is reclaimed and the write succeeds',
+      'a stale sentinel (old directory mtime) is reclaimed and the write '
+      'succeeds',
       () async {
         final sentinel = Directory('${tmp.path}/data.lock.lock');
         await sentinel.create(recursive: true);
-        final heartbeat = File('${sentinel.path}/heartbeat');
-        await heartbeat.writeAsString('stale');
         final old = DateTime.now().subtract(const Duration(seconds: 30));
-        await heartbeat.setLastModified(old);
+        await _setDirModifiedTime(sentinel.path, old);
 
         final store = FileBackedStore(
           directory: tmp.path,
@@ -180,9 +198,7 @@ void main() {
       () async {
         final sentinel = Directory('${tmp.path}/data.lock.lock');
         await sentinel.create(recursive: true);
-        final heartbeat = File('${sentinel.path}/heartbeat');
-        await heartbeat.writeAsString('fresh');
-        await heartbeat.setLastModified(DateTime.now());
+        await _setDirModifiedTime(sentinel.path, DateTime.now());
 
         final store = FileBackedStore(
           directory: tmp.path,
@@ -193,6 +209,44 @@ void main() {
           store.writeTaskMaster(TaskMasterStateData.initial()),
           throwsA(isA<StateError>()),
         );
+      },
+      timeout: const Timeout(Duration(seconds: 15)),
+    );
+
+    test('the sentinel directory is empty while the lock is held', () async {
+      final store = FileBackedStore(directory: tmp.path, deviceId: 'a');
+      final sentinel = Directory('${tmp.path}/data.lock.lock');
+
+      await store.withLockForTest(() async {
+        expect(await sentinel.exists(), isTrue);
+        expect(sentinel.listSync(), isEmpty);
+      });
+    });
+
+    test(
+      'the heartbeat refreshes the sentinel directory mtime while held',
+      () async {
+        final sentinel = Directory('${tmp.path}/data.lock.lock');
+        final store = FileBackedStore(
+          directory: tmp.path,
+          deviceId: 'a',
+          heartbeatInterval: const Duration(milliseconds: 50),
+        );
+
+        await store.withLockForTest(() async {
+          // Backdate the sentinel so a subsequent heartbeat tick is
+          // unambiguously visible even under coarse mtime granularity.
+          await _setDirModifiedTime(
+            sentinel.path,
+            DateTime.now().subtract(const Duration(seconds: 10)),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 150));
+          final stat = await sentinel.stat();
+          expect(
+            DateTime.now().difference(stat.modified),
+            lessThan(const Duration(seconds: 5)),
+          );
+        });
       },
       timeout: const Timeout(Duration(seconds: 15)),
     );

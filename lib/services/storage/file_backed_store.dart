@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:meta/meta.dart';
 
 import '../../features/daily_plan/domain/daily_plan_models.dart';
@@ -26,10 +27,10 @@ class FileBackedStore extends StateStore {
     required this.directory,
     required this.deviceId,
     this.lockTimeout = const Duration(seconds: 10),
+    this.heartbeatInterval = const Duration(seconds: 2),
   });
 
   static const Duration _staleThreshold = Duration(seconds: 10);
-  static const Duration _heartbeatInterval = Duration(seconds: 2);
   static const int _retryBaseDelayMs = 50;
   static const int _retryJitterMs = 20;
 
@@ -48,6 +49,11 @@ class FileBackedStore extends StateStore {
   /// giving up. Overridable in tests so they don't take 10 real seconds.
   final Duration lockTimeout;
 
+  /// How often, while the lock is held, a transient file is created and
+  /// immediately deleted inside the sentinel directory to refresh its
+  /// mtime. Overridable in tests so they don't take 2 real seconds.
+  final Duration heartbeatInterval;
+
   String? _lastWarning;
   DateTime? _lastReadModified;
   int? _lastReadLength;
@@ -64,8 +70,6 @@ class FileBackedStore extends StateStore {
 
   Directory get _sentinel => Directory('$directory/data.lock.lock');
 
-  File get _heartbeatFile => File('${_sentinel.path}/heartbeat');
-
   Future<T> _withLock<T>(Future<T> Function() body) async {
     await Directory(directory).create(recursive: true);
     if (!await _lockTargetFile.exists()) {
@@ -76,7 +80,7 @@ class FileBackedStore extends StateStore {
       }
     }
     await _acquireSentinel();
-    final heartbeat = Timer.periodic(_heartbeatInterval, (_) {
+    final heartbeat = Timer.periodic(heartbeatInterval, (_) {
       unawaited(_refreshHeartbeat());
     });
     try {
@@ -119,8 +123,14 @@ class FileBackedStore extends StateStore {
   /// (dart:io's `Directory.create()` is idempotent and does *not* throw
   /// when the directory already exists, so it cannot be used here).
   Future<bool> _tryCreateSentinelExclusive() async {
-    final result = await Process.run('mkdir', [_sentinel.path]);
-    return result.exitCode == 0;
+    try {
+      final result = await Process.run('/bin/mkdir', [_sentinel.path]);
+      return result.exitCode == 0;
+    } on ProcessException {
+      // Treat a failure to even spawn mkdir as a lock-acquisition failure so
+      // the caller falls back to the normal retry/backoff loop.
+      return false;
+    }
   }
 
   Future<bool> _isSentinelStale() async {
@@ -133,19 +143,10 @@ class FileBackedStore extends StateStore {
     return DateTime.now().difference(mtime) > _staleThreshold;
   }
 
-  /// dart:io's `Directory` has no `setLastModified`, so the heartbeat is
-  /// tracked via a file inside the sentinel; fall back to the directory's
-  /// own mtime if the heartbeat file isn't there yet (e.g. a lock just
-  /// created by the hub before its first refresh tick).
+  /// `proper-lockfile` (the Node side) judges staleness solely from the
+  /// sentinel directory's own mtime, so this must not rely on any file
+  /// inside it.
   Future<DateTime?> _sentinelMtime() async {
-    try {
-      final heartbeatStat = await _heartbeatFile.stat();
-      if (heartbeatStat.type != FileSystemEntityType.notFound) {
-        return heartbeatStat.modified;
-      }
-    } catch (_) {
-      // fall through to directory mtime
-    }
     try {
       final dirStat = await _sentinel.stat();
       if (dirStat.type == FileSystemEntityType.notFound) return null;
@@ -164,23 +165,48 @@ class FileBackedStore extends StateStore {
     }
   }
 
+  /// Refreshes the sentinel directory's mtime the same way `proper-lockfile`
+  /// does on Node (`utimes`): dart:io's `Directory` has no
+  /// `setLastModified`, so instead a transient file is created inside the
+  /// sentinel and immediately deleted, which bumps the directory's mtime on
+  /// macOS. The sentinel must stay empty at all other times, since
+  /// `proper-lockfile`'s stale-reclaim path does a non-recursive `rmdir`.
   Future<void> _refreshHeartbeat() async {
+    final pulse = File(
+      '${_sentinel.path}/.heartbeat-${DateTime.now().microsecondsSinceEpoch}',
+    );
     try {
-      await _heartbeatFile.writeAsString(
-        DateTime.now().toUtc().toIso8601String(),
-        flush: true,
-      );
+      await pulse.writeAsString('', flush: true);
     } catch (_) {
       // Best-effort: if the sentinel was removed concurrently, the next
       // acquire attempt re-establishes it.
+      return;
+    }
+    try {
+      await pulse.delete();
+    } catch (_) {
+      // Best-effort cleanup; if this fails the sentinel may briefly be
+      // non-empty, which release() below already tolerates.
     }
   }
 
+  /// Deletes the sentinel non-recursively, matching `proper-lockfile`'s
+  /// `rmdir`. Falls back to a recursive delete (with a warning) only if the
+  /// directory unexpectedly contains something, e.g. a heartbeat pulse that
+  /// lost its cleanup race.
   Future<void> _releaseSentinel() async {
     try {
-      await _sentinel.delete(recursive: true);
+      await _sentinel.delete();
     } catch (_) {
-      // Ignore: already gone, or nothing we can do.
+      try {
+        await _sentinel.delete(recursive: true);
+        debugPrint(
+          'FileBackedStore: sentinel ${_sentinel.path} was unexpectedly '
+          'non-empty on release; deleted recursively.',
+        );
+      } catch (_) {
+        // Ignore: already gone, or nothing we can do.
+      }
     }
   }
 
