@@ -1,0 +1,94 @@
+{
+  "name": "identical migrated records stay unchanged",
+  "a": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "a",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [
+        {
+          "id": "must-work",
+          "name": "仕事",
+          "clock": "0-0-migrated",
+          "updatedAt": "1970-01-01T00:00:00.000Z",
+          "deletedAt": null,
+          "migrated": true
+        }
+      ],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "b": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "b",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [
+        {
+          "id": "must-work",
+          "name": "仕事",
+          "clock": "0-0-migrated",
+          "updatedAt": "1970-01-01T00:00:00.000Z",
+          "deletedAt": null,
+          "migrated": true
+        }
+      ],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expected": {
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [
+        {
+          "id": "must-work",
+          "name": "仕事",
+          "clock": "0-0-migrated",
+          "updatedAt": "1970-01-01T00:00:00.000Z",
+          "deletedAt": null,
+          "migrated": true
+        }
+      ],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expectedWarnings": []
+}

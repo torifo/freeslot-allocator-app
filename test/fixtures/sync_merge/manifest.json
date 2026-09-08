@@ -1,0 +1,10 @@
+[
+  "01_only_in_a.json",
+  "02_newer_clock_wins.json",
+  "03_delete_beats_older_edit.json",
+  "04_edit_beats_older_delete.json",
+  "05_migrated_same_hash_no_change.json",
+  "06_migrated_diff_hash_lexicographic.json",
+  "07_dangling_category_kept.json",
+  "08_settings_merge.json"
+]

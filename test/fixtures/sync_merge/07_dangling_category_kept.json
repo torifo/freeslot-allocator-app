@@ -1,0 +1,115 @@
+{
+  "name": "a task keeps a categoryId whose category was deleted",
+  "a": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "a",
+    "taskMaster": {
+      "tasks": [
+        {
+          "id": "t1",
+          "title": "書類",
+          "kind": "must_do",
+          "priority": 3,
+          "createdAt": "2026-09-01T00:00:00.000Z",
+          "memo": "",
+          "categoryId": "c1",
+          "estimatedMinutes": 0,
+          "clock": "10-0-a",
+          "updatedAt": "2026-09-08T00:00:10.000Z",
+          "deletedAt": null,
+          "migrated": false
+        }
+      ],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "b": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "b",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [
+        {
+          "id": "c1",
+          "clock": "11-0-b",
+          "updatedAt": "2026-09-08T00:00:11.000Z",
+          "deletedAt": "2026-09-08T00:00:11.000Z",
+          "migrated": false
+        }
+      ],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expected": {
+    "taskMaster": {
+      "tasks": [
+        {
+          "id": "t1",
+          "title": "書類",
+          "kind": "must_do",
+          "priority": 3,
+          "createdAt": "2026-09-01T00:00:00.000Z",
+          "memo": "",
+          "categoryId": "c1",
+          "estimatedMinutes": 0,
+          "clock": "10-0-a",
+          "updatedAt": "2026-09-08T00:00:10.000Z",
+          "deletedAt": null,
+          "migrated": false
+        }
+      ],
+      "mustDoCategories": [
+        {
+          "id": "c1",
+          "clock": "11-0-b",
+          "updatedAt": "2026-09-08T00:00:11.000Z",
+          "deletedAt": "2026-09-08T00:00:11.000Z",
+          "migrated": false
+        }
+      ],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expectedWarnings": [
+    "task t1 references missing category c1"
+  ]
+}

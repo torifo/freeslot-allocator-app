@@ -1,0 +1,95 @@
+{
+  "name": "migrated records with different content fall back to the larger content hash",
+  "a": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "a",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [
+        {
+          "id": "must-work",
+          "name": "仕事",
+          "clock": "0-0-migrated",
+          "updatedAt": "1970-01-01T00:00:00.000Z",
+          "deletedAt": null,
+          "migrated": true
+        }
+      ],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "b": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "b",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [
+        {
+          "id": "must-work",
+          "name": "業務",
+          "clock": "0-0-migrated",
+          "updatedAt": "1970-01-01T00:00:00.000Z",
+          "deletedAt": null,
+          "migrated": true
+        }
+      ],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expected": {
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [
+        {
+          "id": "must-work",
+          "name": "仕事",
+          "clock": "0-0-migrated",
+          "updatedAt": "1970-01-01T00:00:00.000Z",
+          "deletedAt": null,
+          "migrated": true
+        }
+      ],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expectedWarnings": [],
+  "_note": "contentHash({\"id\":\"must-work\",\"name\":\"仕事\"}) = d52c6f93377b26b41073d9d8038ac76777e218b54cba9b759f2090381adee524; contentHash({\"id\":\"must-work\",\"name\":\"業務\"}) = 19fd2bf2f1cb5f982902e7e248cbbed76908c40ddbfdf11a68cf56afa509c410; d52c… > 19fd… so 仕事 wins. Recompute with `dart run tool/print_hash.dart '<entity json>'`."
+}

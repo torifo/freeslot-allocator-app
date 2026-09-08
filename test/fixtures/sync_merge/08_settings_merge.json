@@ -1,0 +1,67 @@
+{
+  "name": "settings follow the larger clock",
+  "a": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "a",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "5-0-a",
+        "updatedAt": "2026-09-08T00:00:05.000Z",
+        "deletedAt": null,
+        "migrated": false
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "b": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "b",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": true,
+        "clock": "6-0-b",
+        "updatedAt": "2026-09-08T00:00:06.000Z",
+        "deletedAt": null,
+        "migrated": false
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expected": {
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": true,
+        "clock": "6-0-b",
+        "updatedAt": "2026-09-08T00:00:06.000Z",
+        "deletedAt": null,
+        "migrated": false
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expectedWarnings": []
+}
