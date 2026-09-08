@@ -1,5 +1,7 @@
 # Sync Extension Plan
 
+> **この計画は 2026-09-08 の設計書に置き換えられました。** 現行の方針は [`superpowers/specs/2026-09-08-frelocator-hub-sync-design.md`](superpowers/specs/2026-09-08-frelocator-hub-sync-design.md) を参照してください。本ファイルは経緯の記録として残しています。
+
 `AppDataService` を起点として、端末引き継ぎ・クロスプラットフォーム同期を段階的に追加するための設計メモです。
 
 ## 統合ポイント

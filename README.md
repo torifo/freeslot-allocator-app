@@ -18,7 +18,7 @@ FRELOCATOR は、個人の自由時間を具体的な計画に落とし込み、
 - `WeeklyReport`
   1 週間の時間配分を振り返るレポート
 
-現在のデータ保存は `shared_preferences` による端末内保存です。Cloud sync、通知配信、アカウント機能、外部カレンダー連携はまだ実装していません。
+データ保存は端末内のみです（Android / Web は `shared_preferences`、macOS は `~/Library/Application Support/FRELOCATOR/data.json`）。macOS の JSON は `tools/hub`（Claude Code 向け MCP サーバー）と共有され、PC 上では Claude からタスクや計画を編集できます。端末間の同期（LAN / QR）は `docs/superpowers/specs/2026-09-08-frelocator-hub-sync-design.md` に沿って実装中です。Cloud sync、通知配信、アカウント機能、外部カレンダー連携はまだ実装していません。
 
 ## 現在の状況
 
