@@ -23,6 +23,7 @@ class SyncSummary {
     required this.updated,
     required this.deleted,
     required this.warnings,
+    this.removed = 0,
   });
 
   final int added;
@@ -30,11 +31,16 @@ class SyncSummary {
   final int deleted;
   final int warnings;
 
+  /// Records the hub dropped entirely (purged tombstones), as opposed to the
+  /// [deleted] ones that are still carried as tombstones.
+  final int removed;
+
   factory SyncSummary.fromJson(Map<String, dynamic> j) => SyncSummary(
     added: j['added'] as int? ?? 0,
     updated: j['updated'] as int? ?? 0,
     deleted: j['deleted'] as int? ?? 0,
     warnings: j['warnings'] as int? ?? 0,
+    removed: j['removed'] as int? ?? 0,
   );
 }
 
