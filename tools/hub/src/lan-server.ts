@@ -10,14 +10,22 @@ export interface LanServerOptions { port: number; host: string; advertise: boole
 
 /** Bodies above this are refused with 413 rather than buffered. */
 export const MAX_BODY = 20 * 1024 * 1024;
+/** `/pair` is unauthenticated, so its budget is far smaller than `/sync`'s. */
+export const MAX_PAIR_BODY = 8 * 1024;
+
+/** Diagnostics go to stderr: stdout carries the MCP stdio protocol. */
+function logError(context: string, error: unknown): void {
+  const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+  process.stderr.write(`[lan-server] ${context}: ${detail}\n`);
+}
 
 // `deviceName` is the field name Plan 2b's client sends; `name` is the shorter
 // spelling used by the hub's own pages. Either is accepted, `name` wins.
 const pairSchema = z.object({
-  code: z.string().min(1),
-  deviceId: z.string().min(1),
-  name: z.string().max(80).optional(),
-  deviceName: z.string().max(80).optional(),
+  code: z.string().min(1).max(64),
+  deviceId: z.string().min(1).max(128),
+  name: z.string().max(128).optional(),
+  deviceName: z.string().max(128).optional(),
 });
 const syncQuery = z.enum(['merge', 'take_hub', 'take_phone']);
 
@@ -38,14 +46,35 @@ export class LanServer {
   get address(): string | null { return this.options.host === '0.0.0.0' ? lanAddress() : this.options.host; }
 
   async start(): Promise<void> {
-    this.server = createServer({ cert: this.config.certPem, key: this.config.keyPem }, (req, res) => {
-      void this.handle(req, res).catch((error) => fail(res, error));
+    const server = createServer({
+      cert: this.config.certPem,
+      key: this.config.keyPem,
+      minVersion: 'TLSv1.2',
+      honorCipherOrder: true,
+    }, (req, res) => {
+      void this.handle(req, res).catch((error) => fail(req, res, error));
     });
-    await new Promise<void>((resolve, reject) => {
-      this.server!.once('error', reject);
-      this.server!.listen(this.options.port, this.options.host, () => resolve());
+    // A garbled request line never reaches `handle`, so answer it in the same JSON shape.
+    server.on('clientError', (error: NodeJS.ErrnoException, socket) => {
+      logError('client error', error);
+      const writable = socket as { writable?: boolean; end: (data?: string) => void; destroy: () => void };
+      if (!writable.writable) return writable.destroy();
+      writable.end('HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{"error":{"code":"bad_request","message":"malformed request"}}');
     });
-    this.port = (this.server.address() as { port: number }).port;
+    this.server = server;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onError = (error: unknown) => reject(error);
+        server.once('error', onError);
+        server.listen(this.options.port, this.options.host, () => { server.removeListener('error', onError); resolve(); });
+      });
+    } catch (error) {
+      this.server = null;
+      throw error;
+    }
+    // Post-listen failures (an EPIPE on a dropped socket, say) must not crash the hub.
+    server.on('error', (error) => logError('server error', error));
+    this.port = (server.address() as { port: number }).port;
     if (this.options.advertise) this.mdns.start(this.port, this.hubDeviceId);
   }
 
@@ -55,6 +84,9 @@ export class LanServer {
     this.server = null;
   }
 
+  // No CORS headers, by design: the hub's self-signed certificate already stops
+  // browsers (and DNS-rebinding attempts) from reaching these routes, and every
+  // real client is the native app. Do not add `Access-Control-Allow-Origin`.
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'https://local');
     if (req.method === 'POST' && url.pathname === '/pair') return this.pair(req, res);
@@ -63,7 +95,7 @@ export class LanServer {
     const device = token ? this.config.deviceForToken(token) : undefined;
     if (!device) return send(res, 401, { error: { code: 'unauthorized', message: 'missing or invalid token' } });
 
-    if (req.method === 'GET' && url.pathname === '/health') {
+    if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/health') {
       return send(res, 200, {
         ok: true,
         hubDeviceId: this.hubDeviceId,
@@ -88,7 +120,7 @@ export class LanServer {
   }
 
   private async pair(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const parsed = pairSchema.safeParse(await readJson(req));
+    const parsed = pairSchema.safeParse(await readJson(req, MAX_PAIR_BODY));
     if (!parsed.success) return send(res, 400, { error: { code: 'bad_request', message: parsed.error.message } });
     const name = parsed.data.name ?? parsed.data.deviceName ?? '';
     // Wrong / expired / over-budget codes arrive as SyncRejected(403). Anything else
@@ -98,25 +130,42 @@ export class LanServer {
   }
 }
 
-function fail(res: ServerResponse, error: unknown): void {
+function fail(req: IncomingMessage, res: ServerResponse, error: unknown): void {
   if (res.headersSent) { res.end(); return; }
-  if (error instanceof SyncRejected) return send(res, error.status, { error: { code: error.code, message: error.message } });
+  if (error instanceof SyncRejected) {
+    // A 413 is decided before the body is drained, so the socket still holds
+    // undelivered bytes; keeping it alive would desync the next request on it.
+    const close = error.status === 413;
+    send(res, error.status, { error: { code: error.code, message: error.message } }, close);
+    if (close) req.destroy();
+    return;
+  }
   if (error instanceof SyntaxError) return send(res, 400, { error: { code: 'bad_request', message: 'body is not valid JSON' } });
-  return send(res, 500, { error: { code: 'internal', message: String((error as Error)?.message ?? error) } });
+  // Paths, PIDs and stack frames stay on stderr; the client only learns that it failed.
+  logError('request failed', error);
+  return send(res, 500, { error: { code: 'internal', message: 'internal error' } });
 }
 
-function send(res: ServerResponse, status: number, body: unknown): void {
+function send(res: ServerResponse, status: number, body: unknown, close = false): void {
   const text = JSON.stringify(body);
-  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) });
+  res.writeHead(status, {
+    'content-type': 'application/json',
+    'content-length': Buffer.byteLength(text),
+    ...(close ? { connection: 'close' } : {}),
+  });
   res.end(text);
 }
 
-async function readJson(req: IncomingMessage): Promise<unknown> {
+async function readJson(req: IncomingMessage, max = MAX_BODY): Promise<unknown> {
+  const tooLarge = () => new SyncRejected(413, 'payload_too_large', `request body exceeds ${max} bytes`);
+  const declared = Number(req.headers['content-length']);
+  // Refuse on the announced length before a single byte is buffered.
+  if (Number.isFinite(declared) && declared > max) throw tooLarge();
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     size += (chunk as Buffer).length;
-    if (size > MAX_BODY) throw new SyncRejected(413, 'payload_too_large', `request body exceeds ${MAX_BODY} bytes`);
+    if (size > max) throw tooLarge();
     chunks.push(chunk as Buffer);
   }
   const text = Buffer.concat(chunks).toString('utf8');

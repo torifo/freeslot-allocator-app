@@ -45,6 +45,8 @@ export function crc32(buf: Buffer | string): string {
 }
 
 export const CHUNK_CHARS = 600;
+/** Hard ceiling on the frame count. Bounds every `length: total` allocation below. */
+export const MAX_FRAMES = 512;
 export interface EncodeOptions { chunkChars?: number; maxFrames?: number }
 
 /** `FRL2:<sha16>:<i>:<n>:<crc>:<chunk>` — all characters in the QR alphanumeric set. */
@@ -54,7 +56,8 @@ export function encodeFrames(value: unknown, options: EncodeOptions = {}): strin
   const text = base45Encode(gzipSync(json, { level: 9 }));
   const hash = createHash('sha256').update(json).digest('hex').slice(0, 16).toUpperCase();
   const total = Math.max(1, Math.ceil(text.length / chunkChars));
-  if (options.maxFrames && total > options.maxFrames) throw new Error(`payload needs ${total} frames, more than ${options.maxFrames} frames; use LAN sync instead`);
+  const maxFrames = options.maxFrames ?? MAX_FRAMES;
+  if (total > maxFrames) throw new Error(`payload needs ${total} frames, more than ${maxFrames} frames; use LAN sync instead`);
   const frames: string[] = [];
   for (let i = 0; i < total; i += 1) {
     const chunk = text.slice(i * chunkChars, (i + 1) * chunkChars);
@@ -84,9 +87,14 @@ export class FrameSet {
     if (parts.length < 6 || parts[0] !== 'FRL2') return 'malformed';
     const [, hash, iStr, nStr, crc] = parts;
     const chunk = parts.slice(5).join(':');
+    // Decimal digits only: `Number(' 1')` and `Number('0x1')` would otherwise pass.
+    if (!/^\d+$/.test(iStr) || !/^\d+$/.test(nStr)) return 'malformed';
     const i = Number(iStr); const n = Number(nStr);
-    if (!Number.isInteger(i) || !Number.isInteger(n) || i < 0 || i >= n) return 'malformed';
-    if (this.hash && this.hash !== hash) return 'different_payload';
+    // Bound `n` before anything allocates `length: total` (see MAX_FRAMES).
+    if (n < 1 || n > MAX_FRAMES || i >= n) return 'malformed';
+    // A frame from another payload, or one that disagrees about the total, must not
+    // be mixed in: a wrong total would leave the set permanently incomplete.
+    if (this.hash !== null && (this.hash !== hash || n !== this.total)) return 'different_payload';
     if (crc32(chunk) !== crc) return 'crc_mismatch';
     if (!this.hash) { this.hash = hash; this.total = n; }
     if (this.chunks.has(i)) return 'duplicate';
@@ -100,7 +108,7 @@ export class FrameSet {
 export function decodeFrames(set: FrameSet): unknown {
   if (!set.isComplete) throw new Error(`incomplete: missing frames ${set.missing().join(',')}`);
   const text = Array.from({ length: set.total }, (_, i) => set.chunkAt(i)!).join('');
-  const json = gunzipSync(base45Decode(text));
+  const json = gunzipSync(base45Decode(text), { maxOutputLength: 64 * 1024 * 1024 });
   const hash = createHash('sha256').update(json).digest('hex').slice(0, 16).toUpperCase();
   if (hash !== set.hash) throw new Error('payload hash mismatch after reassembly');
   return JSON.parse(json.toString('utf8'));

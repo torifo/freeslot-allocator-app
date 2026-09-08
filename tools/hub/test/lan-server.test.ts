@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { Agent, request } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HubConfig } from '../src/config.js';
 import { HlcClock } from '../src/hlc.js';
 import { LanServer } from '../src/lan-server.js';
@@ -12,8 +12,24 @@ import { SyncEngine } from '../src/sync-engine.js';
 import { fingerprintOf } from '../src/tls.js';
 
 let dir: string; let server: LanServer; let cfg: HubConfig;
+const newAgent = () => new Agent({ rejectUnauthorized: false, checkServerIdentity: () => undefined });
+/** Raw request helper: sends `body` verbatim and lets the caller reuse an agent. */
+const raw = (method: string, path: string, options: { body?: string; token?: string; agent?: Agent; headers?: Record<string, string>; endRequest?: boolean } = {}) =>
+  new Promise<{ status: number; text: string }>((resolve, reject) => {
+    const req = request({
+      host: '127.0.0.1', port: server.port, method, path,
+      agent: options.agent ?? newAgent(),
+      headers: { 'content-type': 'application/json', ...(options.token ? { authorization: `Bearer ${options.token}` } : {}), ...options.headers },
+    }, (res) => {
+      let data = ''; res.on('data', (c) => (data += c)); res.on('end', () => { req.destroy(); resolve({ status: res.statusCode!, text: data }); });
+    });
+    req.on('error', (e) => { if (!(e as NodeJS.ErrnoException).code?.includes('ECONNRESET')) reject(e); });
+    if (options.body !== undefined) req.write(options.body);
+    if (options.endRequest !== false) req.end();
+  });
+
 const call = (method: string, path: string, body?: unknown, token?: string, expectFp?: string) => new Promise<{ status: number; json: any }>((resolve, reject) => {
-  const agent = new Agent({ rejectUnauthorized: false, checkServerIdentity: () => undefined });
+  const agent = newAgent();
   const req = request({ host: '127.0.0.1', port: server.port, method, path, agent, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) } }, (res) => {
     if (expectFp) expect(fingerprintOf(`-----BEGIN CERTIFICATE-----\n${(res.socket as any).getPeerCertificate().raw.toString('base64')}\n-----END CERTIFICATE-----`)).toBe(expectFp);
     let data = ''; res.on('data', (c) => (data += c)); res.on('end', () => resolve({ status: res.statusCode!, json: data ? JSON.parse(data) : null }));
@@ -98,5 +114,115 @@ describe('LanServer', () => {
     expect((await call('GET', '/sync', undefined, 'deadbeef')).status).toBe(401);
     const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
     expect((await call('GET', '/nope', undefined, token)).status).toBe(404);
+  });
+});
+
+describe('LanServer input limits', () => {
+  it('rejects an oversized /pair body with 413 before pairing is attempted', async () => {
+    const r = await raw('POST', '/pair', { body: JSON.stringify({ code: '1'.repeat(9 * 1024) }) });
+    expect(r.status).toBe(413);
+    expect(JSON.parse(r.text).error.code).toBe('payload_too_large');
+  });
+
+  it('rejects on the content-length header alone, without reading a body', async () => {
+    // One byte is written only to flush the headers; the declared 9 KB never arrives,
+    // so a 413 here proves the decision came from the content-length header.
+    const r = await raw('POST', '/pair', { headers: { 'content-length': String(9 * 1024) }, body: '{', endRequest: false });
+    expect(r.status).toBe(413);
+    expect(JSON.parse(r.text).error.code).toBe('payload_too_large');
+  });
+
+  it('closes the connection after a 413 so a keep-alive agent does not desync', async () => {
+    const agent = new Agent({ rejectUnauthorized: false, checkServerIdentity: () => undefined, keepAlive: true, maxSockets: 1 });
+    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const big = await raw('POST', '/pair', { agent, body: JSON.stringify({ code: 'x'.repeat(9 * 1024) }) });
+    expect(big.status).toBe(413);
+    const after = await raw('GET', '/health', { agent, token });
+    expect(after.status).toBe(200);
+    expect(JSON.parse(after.text).ok).toBe(true);
+    agent.destroy();
+  });
+
+  it('caps pairing field lengths', async () => {
+    const code = await cfg.issuePairingCode();
+    const long = await call('POST', '/pair', { code, deviceId: 'z'.repeat(200), name: 'Pixel' });
+    expect(long.status).toBe(400);
+    expect(long.json.error.code).toBe('bad_request');
+    expect((await call('POST', '/pair', { code: 'c'.repeat(65), deviceId: 'android-3' })).status).toBe(400);
+  });
+});
+
+describe('LanServer error handling', () => {
+  it('does not leak internal error detail in a 500 but writes it to stderr', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const secret = '/Users/secret/hub.json EACCES pid 4242';
+    vi.spyOn(cfg, 'redeemPairingCode').mockRejectedValue(new Error(secret));
+    const r = await call('POST', '/pair', { code: '123456', deviceId: 'android-1' });
+    expect(r.status).toBe(500);
+    expect(r.json.error).toEqual({ code: 'internal', message: 'internal error' });
+    expect(JSON.stringify(r.json)).not.toContain('secret');
+    expect(stderr.mock.calls.map((c) => String(c[0])).join('')).toContain(secret);
+    vi.restoreAllMocks();
+  });
+
+  it('answers malformed JSON with 400 bad_request', async () => {
+    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const r = await raw('POST', '/sync', { token, body: '{not json' });
+    expect(r.status).toBe(400);
+    expect(JSON.parse(r.text).error.code).toBe('bad_request');
+  });
+
+  it('rejects an unknown sync mode with 400 bad_mode', async () => {
+    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const r = await call('POST', '/sync?mode=bogus', emptyDocument('android-1'), token);
+    expect(r.status).toBe(400);
+    expect(r.json.error.code).toBe('bad_mode');
+  });
+
+  it('answers a malformed HTTP request line with a JSON 400 envelope', async () => {
+    const { connect } = await import('node:tls');
+    const text = await new Promise<string>((resolve, reject) => {
+      const socket = connect({ host: '127.0.0.1', port: server.port, rejectUnauthorized: false }, () => {
+        socket.write('GET /health HTTP/1.1\r\nHost: local\r\nBad Header\r\n\r\n');
+      });
+      let data = ''; socket.on('data', (c) => (data += c)); socket.on('close', () => resolve(data)); socket.on('error', reject);
+    });
+    expect(text).toContain('400 Bad Request');
+    expect(text).toContain('"bad_request"');
+  });
+});
+
+describe('LanServer lifecycle and modes', () => {
+  it('supports HEAD on /health', async () => {
+    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const r = await raw('HEAD', '/health', { token });
+    expect(r.status).toBe(200);
+    expect(r.text).toBe('');
+  });
+
+  it('runs take_hub and take_phone end to end', async () => {
+    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    const phone = { ...emptyDocument('android-1'), lastSyncAt: new Date().toISOString() };
+    const hub = await call('POST', '/sync?mode=take_hub', phone, token);
+    expect(hub.status).toBe(200);
+    expect(hub.json.document.deviceId).toBe('hub-0000');
+    const mine = await call('POST', '/sync?mode=take_phone', phone, token);
+    expect(mine.status).toBe(200);
+    expect(mine.json.document.deviceId).toBe('hub-0000');
+    expect(mine.json.summary).toBeTruthy();
+  });
+
+  it('rejects a token after the device is forgotten', async () => {
+    const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
+    expect((await call('GET', '/health', undefined, token)).status).toBe(200);
+    await cfg.forgetDevice('android-1');
+    const r = await call('GET', '/health', undefined, token);
+    expect(r.status).toBe(401);
+    expect(r.json.error.code).toBe('unauthorized');
+  });
+
+  it('tolerates stop() twice', async () => {
+    await server.stop();
+    await expect(server.stop()).resolves.toBeUndefined();
   });
 });
