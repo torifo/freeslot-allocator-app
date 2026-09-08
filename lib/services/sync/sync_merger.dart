@@ -5,12 +5,80 @@ import '../../core/sync_meta.dart';
 import '../../features/daily_plan/domain/daily_plan_models.dart';
 import '../../features/task_master/domain/task_models.dart';
 import 'sync_document.dart';
+import 'sync_progress.dart';
 
 class MergeResult {
   const MergeResult({required this.document, required this.warnings});
 
   final SyncDocument document;
   final List<String> warnings;
+
+  /// Counts what the merge changed, using the hub's rules (`summarize` in
+  /// `tools/hub/src/sync-engine.ts`) so an out-of-band apply reports the same
+  /// numbers a LAN sync would.
+  SyncSummary summaryAgainst(SyncDocument before) {
+    final a = _indexEntities(before);
+    final b = _indexEntities(document);
+    var added = 0, updated = 0, deleted = 0, removed = 0;
+    for (final entry in b.entries) {
+      final prev = a[entry.key];
+      if (prev == null) {
+        if (!entry.value.deleted) added += 1;
+        continue;
+      }
+      if (entry.value.deleted && !prev.deleted) {
+        deleted += 1;
+      } else if (!entry.value.deleted && entry.value.clock != prev.clock) {
+        updated += 1;
+      }
+    }
+    for (final id in a.keys) {
+      if (!b.containsKey(id)) removed += 1;
+    }
+    return SyncSummary(
+      added: added,
+      updated: updated,
+      deleted: deleted,
+      removed: removed,
+      warnings: warnings.length,
+    );
+  }
+}
+
+typedef _Counted = ({bool deleted, String clock});
+
+Map<String, _Counted> _indexEntities(SyncDocument d) {
+  final out = <String, _Counted>{};
+  void live(String id, SyncMeta meta) =>
+      out[id] = (deleted: false, clock: meta.clock.toString());
+  void dead(Tombstone t) => out[t.id] = (deleted: true, clock: t.meta.clock.toString());
+
+  for (final t in d.taskMaster.tasks) {
+    live(t.id, t.meta);
+  }
+  for (final c in [...d.taskMaster.mustDoCategories, ...d.taskMaster.wantToDoCategories]) {
+    live(c.id, c.meta);
+  }
+  for (final p in d.dailyPlan.plans) {
+    live(p.id, p.meta);
+  }
+  for (final s in d.dailyPlan.slots) {
+    live(s.id, s.meta);
+  }
+  for (final a in d.dailyPlan.assignments) {
+    live(a.id, a.meta);
+  }
+  for (final t in [
+    ...d.taskMaster.deletedTasks,
+    ...d.taskMaster.deletedMustDoCategories,
+    ...d.taskMaster.deletedWantToDoCategories,
+    ...d.dailyPlan.deletedPlans,
+    ...d.dailyPlan.deletedSlots,
+    ...d.dailyPlan.deletedAssignments,
+  ]) {
+    dead(t);
+  }
+  return out;
 }
 
 /// One live-or-dead record in a form the merge can compare.
@@ -170,6 +238,14 @@ class SyncMerger {
     return MergeResult(document: document, warnings: warnings);
   }
 
+  /// The later of two instants, compared as instants and never as text.
+  ///
+  /// `purgedBefore` arrives as an ISO-8601 string that may carry any offset,
+  /// so a lexicographic comparison would rank `2026-01-01T09:00+09:00` above
+  /// the identical `2026-01-01T00:00Z` and walk the value backwards, which
+  /// resurrects every tombstone the hub already purged. `SyncDocument` parses
+  /// both sides to UTC and this picks by [DateTime.isAfter]; the value is
+  /// written back out as UTC ISO with `Z`.
   static DateTime? _later(DateTime? x, DateTime? y) {
     if (x == null) return y;
     if (y == null) return x;
