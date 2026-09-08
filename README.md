@@ -20,6 +20,15 @@ FRELOCATOR は、個人の自由時間を具体的な計画に落とし込み、
 
 データ保存は端末内のみです（Android / Web は `shared_preferences`、macOS は `~/Library/Application Support/FRELOCATOR/data.json`）。macOS の JSON は `tools/hub`（Claude Code 向け MCP サーバー）と共有され、PC 上では Claude からタスクや計画を編集できます。端末間の同期（LAN / QR）は `docs/superpowers/specs/2026-09-08-frelocator-hub-sync-design.md` に沿って実装中です。Cloud sync、通知配信、アカウント機能、外部カレンダー連携はまだ実装していません。
 
+### PC と同期
+
+Android 版の設定画面から「PC と同期」を有効にすると、Claude Code で `tools/hub`（frelocator-hub）を起動している PC（macOS）と、第三者サーバーを経由せずにデータを連携できます。
+
+- LAN 同期: PC とスマホが同じ Wi-Fi 上にあれば、ペアリング後は「同期」操作 1 回で双方の変更を HLC ベースでマージします。通信は自己署名 TLS で、証明書フィンガープリントをペアリング時にピン留めします。
+- QR: ネットワークが分かれている場合、PC 側のローカルページ（`http://127.0.0.1:47821/.../qr`）が表示する QR コマをスマホのカメラで読み取り、PC のデータを取り込めます。
+- ファイル書き出し: スマホの「PC へ書き出す」で v2 JSON を共有シート経由でエクスポートし、PC 側は `import_file` ツール（または macOS 版アプリの「ファイルから取り込む」）で取り込みます。
+- macOS の MCP 案内: `tools/hub` を Claude Code の MCP サーバーとして起動すると、`sync_status` ツールでペアリング用 QR ページや接続状況を確認できます。詳しくは [tools/hub/README.md](tools/hub/README.md) を参照してください。
+
 ## 現在の状況
 
 コアとなる計画フローは実装済みで、現在は次の 3 プラットフォーム向けにリリース確認を進めています。

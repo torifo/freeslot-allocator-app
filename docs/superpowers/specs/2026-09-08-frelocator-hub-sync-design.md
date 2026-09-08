@@ -85,7 +85,7 @@
 ## LAN 同期プロトコル
 
 - 通信は HTTPS。ハブは初回起動時に自己署名証明書（10 年）を生成し `hub.json` に保持する。証明書の SHA-256 フィンガープリントをペアリング QR に載せ、スマホは以後そのフィンガープリントだけを信頼する（ピン留め）。cleartext 許可は行わない。
-- ペアリング: MCP ツール `sync_status` がローカル専用ページ `http://127.0.0.1:47821/pair` を返す。ページは `frelocator://pair?host=<LAN IP>&port=47820&fp=<sha256>&code=<短命コード>` を QR 表示する。短命コードは 5 分・1 回限り。スマホが `POST /pair` に code と自分の deviceId を送ると、ハブが端末別の長期トークンを返す。トークンは `hub.json` に端末ごとに保存し、`rotate_token` ツールで失効・再発行できる。スマホ側は端末トークンとフィンガープリントを `shared_preferences`（アプリのサンドボックス内、端末内のみ）に平文で保存する。OS のキーチェーンは使わない: 盗まれても影響は同じ LAN 上のハブに限られ、そのハブは `rotate_token` / `forget_device` でいつでも失効できるため、追加依存に見合わない。
+- ペアリング: MCP ツール `sync_status` がローカル専用ページ `http://127.0.0.1:47821/pair` を返す。ページは `frelocator://pair?host=<LAN IP>&port=47820&fp=<sha256>&code=<短命コード>` を QR 表示する。短命コードは 5 分・1 回限り。スマホが `POST /pair` に code と自分の deviceId を送ると、ハブが端末別の長期トークンを返す。トークンは `hub.json` に端末ごとに保存し、`rotate_token` ツールで失効・再発行できる。スマホ側は端末トークンとフィンガープリントを `shared_preferences`（アプリのサンドボックス内、端末内のみ）に平文で保存する。OS のキーチェーンは使わない: 盗まれても影響は同じ LAN 上のハブに限られ、そのハブは `rotate_token` / `forget_device` でいつでも失効できるため、追加依存に見合わない。アプリ側で「PC と同期」をペアリング解除すると、この端末トークンと保存済みフィンガープリントは `shared_preferences` から削除する。
 - エンドポイント（`/pair` 以外は `Authorization: Bearer <端末トークン>` 必須）
   - `POST /pair` → `{ token, hubDeviceId, fingerprint }`
   - `GET /sync` → `{ document, hubDeviceId }`（`document` は PC 側の全データ v2 JSON、`purgedBefore` 付き）

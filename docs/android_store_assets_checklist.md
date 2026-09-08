@@ -22,6 +22,13 @@ Android の Play Console 提出用素材を、macOS から揃えるためのチ�
 - Privacy policy URL
 - Support URL
 
+### データセーフティ / 権限
+
+- データセーフティの質問票: 「収集なし」を維持する。デバイス間の転送のみで、いずれの第三者サーバーにも送信しない。転送は暗号化（TLS）する。
+- 権限の理由文
+  - `INTERNET`: 同じ Wi-Fi 上の自分の PC（`tools/hub`）と LAN 同期するために使用する。外部サーバーとの通信には使わない。
+  - `CAMERA`: PC とのペアリング用 QR コードと、PC から送られるデータ QR コードを読み取るためだけに使用する。画像は保存・送信しない。
+
 ### Optional
 
 - Preview video
