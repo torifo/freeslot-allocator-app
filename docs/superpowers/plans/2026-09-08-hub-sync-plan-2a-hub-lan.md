@@ -23,6 +23,12 @@
 - **413 応答は接続を閉じる**（`Connection: close`）。ハブは本文を読み切らずに応答するため keep-alive を維持できない。クライアントは 413 を受けたら**接続を張り直す**こと。
 - **`/health` は HEAD にも応答する**（疎通確認だけならボディ無しで済む）。
 
+**Plan 2b への申し送り（バッチ 3 レビュー）:**
+- **`/pair` ページは TTL の間、同じコードを返す**。再読み込みや 2 枚目のタブで画面の QR が無効になることはない。コードが期限切れ・ロックされたときだけ新しいコードが出る。
+- **`import_file` はペアリングコードを消費しない**。ファイル取り込みの最中でも、画面に出ているペアリング QR はそのまま使える。
+- **ローカルページの URL には秘密のパス接頭辞が入る**（`http://127.0.0.1:<port>/<16 バイト hex>/pair`）。ハブ起動ごとに変わるので、URL は毎回 `sync_status` から取り直すこと。接頭辞の無いリクエストは 404、`Host` が loopback でないもの・`Origin` 付き・cross-site の `Sec-Fetch-Site` は 403、`GET` / `HEAD` 以外は 405。
+- **`rotate_token` はトークンを返さない**。スマホは新しいペアリング QR を読み直して再ペアリングする。
+
 ---
 
 ## ファイル構成（`tools/hub/`）
@@ -39,7 +45,7 @@
 - Modify `package.json` — 依存追加。
 - Tests: `test/config.test.ts`、`test/tls.test.ts`、`test/sync-engine.test.ts`、`test/lan-server.test.ts`、`test/qr-codec.test.ts`、`test/local-pages.test.ts`、`test/tools.plan2.test.ts`。
 
-共通の約束: 全 HTTP 応答は JSON（`Content-Type: application/json`）。エラーは `{ error: { code, message } }`。ポートは環境変数 `FRELOCATOR_LAN_PORT`（既定 47820）と `FRELOCATOR_LOCAL_PORT`（既定 47821）。
+共通の約束: 全 HTTP 応答は JSON（`Content-Type: application/json`）。エラーは `{ error: { code, message } }`。ポートは環境変数 `FRELOCATOR_LAN_PORT`（既定 47820）と `FRELOCATOR_LOCAL_PORT`（既定 47821）で、0〜65535 の整数でなければ警告して既定値に戻す。その他の環境変数: `FRELOCATOR_LAN=off`（LAN サーバーとローカルページを起動しない。ローカルの MCP ツールは動く）、`FRELOCATOR_MDNS=off`（mDNS 広告だけ止める）、`FRELOCATOR_IMPORT_DIRS`（`import_file` が読んでよいディレクトリの追加分、`:` 区切り。既定はデータディレクトリと `~/Downloads`）。
 
 ---
 
@@ -1442,14 +1448,15 @@ export class LocalPages {
 
   private async handle(path: string): Promise<{ status: number; type: string; body: string }> {
     if (path === '/pair') {
-      const code = await this.config.issuePairingCode();
-      const url = this.pairingUrl(code);
+      // 再読み込みや 2 枚目のタブが、画面に出ている QR を無効化してはいけない。
+      const p = this.config.pairingCode() ?? await this.config.issuePairingCode();
+      const url = this.pairingUrl(p.code);
       if (!url) return { status: 503, type: 'text/html; charset=utf-8', body: page('ペアリング', '<p>LAN の IP アドレスが見つかりません。Wi-Fi に接続してから再読み込みしてください。</p>') };
       const svg = await QRCode.toString(url, { type: 'svg', errorCorrectionLevel: 'M', margin: 1 });
       return { status: 200, type: 'text/html; charset=utf-8', body: page('FRELOCATOR とペアリング', `
         <p>スマホの FRELOCATOR で「設定 › PC と同期 › PC とペアリング」を開き、この QR を読み取ってください。5 分で無効になります。</p>
         <div class="qr">${svg}</div>
-        <p class="mono">コード: <b>${esc(code)}</b></p>
+        <p class="mono">コード: <b>${esc(p.code)}</b></p>
         <p class="mono small">URL: ${esc(url)}</p>
         <p class="small">証明書フィンガープリント（SHA-256）: <span class="mono">${esc(this.config.fingerprint)}</span></p>`) };
     }
@@ -1551,7 +1558,9 @@ describe('plan 2 tools', () => {
   it('forget_device, rotate_token and purge_tombstones delegate to config/engine', async () => {
     const token = await cfg.redeemPairingCode(await cfg.issuePairingCode(), 'android-1', 'Pixel');
     const rotated = await tools.rotateToken({ deviceId: 'android-1' });
-    expect(rotated.token).not.toBe(token);
+    expect(rotated).toMatchObject({ deviceId: 'android-1', rotated: true });
+    expect(cfg.device('android-1')!.token).not.toBe(token);
+    expect(JSON.stringify(rotated)).not.toContain(cfg.device('android-1')!.token);
     expect((await tools.purgeTombstones()).purged).toBe(0);
     expect((await tools.forgetDevice({ deviceId: 'android-1' })).forgotten).toBe(true);
     await expect(tools.forgetDevice({ deviceId: 'android-1' })).rejects.toThrow(/unknown device/);
@@ -1618,11 +1627,12 @@ export class HubTools {
 
   async purgeTombstones() { return this.requireDeps().engine.purge(); }
 
-  // 注意: 未登録端末の `import_file` は `issuePairingCode()` を呼ぶため、
-  // 発行済みで未使用のペアリングコードがあれば上書きされて無効になる。
-  // ペアリング操作中のファイル取り込みは避けるか、取り込み後にコードを再発行する。
+  // 注意: 未登録端末の登録は `config.registerDevice()` で行い、ペアリング状態
+  // には一切触れない（画面に出ているコードを消費しない）。登録はマージが成功
+  // した後だけ行うので、拒否された取り込みは端末レコードを残さない。
   async forgetDevice(input: z.infer<typeof schemas.forgetDevice>) { await this.requireDeps().config.forgetDevice(input.deviceId).catch((e) => { throw new ToolError(String((e as Error).message)); }); return { deviceId: input.deviceId, forgotten: true }; }
-  async rotateToken(input: z.infer<typeof schemas.rotateToken>) { const token = await this.requireDeps().config.rotateToken(input.deviceId).catch((e) => { throw new ToolError(String((e as Error).message)); }); return { deviceId: input.deviceId, token, note: 'the phone must pair again with the new token (or scan a new pairing QR)' }; }
+  // 新しいトークンは返さない（MCP の応答はログやチャットに残る）。
+  async rotateToken(input: z.infer<typeof schemas.rotateToken>) { await this.requireDeps().config.rotateToken(input.deviceId).catch((e) => { throw new ToolError(String((e as Error).message)); }); return { deviceId: input.deviceId, rotated: true as const, note: 'the old token is invalid; the phone must pair again by scanning a new pairing QR' }; }
 
   async syncStatus() {
     const base = { dataFile: this.store.filePath, modifiedAt: (await this.store.modifiedAt())?.toISOString() ?? null, warning: this.store.lastWarning };
@@ -1633,7 +1643,7 @@ export class HubTools {
 }
 ```
 
-`rotateToken` の設計上の注意: 旧トークンは即失効するので、スマホ側は再ペアリングが必要。戻り値の `note` に明記する（MCP の説明文にも書く）。
+`rotateToken` の設計上の注意: 旧トークンは即失効するので、スマホ側は再ペアリングが必要。戻り値の `note` に明記する（MCP の説明文にも書く）。新しいトークンは戻り値に含めない。
 
 `src/index.ts` を次に置き換える（登録部分は既存の `register` 呼び出しを維持し、Plan 2 の 4 ツールを実装に差し替える）:
 
@@ -1704,7 +1714,9 @@ process.stdin.on('close', () => void shutdown());
 await server.connect(new StdioServerTransport());
 ```
 
-`scripts/smoke.mjs` に `FRELOCATOR_LAN=off` を設定して起動し（CI でポートを開かない）、`sync_status` の `lan` が `null` で `lanError` が `null` であることを確認する。さらに `FRELOCATOR_LAN` 未設定・`FRELOCATOR_LAN_PORT=0`・`FRELOCATOR_LOCAL_PORT=0` で 2 回目の起動をし、`sync_status.lan.url` が `https://` で始まり `pairingPage` が `http://127.0.0.1:` で始まることを確認する。
+`sync_status.lan` は常にオブジェクトで返す。`FRELOCATOR_LAN=off` のときは `listening: false` / `disabled: true` で `url` `port` `pairingPage` `qrPage` は `null`、`lanError` は `'LAN disabled by FRELOCATOR_LAN=off'`（失敗ではなく設定である目印）。`lan` が `null` になるのは `hub.json` の読み込みに失敗して `configError` が立つときだけ。
+
+`scripts/smoke.mjs` に `FRELOCATOR_LAN=off` を設定して起動し（CI でポートを開かない）、`sync_status.lan.disabled` が `true` で `lanError` が上記の文言であることを確認する。さらに `FRELOCATOR_LAN` 未設定・`FRELOCATOR_LAN_PORT=0`・`FRELOCATOR_LOCAL_PORT=0` で 2 回目の起動をし、`sync_status.lan.url` が `https://` で始まること、`pairingPage` を取得して `<svg` が返ること、`qrPage` の `frames.json` の `total` が 1 以上であること、`Host: evil.com` を付けたリクエストが 403 になることを確認する。
 
 - [ ] **Step 4: テスト・ビルド・smoke**
 
@@ -1717,6 +1729,19 @@ Expected: 全 PASS。smoke の 2 回目で LAN URL が出る。
 git add tools/hub/src/tools.ts tools/hub/src/index.ts tools/hub/test/tools.plan2.test.ts tools/hub/scripts/smoke.mjs
 git commit -m "feat(hub): implement import_file, purge, device tools and LAN-aware sync_status; start LAN and local pages / Plan 2 ツールと起動配線"
 ```
+
+#### レビュー反映（バッチ 3）
+
+上の Task 5 / Task 6 のコードブロックは最終形。指摘と対応は以下（コミット `fix(hub): guard loopback pages, confine import_file and stop leaking tokens`）。
+
+- **C1**: ローカルページに Host / Origin / メソッド検証が無く、DNS リバインディングでブラウザから `/qr/frames.json`（タスク DB 全体）と `/pair`（コード・フィンガープリント・LAN IP）が読めた。`GET` / `HEAD` 以外は 405、`Host` が `127.0.0.1:<port>` / `localhost:<port>` 以外は 403、`Origin` 付きは 403、`Sec-Fetch-Site` が `none` / `same-origin` 以外は 403。エラー本文は JSON エンベロープ。
+- **I1**: 同じマシンの他プロセス・他ユーザーからも読めた。`start()` で 16 バイト hex の秘密を作り、全ルートを `/<secret>/…` の下に置く。それ以外は 404。URL は `sync_status` の `pairingPage` / `qrPage` でしか手に入らない。`/qr` のインラインスクリプトは相対 fetch（`./qr/frames.json`）にして接頭辞に追随させる。
+- **I2**: `rotate_token` の応答から `token` を削除（`{ deviceId, rotated: true, note }`）。MCP の応答はログやチャットに残る。
+- **I3**: `LocalPages.stop()` / `LanServer.stop()` が keep-alive ソケットで止まっていた。`close()` を開始してから `closeIdleConnections()` / `closeAllConnections()` を呼び、close の完了を待つ。
+- **I4/I5**: `import_file` に (a) `stat()` による 20 MB 上限（`src/limits.ts` の `MAX_BODY` を LAN サーバーと共有）、(b) パス制限（データディレクトリ・`~/Downloads`・`FRELOCATOR_IMPORT_DIRS` 配下のみ。先頭 `~` は展開、外は `path not allowed: <解決後>`）を追加。エラー文言はファイルの中身を反射しない（`not valid JSON` / `cannot read file` の固定文言）。許可リストは `HubTools` の `importDirs` オプションで差し替え可能。
+- **I6**: `import_file` の端末登録が検証前かつ issue＋redeem で行われ、画面のコードを消費していた。ペアリング状態に触れない `HubConfig.registerDevice()` を追加し、`engine.sync` の成功後にだけ登録する。
+- **軽微**: `FRELOCATOR_LAN=off` を `lanError` と `lan.disabled` で明示、ポート環境変数の整数検証、終了時に MCP サーバーを `close()` して自然終了（3 秒の `process.exit` バックストップ）、`/qr` フレームの内容ハッシュキャッシュ、`/qr` スクリプトの `r.ok` チェックと再読み込みボタン、`issuePairingCode()` がレコード（`code` + `expiresAt`）を返す。
+- **テスト追加**: `/qr/frames.json` の 413 `too_many_frames`（`maxFrames` 注入）、`taskMaster.settings` 欠落文書の `import_file` 拒否、`pairingState()` の `expired` / `locked` 分岐。
 
 ---
 
