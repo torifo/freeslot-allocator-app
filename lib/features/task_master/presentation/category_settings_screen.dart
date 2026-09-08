@@ -56,18 +56,21 @@ class CategorySettingsScreen extends ConsumerWidget {
                 title: '共通カテゴリ',
                 kind: TaskKind.mustDo,
                 categories: data.mustDoCategories,
+                tasks: data.tasks,
               )
             else ...[
               _CategorySection(
                 title: 'やるべきことカテゴリ',
                 kind: TaskKind.mustDo,
                 categories: data.mustDoCategories,
+                tasks: data.tasks,
               ),
               const SizedBox(height: 16),
               _CategorySection(
                 title: 'やりたいことカテゴリ',
                 kind: TaskKind.wantToDo,
                 categories: data.wantToDoCategories,
+                tasks: data.tasks,
               ),
             ],
             const SizedBox(height: 16),
@@ -75,7 +78,9 @@ class CategorySettingsScreen extends ConsumerWidget {
               child: ListTile(
                 leading: const Icon(Icons.devices),
                 title: const Text('PC と同期'),
-                subtitle: const Text('同じ Wi-Fi の PC・QR・ファイルでデータをやり取りします'),
+                // 「…ファイルでデータを…」 broke between デ and ー at large text
+                // scales; the shorter line has no such seam (M-8).
+                subtitle: const Text('同じ Wi-Fi の PC・QR・ファイル経由でやり取りします'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => context.push('/sync'),
               ),
@@ -96,11 +101,15 @@ class _CategorySection extends ConsumerWidget {
     required this.title,
     required this.kind,
     required this.categories,
+    required this.tasks,
   });
 
   final String title;
   final TaskKind kind;
   final List<TaskCategory> categories;
+
+  /// Every task, so a delete can say how many of them lose their category.
+  final List<TaskMaster> tasks;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -116,15 +125,17 @@ class _CategorySection extends ConsumerWidget {
                   child: Text(
                     title,
                     style: Theme.of(context).textTheme.titleMedium,
-                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                Flexible(
-                  child: FilledButton.tonalIcon(
-                    onPressed: () => _openCategoryDialog(context, ref),
-                    icon: const Icon(Icons.add),
-                    label: const Text('追加', overflow: TextOverflow.ellipsis),
-                  ),
+                const SizedBox(width: 12),
+                // Not `Flexible`: sharing the row evenly let the button claim
+                // half the width and squeezed 「やるべきことカテゴリ」 into an
+                // ellipsis at large text scales. The button takes what it
+                // needs, the title keeps the rest (I-5).
+                FilledButton.tonalIcon(
+                  onPressed: () => _openCategoryDialog(context, ref),
+                  icon: const Icon(Icons.add),
+                  label: const Text('追加'),
                 ),
               ],
             ),
@@ -144,9 +155,18 @@ class _CategorySection extends ConsumerWidget {
                     ),
                     IconButton(
                       onPressed: () async {
+                        final messenger = ScaffoldMessenger.of(context);
+                        // Deleting a category quietly un-files whatever used
+                        // it; say how much before asking (I-4).
+                        final usedBy = tasks
+                            .where((task) => task.categoryId == category.id)
+                            .length;
                         final confirmed = await confirmDelete(
                           context,
                           name: category.name,
+                          description: usedBy > 0
+                              ? 'このカテゴリを使っている $usedBy 件のタスクは未分類になります。'
+                              : null,
                         );
                         if (!confirmed) {
                           return;
@@ -157,6 +177,11 @@ class _CategorySection extends ConsumerWidget {
                               kind: kind,
                               categoryId: category.id,
                             );
+                        messenger.showSnackBar(
+                          SnackBar(
+                            content: Text('「${category.name}」を削除しました'),
+                          ),
+                        );
                       },
                       tooltip: 'カテゴリを削除',
                       icon: const Icon(Icons.delete_outline),
@@ -178,12 +203,22 @@ class _CategorySection extends ConsumerWidget {
   }) async {
     await showDialog<void>(
       context: context,
-      builder: (context) => _CategoryEditDialog(
+      builder: (dialogContext) => _CategoryEditDialog(
         kind: kind,
         category: category,
-        onSave: (saved) => ref
-            .read(taskMasterControllerProvider.notifier)
-            .upsertCategory(kind: kind, category: saved),
+        onSave: (saved) async {
+          await ref
+              .read(taskMasterControllerProvider.notifier)
+              .upsertCategory(kind: kind, category: saved);
+          if (!context.mounted) {
+            return;
+          }
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(category == null ? 'カテゴリを追加しました' : 'カテゴリを保存しました'),
+            ),
+          );
+        },
       ),
     );
   }
@@ -269,7 +304,14 @@ class _CategoryEditDialogState extends State<_CategoryEditDialog> {
         autofocus: true,
         enabled: !_isSaving,
         onSubmitted: (_) => _isSaving ? null : _submit(),
-        decoration: InputDecoration(labelText: 'カテゴリ名', errorText: _errorText),
+        decoration: InputDecoration(
+          labelText: 'カテゴリ名',
+          errorText: _errorText,
+          // 「同じ名前のカテゴリがすでにあります」 needs two lines at a large
+          // text scale; on one it was cut off mid-word (I-6).
+          errorMaxLines: 2,
+          helperMaxLines: 2,
+        ),
       ),
       actions: [
         TextButton(
