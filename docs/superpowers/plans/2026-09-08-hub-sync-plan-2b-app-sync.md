@@ -1619,6 +1619,37 @@ Task 1-4 実装後のレビューで入れた修正。番号はレビュー指�
 
 ---
 
+## レビュー反映（Task 5-7）
+
+Task 5-7（QR コーデック・ファイル書き出し・画面）実装後のレビューで入れた修正。
+
+**batch 3（コーデックと書き出し）**
+
+- QR ペイロードの上限を明示し、フレーム本文長（`kMaxQrFrames * kQrChunkChars`）→ gzip ISIZE 事前判定 → 展開後の実長、の三段で有限に抑える。上限は `kMaxImportBytes` と揃えて 20 MB（gzip は連結できて ISIZE は最後のメンバーしか表さないため、ISIZE はヒント扱い）。
+- デスクトップの書き出しは `file_picker` の戻り値に関係なく必ず自分で書く（macOS は picker が書くが Linux / Windows は書かない）。
+- 共有シートの結果を「書き出しました／書き出しをやめました」で返す。アプリ自身は送信しない。
+- Web の stub は `FormatException` で「この環境では使えません」を返し、呼び出し側はそのメッセージをそのまま出す。
+
+**batch 4（画面）**
+
+- **C1** `sync_settings_screen.dart`：`syncInFlightProvider` の notifier を最初の `await` より前に取り、`finally` ではそれを使う。画面が消えたあとの `ref.read` は投げるので、これがないとフラグが上がったままになり `app.dart` の復帰時リロードが永久に止まる。あわせて `SyncInFlight` をカウンタ（`begin()` / `end()`）にして、同時に走る 2 つの持ち主が互いのフラグを消せないようにした。実行中のシートは `PopScope` で戻れない。
+- **C2** `qr_receive_screen.dart`：`ProviderScope.containerOf` を `await` の前に捕まえ、マウント状態に関係なくそのコンテナ経由で `invalidate` する。
+- **I1** QR 画面もマージの前後で in-flight カウンタを上下させ、`onCancel` は `_progress.cancel`（画面を pop しない）。
+- **I2** スキャナの seam に検出速度のつまみを足し、QR 受信は `DetectionSpeed.unrestricted`（既定の 250 ms スロットルがハブの 200–1000 ms アニメーションと干渉してコマを落とす）。明示コントローラを渡すと `MobileScanner` はライフサイクル管理を降りるので、生成・破棄と `AppLifecycleState` の停止／再開を seam 側で持つ。ペアリング画面は既定速度のまま。
+- **I3** seam に `errorBuilder` を追加。権限拒否は「カメラの使用が許可されていません」＋ ファイルから取り込む / LAN 同期への誘導、それ以外は `syncErrorMessage('camera')`。`permission_handler` は依存に無いため「設定を開く」ボタンは置かず、端末の設定アプリで許可する旨を文章で書いた。
+- **I4** `pairing_scan_screen.dart`：`_pair` に catch-all を足し、`_fail(syncErrorMessage('unknown'))` と `_busy` の解除を必ず通す。`_onCodes` は先頭 1 件だけを `await` する。
+- **I5** `_progress.start(kind)` をシートを開く前に呼ぶ（`_runWithPanel` が `SyncKind` を取る）。待機中のまま開いた閉じるは、実行を中止せず放置する意味になっていた。
+- **I6** シートの pop はシート自身の `BuildContext` で、`ModalRoute.of(ctx)?.isCurrent` を見てから。
+- **I7** `restoreBackup` と `unpair` は `core/confirm_dialog.dart` の `confirmAction` で確認する。unpair でバックアップを消さないのは、控えは接続情報ではなくこの端末自身の同期前の状態で、失敗した同期の直後こそ必要になるから。
+- **I8** `sync_progress_panel.dart`：未受信リストは先頭 12 コマ＋「他 N コマ」、コマの升目は `MediaQuery.textScalerOf` に追従、`Semantics` ラベルを追加、本文はスクロール可能（QR 画面では `ListView` 側がスクロールするので `scrollable: false`）。
+- 軽微：QR 画面は `_askRestart` 前に `mounted` を確認し、`_note` は `setState` 内で更新して次に読めたコマで消す。`_apply` が失敗したら `_done` を戻して読み直せるようにし、`SyncOutcome` は sealed のまま `switch` する。設定画面は `_editHost` でホスト非空とポート 1..65535 を検証し、`_runWithPanel` は拾えなかった例外を `_progress.fail('unknown', …)` に落とす。
+
+Task 7 補足：ファイル選択から取り込んだときのエラーは、そのファイル自身の `FormatException` の文言をそのまま見せる（`syncErrorMessage` を通すのは `SyncService` が返した outcome だけ）。ユーザーが自分で選んだファイルなので、「PC から受け取ったデータを読めませんでした」では何が悪いか分からない。
+
+Task 8 実施記録：ビルドは AAB 版 4 / macOS / web いずれも成功。macOS プロジェクトは deployment target 12.0 ＋ SwiftPM に移行済み（commit 22b9a4d）。iOS は今回の Play リリースの対象外。
+
+---
+
 ## 自己レビュー
 
 - 設計書カバレッジ: ペアリング（Task 1, 3, 7）、ピン留め TLS（Task 3）、同期 1 回で双方向（Task 4）、置き換えフロー（Task 4, 7）、mDNS フォールバック（Task 4）、エミュレーター用 host 手入力（Task 7）、QR 受信とコマグリッド（Task 5, 7）、ファイル書き出し／macOS 取り込み（Task 6, 7）、進捗の段階・経過秒・10 秒超の補足・キャンセルの意味（Task 2, 7）、再読み込みの遅延（Task 7）、プライバシーポリシー書き換え・CAMERA / INTERNET・データセーフティ（Task 1, 8）、macOS の MCP 案内（Task 7）。
