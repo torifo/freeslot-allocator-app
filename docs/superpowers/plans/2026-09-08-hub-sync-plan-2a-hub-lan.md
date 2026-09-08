@@ -16,6 +16,13 @@
 - **Dart 側のマージも `purgedBefore` を「瞬間の最大値」で扱う**こと（ハブの `merge.ts` と同じ規則）。文字列の辞書順比較にすると `+09:00` 付きの値が `Z` の値より新しく見えて `purgedBefore` を巻き戻し、墓標が復活する。採用した値は UTC ISO へ正規化して保存する。
 - **`taskMaster.settings` はワイヤ上必須**。ハブのスキーマは `settings`（`shareCategories: boolean` を含む）が無い文書を `400 invalid_document` で拒否する。`take_phone` は受信文書をそのまま保存するため、欠落した文書を通すと以降のマージが全て壊れる。
 
+**Plan 2b への申し送り（バッチ 2 レビュー）:**
+- **QR フレームは「最初の 5 個の `:` だけが区切り」**。base45 の英数字集合に `:` が含まれるため chunk 自体に `:` が現れる。Dart 側は `parts.length < 6` で弾き、`final chunk = parts.sublist(5).join(':')` で復元すること（`parts.length != 6` や `parts[5]` は誤り）。
+- **フレームの妥当性検証**: `index` / `total` は十進数字のみ（`' 1'` や `'0x1'` を `int.tryParse` 相当で通さない）、`1 <= n <= 512`、`0 <= i < n`。さらに **2 枚目以降でハッシュまたは `total` が最初のフレームと異なるものは `differentPayload` として捨てる**（総数が食い違うと集合が永久に未完成になる）。
+- **`/pair` のボディ上限は 8 KB**（`/sync` は 20 MB）。フィールド長は `code` ≤ 64 文字、`deviceId` / `name` / `deviceName` ≤ 128 文字。超過は `400 bad_request`、ボディ超過は `413 payload_too_large`。
+- **413 応答は接続を閉じる**（`Connection: close`）。ハブは本文を読み切らずに応答するため keep-alive を維持できない。クライアントは 413 を受けたら**接続を張り直す**こと。
+- **`/health` は HEAD にも応答する**（疎通確認だけならボディ無しで済む）。
+
 ---
 
 ## ファイル構成（`tools/hub/`）
@@ -845,7 +852,7 @@ git commit -m "feat(hub): sync engine with purgedBefore guard and tombstone purg
 
 **Files:**
 - Create: `src/lan-server.ts`、`src/net.ts`
-- Modify: `package.json`（`bonjour-service: ^1.3.0`）
+- Modify: `package.json`（`bonjour-service: ^1.4.4`）
 - Modify: `src/config.ts`（`recordPairFailure()`、ペアリング失敗の拒否を `SyncRejected(403, ...)` 化）
 - Test: `test/lan-server.test.ts`、`test/config.test.ts`（追記）
 
@@ -936,7 +943,7 @@ describe('LanServer', () => {
 
 - [ ] **Step 2: 失敗を確認する**
 
-Run: `npm install bonjour-service@^1.3.0 && npm test -- lan-server`
+Run: `npm install bonjour-service@^1.4.4 && npm test -- lan-server`
 Expected: FAIL
 
 - [ ] **Step 3: 実装する**
@@ -992,11 +999,26 @@ export class LanServer {
   get address(): string | null { return this.options.host === '0.0.0.0' ? lanAddress() : this.options.host; }
 
   async start(): Promise<void> {
-    this.server = createServer({ cert: this.config.certPem, key: this.config.keyPem }, (req, res) => void this.handle(req, res).catch((e) => (e instanceof SyncRejected
-      ? send(res, e.status, { error: { code: e.code, message: e.message } })
-      : send(res, 500, { error: { code: 'internal', message: String(e) } }))));
-    await new Promise<void>((resolve, reject) => { this.server!.once('error', reject); this.server!.listen(this.options.port, this.options.host, () => resolve()); });
-    this.port = (this.server.address() as { port: number }).port;
+    // TLS は 1.2 以上、サーバ側の暗号スイート順を優先。
+    const server = createServer({ cert: this.config.certPem, key: this.config.keyPem, minVersion: 'TLSv1.2', honorCipherOrder: true },
+      (req, res) => void this.handle(req, res).catch((e) => fail(req, res, e)));
+    // リクエスト行が壊れている場合は handle まで届かないので、同じ JSON エンベロープで返す。
+    server.on('clientError', (error, socket) => {
+      logError('client error', error);
+      if (!socket.writable) return socket.destroy();
+      socket.end('HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{"error":{"code":"bad_request","message":"malformed request"}}');
+    });
+    this.server = server;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onError = (error: unknown) => reject(error);
+        server.once('error', onError);
+        // listen 成功後は一発限りのリジェクタを外す（外さないと後続の error で未処理拒否になる）。
+        server.listen(this.options.port, this.options.host, () => { server.removeListener('error', onError); resolve(); });
+      });
+    } catch (error) { this.server = null; throw error; } // 起動失敗時は stop() が閉じようとしないよう null に戻す
+    server.on('error', (error) => logError('server error', error)); // listen 後の EPIPE 等でハブを落とさない
+    this.port = (server.address() as { port: number }).port;
     if (this.options.advertise) this.mdns.start(this.port, this.hubDeviceId);
   }
 
@@ -1006,13 +1028,15 @@ export class LanServer {
     this.server = null;
   }
 
+  // CORS ヘッダは意図的に付けない。自己署名証明書がブラウザ経路（および DNS リバインディング）
+  // を塞いでおり、実クライアントはネイティブアプリのみ。`Access-Control-Allow-Origin` を足さないこと。
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'https://local');
     if (req.method === 'POST' && url.pathname === '/pair') return this.pair(req, res);
     const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
     const device = token ? this.config.deviceForToken(token) : undefined;
     if (!device) return send(res, 401, { error: { code: 'unauthorized', message: 'missing or invalid token' } });
-    if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true, serverTime: new Date().toISOString(), schema: 2 });
+    if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/health') return send(res, 200, { ok: true, serverTime: new Date().toISOString(), schema: 2 });
     if (req.method === 'GET' && url.pathname === '/sync') {
       const document = await this.engine['store'].read();
       return send(res, 200, { document, hubDeviceId: this.hubDeviceId });
@@ -1033,42 +1057,63 @@ export class LanServer {
   }
 
   private async pair(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const parsed = pairSchema.safeParse(await readJson(req));
+    // 未認証エンドポイントなので /sync の 20 MB ではなく 8 KB。
+    const parsed = pairSchema.safeParse(await readJson(req, MAX_PAIR_BODY));
     if (!parsed.success) return send(res, 400, { error: { code: 'bad_request', message: parsed.error.message } });
-    try {
-      const token = await this.config.redeemPairingCode(parsed.data.code, parsed.data.deviceId, parsed.data.name);
-      return send(res, 200, { token, hubDeviceId: this.hubDeviceId, fingerprint: this.config.fingerprint });
-    } catch (error) {
-      // 不正・期限切れ・試行回数超過は SyncRejected(403)。それ以外（hub.json の
-      // 書き込み失敗など）はクライアントの落ち度ではないので 500 で返す。
-      if (error instanceof SyncRejected) return send(res, error.status, { error: { code: error.code, message: error.message } });
-      return send(res, 500, { error: { code: 'internal', message: String((error as Error).message) } });
-    }
+    // 不正・期限切れ・試行回数超過は SyncRejected(403)。それ以外（hub.json の
+    // 書き込み失敗など）はクライアントの落ち度ではないので fail() が 500 に落とす。
+    const token = await this.config.redeemPairingCode(parsed.data.code, parsed.data.deviceId, parsed.data.name ?? parsed.data.deviceName ?? '');
+    return send(res, 200, { token, hubDeviceId: this.hubDeviceId, fingerprint: this.config.fingerprint });
   }
 }
 
-function send(res: ServerResponse, status: number, body: unknown): void {
+/** 診断は必ず stderr へ。stdout は MCP stdio プロトコルが使っている。 */
+function logError(context: string, error: unknown): void {
+  process.stderr.write(`[lan-server] ${context}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`);
+}
+
+function fail(req: IncomingMessage, res: ServerResponse, error: unknown): void {
+  if (res.headersSent) { res.end(); return; }
+  if (error instanceof SyncRejected) {
+    // 413 はボディを読み切る前に返すのでソケットに未読バイトが残る。
+    // keep-alive のままだと次のリクエストとズレるため必ず閉じる。
+    const close = error.status === 413;
+    send(res, error.status, { error: { code: error.code, message: error.message } }, close);
+    if (close) req.destroy();
+    return;
+  }
+  if (error instanceof SyntaxError) return send(res, 400, { error: { code: 'bad_request', message: 'body is not valid JSON' } });
+  logError('request failed', error); // パス・PID・スタックは stderr のみ
+  return send(res, 500, { error: { code: 'internal', message: 'internal error' } });
+}
+
+function send(res: ServerResponse, status: number, body: unknown, close = false): void {
   const text = JSON.stringify(body);
-  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) });
+  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text), ...(close ? { connection: 'close' } : {}) });
   res.end(text);
 }
 
-async function readJson(req: IncomingMessage): Promise<unknown> {
+async function readJson(req: IncomingMessage, max = MAX_BODY): Promise<unknown> {
+  const tooLarge = () => new SyncRejected(413, 'payload_too_large', `request body exceeds ${max} bytes`);
+  // 申告された content-length の時点で拒否する（1 バイトもバッファしない）。
+  const declared = Number(req.headers['content-length']);
+  if (Number.isFinite(declared) && declared > max) throw tooLarge();
   const chunks: Buffer[] = []; let size = 0;
-  // 上限超過は 413（NOTE の要求）。汎用 500 に落ちないよう SyncRejected で投げ、
-  // トップレベルの catch がエンベロープにマップする。
-  for await (const chunk of req) { size += (chunk as Buffer).length; if (size > MAX_BODY) throw new SyncRejected(413, 'payload_too_large', `request body exceeds ${MAX_BODY} bytes`); chunks.push(chunk as Buffer); }
+  // ストリーム側の上限も維持（chunked 送信には content-length が無い）。
+  for await (const chunk of req) { size += (chunk as Buffer).length; if (size > max) throw tooLarge(); chunks.push(chunk as Buffer); }
   const text = Buffer.concat(chunks).toString('utf8');
   return text ? JSON.parse(text) : {};
 }
 ```
+
+`MAX_BODY = 20 * 1024 * 1024`、`MAX_PAIR_BODY = 8 * 1024`。`pairSchema` は `code: z.string().min(1).max(64)`、`deviceId: z.string().min(1).max(128)`、`name` / `deviceName` は `z.string().max(128).optional()`。
 
 `SyncEngine` に `get store()` を公開して `this.engine['store']` のブラケットアクセスをやめる（`readonly store` を public にする）。
 
 - [ ] **Step 3b: `HubConfig` に `/pair` 失敗回数の上限を入れる（NOTE の要求）**
 
 `hub.json` の `pairing` に `failures: number` を持たせ、`HubConfig.recordPairFailure()` で加算する。
-`redeemPairingCode` はコード不一致のたびに `recordPairFailure()` を呼び、**10 回失敗した時点で `this.json.pairing = null`**（そのコードを無効化）して保存する。
+`redeemPairingCode` はコード不一致のたびに `recordPairFailure()` を呼び、**10 回失敗した時点で `pairing.code` を空文字にして無効化**する（`pairing` 自体は `{ expiresAt, failures }` を保ったまま残す）。`pairing` ごと `null` にすると以降の試行が `pairing_failed` に潰れて `too_many_attempts` と区別できなくなるため、レコードは残すこと。
 失敗系の拒否は plain `Error` ではなく `SyncRejected(403, 'pairing_failed' | 'pairing_code_expired' | 'too_many_attempts', …)` で投げ、`pair()` がそのままエンベロープにマップできるようにする。
 成功時は `pairing` ごと破棄されるのでカウンタも消える。
 
@@ -1209,6 +1254,8 @@ export function crc32(buf: Buffer | string): string {
 }
 
 export const CHUNK_CHARS = 600;
+/** フレーム総数の上限。`length: total` の確保をすべてこの値で縛る。 */
+export const MAX_FRAMES = 512;
 export interface EncodeOptions { chunkChars?: number; maxFrames?: number; }
 
 /** `FRL2:<sha16>:<i>:<n>:<crc>:<chunk>` — all characters in the QR alphanumeric set. */
@@ -1218,7 +1265,8 @@ export function encodeFrames(value: unknown, options: EncodeOptions = {}): strin
   const text = base45Encode(gzipSync(json, { level: 9 }));
   const hash = createHash('sha256').update(json).digest('hex').slice(0, 16).toUpperCase();
   const total = Math.max(1, Math.ceil(text.length / chunkChars));
-  if (options.maxFrames && total > options.maxFrames) throw new Error(`payload needs ${total} frames, more than ${options.maxFrames} frames; use LAN sync instead`);
+  const maxFrames = options.maxFrames ?? MAX_FRAMES;
+  if (total > maxFrames) throw new Error(`payload needs ${total} frames, more than ${maxFrames} frames; use LAN sync instead`);
   const frames: string[] = [];
   for (let i = 0; i < total; i += 1) {
     const chunk = text.slice(i * chunkChars, (i + 1) * chunkChars);
@@ -1239,12 +1287,20 @@ export class FrameSet {
   missing(): number[] { return Array.from({ length: this.total }, (_, i) => i).filter((i) => !this.chunks.has(i)); }
 
   add(frame: string): AddResult {
+    // base45 の英数字集合には ':' が含まれるので、chunk の中にも ':' が現れる。
+    // 区切りとして意味を持つのは最初の 5 個だけ。
     const parts = frame.split(':');
-    if (parts.length !== 6 || parts[0] !== 'FRL2') return 'malformed';
-    const [, hash, iStr, nStr, crc, chunk] = parts;
+    if (parts.length < 6 || parts[0] !== 'FRL2') return 'malformed';
+    const [, hash, iStr, nStr, crc] = parts;
+    const chunk = parts.slice(5).join(':');
+    // 十進数字のみ。`Number(' 1')` や `Number('0x1')` を通さない。
+    if (!/^\d+$/.test(iStr) || !/^\d+$/.test(nStr)) return 'malformed';
     const i = Number(iStr); const n = Number(nStr);
-    if (!Number.isInteger(i) || !Number.isInteger(n) || i < 0 || i >= n) return 'malformed';
-    if (this.hash && this.hash !== hash) return 'different_payload';
+    // `length: total` の確保より前に n を縛る（MAX_FRAMES = 512）。
+    if (n < 1 || n > MAX_FRAMES || i >= n) return 'malformed';
+    // 別ペイロード、または総数が最初のフレームと食い違うものは混ぜない
+    // （総数が違うと集合が永久に未完成になる）。
+    if (this.hash !== null && (this.hash !== hash || n !== this.total)) return 'different_payload';
     if (crc32(chunk) !== crc) return 'crc_mismatch';
     if (!this.hash) { this.hash = hash; this.total = n; }
     if (this.chunks.has(i)) return 'duplicate';
@@ -1258,7 +1314,7 @@ export class FrameSet {
 export function decodeFrames(set: FrameSet): unknown {
   if (!set.isComplete) throw new Error(`incomplete: missing frames ${set.missing().join(',')}`);
   const text = Array.from({ length: set.total }, (_, i) => set['chunks'].get(i)!).join('');
-  const json = gunzipSync(base45Decode(text));
+  const json = gunzipSync(base45Decode(text), { maxOutputLength: 64 * 1024 * 1024 });
   const hash = createHash('sha256').update(json).digest('hex').slice(0, 16).toUpperCase();
   if (hash !== set.hash) throw new Error('payload hash mismatch after reassembly');
   return JSON.parse(json.toString('utf8'));

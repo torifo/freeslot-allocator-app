@@ -8,7 +8,9 @@
 
 **Tech Stack:** Flutter 3 / Dart 3、`http`（`IOClient` + `HttpClient.badCertificateCallback` でピン留め）、`mobile_scanner`、`archive`（gzip）、`share_plus`、`file_picker`、`multicast_dns`、`crypto`、`shared_preferences`。
 
-**設計書:** `docs/superpowers/specs/2026-09-08-frelocator-hub-sync-design.md`。ハブ側の HTTP 形式は Plan 2a に従う: `POST /pair {code, deviceId, name} → {token, hubDeviceId, fingerprint}`、`GET/POST /sync?mode=merge|take_hub|take_phone → {document, summary, warnings}`、`GET /health → {ok, serverTime, schema}`、エラー `{error:{code,message}}`（401 unauthorized、403 pairing_failed、409 purged_before、426 upgrade_required）。
+**設計書:** `docs/superpowers/specs/2026-09-08-frelocator-hub-sync-design.md`。ハブ側の HTTP 形式は Plan 2a に従う: `POST /pair {code, deviceId, name} → {token, hubDeviceId, fingerprint}`、`GET/POST /sync?mode=merge|take_hub|take_phone → {document, summary, warnings}`、`GET /health → {ok, serverTime, schema}`（`HEAD /health` も可）、エラー `{error:{code,message}}`（401 unauthorized、403 pairing_failed、409 purged_before、413 payload_too_large、426 upgrade_required）。
+
+`POST /pair` のボディ上限は **8 KB**（`/sync` は 20 MB）で、フィールド長は `code` ≤ 64 文字、`deviceId` / `name` ≤ 128 文字。超過は `400 bad_request`、ボディ超過は `413 payload_too_large`。**413 応答はハブがボディを読み切らずに返すため `Connection: close` が付き、その接続は再利用できない**。クライアントは 413 を受けたら接続を張り直す（`IOClient` を使い回している場合は同一ソケットへの続けざまの送信を避ける）。
 
 ---
 
@@ -866,7 +868,18 @@ void main() {
     final bad = '${frames[1].substring(0, frames[1].length - 1)}${frames[1].endsWith('A') ? 'B' : 'A'}';
     expect(set.add(bad), QrAddResult.crcMismatch);
     expect(set.add('FRL2:0000000000000000:0:1:00000000:AB'), QrAddResult.differentPayload);
+    // 総数が最初のフレームと食い違うものも differentPayload（混ぜると永久に未完成になる）。
+    expect(set.add('FRL2:${set.hash}:1:${frames.length + 1}:00000000:AB'), QrAddResult.differentPayload);
     expect(set.add('garbage'), QrAddResult.malformed);
+    // 十進数字以外の添字・総数、および 512 を超える総数は malformed。
+    expect(set.add('FRL2:${set.hash}: 1:3:00000000:AB'), QrAddResult.malformed);
+    expect(set.add('FRL2:${set.hash}:0:2000000000:00000000:AB'), QrAddResult.malformed);
+    // chunk に ':' を含むフレームも往復できること（base45 の英数字集合に ':' が入る）。
+    const colonChunk = 'A:B';
+    final colonFrame = 'FRL2:0123456789ABCDEF:0:1:${crc32Hex(utf8.encode(colonChunk))}:$colonChunk';
+    final colonSet = QrFrameSet();
+    expect(colonSet.add(colonFrame), QrAddResult.added);
+    expect(colonSet.chunkAt(0), colonChunk);
   });
 }
 ```
@@ -922,6 +935,9 @@ String crc32Hex(List<int> bytes) => getCrc32(bytes).toRadixString(16).toUpperCas
 
 enum QrAddResult { added, duplicate, crcMismatch, differentPayload, malformed }
 
+/// フレーム総数の上限（ハブ側 `MAX_FRAMES` と一致させること）。
+const int kMaxQrFrames = 512;
+
 /// Collects `FRL2:<sha16>:<i>:<n>:<crc>:<chunk>` frames in any order.
 class QrFrameSet {
   String? hash; int total = 0;
@@ -932,15 +948,23 @@ class QrFrameSet {
   String? chunkAt(int i) => _chunks[i];
 
   QrAddResult add(String frame) {
+    // base45 の英数字集合に ':' が含まれるため chunk にも ':' が現れる。
+    // 区切りとして意味を持つのは最初の 5 個だけ（`parts.length != 6` / `parts[5]` は誤り）。
     final parts = frame.split(':');
-    if (parts.length != 6 || parts[0] != 'FRL2') return QrAddResult.malformed;
-    final i = int.tryParse(parts[2]); final n = int.tryParse(parts[3]);
-    if (i == null || n == null || i < 0 || i >= n) return QrAddResult.malformed;
-    if (hash != null && hash != parts[1]) return QrAddResult.differentPayload;
-    if (crc32Hex(utf8.encode(parts[5])) != parts[4]) return QrAddResult.crcMismatch;
+    if (parts.length < 6 || parts[0] != 'FRL2') return QrAddResult.malformed;
+    final chunk = parts.sublist(5).join(':');
+    // 十進数字のみ。`int.tryParse(' 1')` や `'0x1'` を通さない。
+    if (!RegExp(r'^\d+$').hasMatch(parts[2]) || !RegExp(r'^\d+$').hasMatch(parts[3])) return QrAddResult.malformed;
+    final i = int.parse(parts[2]); final n = int.parse(parts[3]);
+    // n を先に縛る（TS 側の MAX_FRAMES と同じ 512）。縛らないと missing の生成で暴走する。
+    if (n < 1 || n > kMaxQrFrames || i >= n) return QrAddResult.malformed;
+    // 別ペイロード、または総数が最初のフレームと食い違うものは混ぜない
+    // （総数が違うと集合が永久に未完成になる）。
+    if (hash != null && (hash != parts[1] || n != total)) return QrAddResult.differentPayload;
+    if (crc32Hex(utf8.encode(chunk)) != parts[4]) return QrAddResult.crcMismatch;
     hash ??= parts[1]; if (total == 0) total = n;
     if (_chunks.containsKey(i)) return QrAddResult.duplicate;
-    _chunks[i] = parts[5];
+    _chunks[i] = chunk;
     return QrAddResult.added;
   }
 
