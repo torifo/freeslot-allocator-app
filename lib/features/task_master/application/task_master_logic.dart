@@ -1,4 +1,5 @@
 import '../../../core/hlc.dart';
+import '../../../core/tombstone.dart';
 import '../domain/task_models.dart';
 
 class TaskMasterValidationException implements Exception {
@@ -46,10 +47,17 @@ void validateCategoryNameUniqueness({
   }
 }
 
+/// Collapses both category lists into one shared list.
+///
+/// Every category dropped from a list is tombstoned in that list's graveyard,
+/// every category newly joining a list is stamped so peers see the change, and
+/// only tasks whose `categoryId` actually moved are touched.
 TaskMasterStateData enableSharedCategories(
   TaskMasterStateData state,
-  CategoryMergeStrategy strategy,
-) {
+  CategoryMergeStrategy strategy, {
+  required Hlc clock,
+  required DateTime now,
+}) {
   final mergedCategories = mergeCategories(
     mustDoCategories: state.mustDoCategories,
     wantToDoCategories: state.wantToDoCategories,
@@ -68,23 +76,97 @@ TaskMasterStateData enableSharedCategories(
     final previousCategory = previousCategories
         .where((category) => category.id == task.categoryId)
         .firstOrNull;
-    if (previousCategory == null) {
-      return task.copyWith(clearCategory: true);
-    }
-
-    final matchedCategory = mergedCategories
-        .where((category) => category.name == previousCategory.name)
-        .firstOrNull;
-    return matchedCategory == null
+    final matchedCategory = previousCategory == null
+        ? null
+        : mergedCategories
+              .where((category) => category.name == previousCategory.name)
+              .firstOrNull;
+    final moved = matchedCategory == null
         ? task.copyWith(clearCategory: true)
         : task.copyWith(categoryId: matchedCategory.id);
+    return moved.copyWith(updatedAt: now, meta: task.meta.touch(clock, now));
   }).toList();
 
   return state.copyWith(
     tasks: normalizedTasks,
-    mustDoCategories: mergedCategories,
-    wantToDoCategories: mergedCategories,
+    mustDoCategories: _adoptCategories(
+      state.mustDoCategories,
+      mergedCategories,
+      clock,
+      now,
+    ),
+    wantToDoCategories: _adoptCategories(
+      state.wantToDoCategories,
+      mergedCategories,
+      clock,
+      now,
+    ),
+    deletedMustDoCategories: _graveyardAfterMerge(
+      state.deletedMustDoCategories,
+      state.mustDoCategories,
+      mergedIds,
+      clock,
+      now,
+    ),
+    deletedWantToDoCategories: _graveyardAfterMerge(
+      state.deletedWantToDoCategories,
+      state.wantToDoCategories,
+      mergedIds,
+      clock,
+      now,
+    ),
     shareCategories: true,
+  );
+}
+
+/// Rebuilds one category list as [next], stamping only the entries that were
+/// not already in [previous] so untouched categories keep their clock.
+List<TaskCategory> _adoptCategories(
+  List<TaskCategory> previous,
+  List<TaskCategory> next,
+  Hlc clock,
+  DateTime now,
+) {
+  final previousById = <String, TaskCategory>{
+    for (final category in previous) category.id: category,
+  };
+  return next.map((category) {
+    final existing = previousById[category.id];
+    return existing ??
+        category.copyWith(meta: category.meta.touch(clock, now));
+  }).toList();
+}
+
+/// Tombstones every category of [previous] that [keptIds] discards, and drops
+/// tombstones whose id came back to life.
+List<Tombstone> _graveyardAfterMerge(
+  List<Tombstone> graveyard,
+  List<TaskCategory> previous,
+  Set<String> keptIds,
+  Hlc clock,
+  DateTime now,
+) {
+  return <Tombstone>[
+    ...withoutTombstonesFor(graveyard, keptIds),
+    for (final category in previous)
+      if (!keptIds.contains(category.id))
+        Tombstone(id: category.id, meta: category.meta.tombstone(clock, now)),
+  ];
+}
+
+/// Mirrors [source] into a list that currently holds [previous], stamping only
+/// the entries that are new to it. Used when shared categories are turned off.
+List<TaskCategory> mirrorCategories({
+  required List<TaskCategory> previous,
+  required List<TaskCategory> source,
+  required Hlc clock,
+  required DateTime now,
+}) {
+  return _adoptCategories(
+    previous,
+    source.map((category) => category.copyWith()).toList(),
+    clock,
+    now,
   );
 }
 

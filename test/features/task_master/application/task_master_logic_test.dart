@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frelocator/core/hlc.dart';
+import 'package:frelocator/core/sync_meta.dart';
 import 'package:frelocator/features/task_master/application/task_master_logic.dart';
 import 'package:frelocator/features/task_master/domain/task_models.dart';
 
@@ -76,5 +77,75 @@ void main() {
       ),
       throwsA(isA<TaskMasterValidationException>()),
     );
+  });
+
+  group('enableSharedCategories', () {
+    TaskMasterStateData sample() {
+      final now = DateTime(2026, 4, 18);
+      return TaskMasterStateData.initial().copyWith(
+        tasks: <TaskMaster>[
+          TaskMaster(
+            id: 't-want',
+            title: 'ギター',
+            kind: TaskKind.wantToDo,
+            priority: 3,
+            createdAt: now,
+            updatedAt: now,
+            categoryId: 'want-hobby',
+            meta: SyncMeta.stamp(Hlc.parse('1-0-dev'), DateTime.utc(2026)),
+          ),
+          TaskMaster(
+            id: 't-must',
+            title: '請求',
+            kind: TaskKind.mustDo,
+            priority: 3,
+            createdAt: now,
+            updatedAt: now,
+            categoryId: 'must-work',
+            meta: SyncMeta.stamp(Hlc.parse('1-0-dev'), DateTime.utc(2026)),
+          ),
+        ],
+      );
+    }
+
+    test('tombstones discarded categories and touches only remapped tasks', () {
+      final before = sample();
+      final result = enableSharedCategories(
+        before,
+        CategoryMergeStrategy.keepMustDo,
+        clock: Hlc.parse('9-0-dev'),
+        now: DateTime.utc(2026, 9, 8),
+      );
+
+      expect(
+        result.deletedWantToDoCategories.map((item) => item.id),
+        contains('want-hobby'),
+      );
+      expect(
+        result.deletedWantToDoCategories.every((item) => item.meta.isDeleted),
+        isTrue,
+      );
+      expect(
+        result.wantToDoCategories.map((c) => c.id),
+        result.mustDoCategories.map((c) => c.id),
+      );
+
+      final want = result.tasks.singleWhere((t) => t.id == 't-want');
+      final must = result.tasks.singleWhere((t) => t.id == 't-must');
+      expect(want.categoryId, isNull);
+      expect(want.meta.clock.compareTo(Hlc.parse('1-0-dev')), greaterThan(0));
+      expect(must.meta.clock, Hlc.parse('1-0-dev'));
+
+      // Newly mirrored categories are stamped on the list they join.
+      expect(
+        result.wantToDoCategories
+            .every((c) => c.meta.clock == Hlc.parse('9-0-dev')),
+        isTrue,
+      );
+      expect(
+        result.mustDoCategories.every((c) => c.meta.clock == Hlc.migrated),
+        isTrue,
+      );
+    });
   });
 }

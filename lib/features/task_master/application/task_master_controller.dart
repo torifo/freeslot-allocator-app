@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/device_clock.dart';
 import '../../../core/sync_meta.dart';
+import '../../../core/tombstone.dart';
 import '../data/task_master_repository.dart';
 import '../domain/task_models.dart';
 import 'task_master_logic.dart';
@@ -16,6 +17,19 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
       ref.read(taskMasterRepositoryProvider);
 
   DeviceClock get _device => ref.read(deviceClockProvider);
+
+  /// Serializes mutations. Every public mutation reads `_current` inside the
+  /// queued body, so two calls that were fired without an `await` between them
+  /// cannot both build on the same stale snapshot and lose one another.
+  Future<void> _chain = Future<void>.value();
+
+  Future<T> _mutate<T>(Future<T> Function() body) {
+    final result = _chain.then((_) => body());
+    // The chain must survive a failed mutation, but the failure still has to
+    // reach the caller, so only the chain's copy swallows it.
+    _chain = result.then<void>((_) {}, onError: (Object _) {});
+    return result;
+  }
 
   /// Issues a fresh clock and folds it into [previous], or starts a new meta.
   Future<SyncMeta> _stamp(SyncMeta? previous) async {
@@ -41,14 +55,18 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
     return snapshot.value as TaskMasterStateData;
   }
 
-  Future<void> addOrUpdateTask(TaskMaster task) async {
+  Future<void> addOrUpdateTask(TaskMaster task) =>
+      _mutate(() => _addOrUpdateTask(task));
+
+  Future<void> _addOrUpdateTask(TaskMaster task) async {
     final current = _current;
     final index = current.tasks.indexWhere((item) => item.id == task.id);
     final previousMeta = index >= 0 ? current.tasks[index].meta : null;
+    final stampedMeta = await _stamp(previousMeta);
     final sanitizedTask = sanitizeTaskAgainstCategories(
       task,
       current,
-    ).copyWith(meta: await _stamp(previousMeta), updatedAt: DateTime.now().toUtc());
+    ).copyWith(meta: stampedMeta, updatedAt: stampedMeta.updatedAt);
     final tasks = List<TaskMaster>.from(current.tasks);
 
     if (index >= 0) {
@@ -57,10 +75,21 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
       tasks.add(sanitizedTask);
     }
 
-    await _persist(current.copyWith(tasks: _sortTasks(tasks)));
+    await _persist(
+      current.copyWith(
+        tasks: _sortTasks(tasks),
+        // Re-adding a deleted id must retire its tombstone, or the record
+        // would be both live and deleted in the same payload.
+        deletedTasks: withoutTombstonesFor(current.deletedTasks, <String>[
+          task.id,
+        ]),
+      ),
+    );
   }
 
-  Future<void> deleteTask(String id) async {
+  Future<void> deleteTask(String id) => _mutate(() => _deleteTask(id));
+
+  Future<void> _deleteTask(String id) async {
     final current = _current;
     final target = current.tasks.where((task) => task.id == id).firstOrNull;
     if (target == null) {
@@ -82,6 +111,13 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
   Future<void> reorderTasks({
     required TaskKind kind,
     required List<String> orderedIds,
+  }) {
+    return _mutate(() => _reorderTasks(kind: kind, orderedIds: orderedIds));
+  }
+
+  Future<void> _reorderTasks({
+    required TaskKind kind,
+    required List<String> orderedIds,
   }) async {
     final current = _current;
     final tasksOfKind = current.tasks
@@ -100,14 +136,14 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
       for (final task in tasksOfKind)
         if (!orderedIds.contains(task.id)) task,
     ];
-    final now = DateTime.now().toUtc();
     final reorderedTasks = <TaskMaster>[];
     for (var index = 0; index < orderedTasks.length; index += 1) {
+      final meta = await _stamp(orderedTasks[index].meta);
       reorderedTasks.add(
         orderedTasks[index].copyWith(
           priority: orderedTasks.length - index,
-          updatedAt: now,
-          meta: await _stamp(orderedTasks[index].meta),
+          updatedAt: meta.updatedAt,
+          meta: meta,
         ),
       );
     }
@@ -118,6 +154,13 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
   }
 
   Future<void> upsertCategory({
+    required TaskKind kind,
+    required TaskCategory category,
+  }) {
+    return _mutate(() => _upsertCategory(kind: kind, category: category));
+  }
+
+  Future<void> _upsertCategory({
     required TaskKind kind,
     required TaskCategory category,
   }) async {
@@ -155,11 +198,29 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
     }
 
     await _persist(
-      current.copyWith(mustDoCategories: mustDo, wantToDoCategories: wantToDo),
+      current.copyWith(
+        mustDoCategories: mustDo,
+        wantToDoCategories: wantToDo,
+        deletedMustDoCategories: withoutTombstonesFor(
+          current.deletedMustDoCategories,
+          mustDo.map((item) => item.id),
+        ),
+        deletedWantToDoCategories: withoutTombstonesFor(
+          current.deletedWantToDoCategories,
+          wantToDo.map((item) => item.id),
+        ),
+      ),
     );
   }
 
   Future<void> deleteCategory({
+    required TaskKind kind,
+    required String categoryId,
+  }) {
+    return _mutate(() => _deleteCategory(kind: kind, categoryId: categoryId));
+  }
+
+  Future<void> _deleteCategory({
     required TaskKind kind,
     required String categoryId,
   }) async {
@@ -177,33 +238,54 @@ class TaskMasterController extends AsyncNotifier<TaskMasterStateData> {
   Future<void> setShareCategories({
     required bool enabled,
     CategoryMergeStrategy strategy = CategoryMergeStrategy.keepLonger,
+  }) {
+    return _mutate(
+      () => _setShareCategories(enabled: enabled, strategy: strategy),
+    );
+  }
+
+  Future<void> _setShareCategories({
+    required bool enabled,
+    CategoryMergeStrategy strategy = CategoryMergeStrategy.keepLonger,
   }) async {
     final current = _current;
     if (enabled == current.shareCategories) {
       return;
     }
 
-    final settingsMeta = await _stamp(current.settingsMeta);
+    final clock = await _device.next();
+    final now = DateTime.now().toUtc();
+    final settingsMeta = current.settingsMeta.touch(clock, now);
 
     if (enabled) {
       await _persist(
         enableSharedCategories(
           current,
           strategy,
+          clock: clock,
+          now: now,
         ).copyWith(settingsMeta: settingsMeta),
       );
       return;
     }
 
-    final mirroredCategories = current.mustDoCategories
-        .map((item) => item.copyWith())
-        .toList();
+    // Turning sharing off snapshots the must-do list into both lists; only the
+    // entries that are new to a list are stamped.
+    final mustDo = current.mustDoCategories;
+    final wantToDo = mirrorCategories(
+      previous: current.wantToDoCategories,
+      source: mustDo,
+      clock: clock,
+      now: now,
+    );
     await _persist(
       current.copyWith(
-        mustDoCategories: mirroredCategories,
-        wantToDoCategories: mirroredCategories
-            .map((item) => item.copyWith())
-            .toList(),
+        mustDoCategories: mustDo,
+        wantToDoCategories: wantToDo,
+        deletedWantToDoCategories: withoutTombstonesFor(
+          current.deletedWantToDoCategories,
+          wantToDo.map((item) => item.id),
+        ),
         shareCategories: false,
         settingsMeta: settingsMeta,
       ),

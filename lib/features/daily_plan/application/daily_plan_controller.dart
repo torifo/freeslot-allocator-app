@@ -7,6 +7,7 @@ import '../../../core/device_clock.dart';
 import '../../../core/hlc.dart';
 import '../../../core/id_generator.dart';
 import '../../../core/sync_meta.dart';
+import '../../../core/tombstone.dart';
 import '../data/daily_plan_repository.dart';
 import '../domain/daily_plan_models.dart';
 import 'daily_plan_logic.dart';
@@ -20,6 +21,19 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
   DailyPlanRepository get _repository => ref.read(dailyPlanRepositoryProvider);
 
   DeviceClock get _device => ref.read(deviceClockProvider);
+
+  /// Serializes mutations. Every public mutation reads `_current` inside the
+  /// queued body, so two calls that were fired without an `await` between them
+  /// cannot both build on the same stale snapshot and lose one another.
+  Future<void> _chain = Future<void>.value();
+
+  Future<T> _mutate<T>(Future<T> Function() body) {
+    final result = _chain.then((_) => body());
+    // The chain must survive a failed mutation, but the failure still has to
+    // reach the caller, so only the chain's copy swallows it.
+    _chain = result.then<void>((_) {}, onError: (Object _) {});
+    return result;
+  }
 
   /// Issues a fresh clock and folds it into [previous], or starts a new meta.
   Future<SyncMeta> _stamp(SyncMeta? previous) async {
@@ -82,27 +96,57 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     return snapshot.value as DailyPlanStateData;
   }
 
-  Future<DailyPlan> ensurePlanForDate(DateTime value) async {
+  Future<DailyPlan> ensurePlanForDate(DateTime value) =>
+      _mutate(() => _ensurePlanForDate(value));
+
+  Future<DailyPlan> _ensurePlanForDate(DateTime value) async {
     final current = _current;
     final existing = current.planForDate(value);
     if (existing != null) {
       return existing;
     }
 
-    final now = DateTime.now();
+    final meta = await _stamp(null);
     final plan = DailyPlan(
       id: generateId('plan', deviceId: _device.deviceId),
       date: dateOnly(value),
-      createdAt: now,
-      updatedAt: now,
-      meta: await _stamp(null),
+      createdAt: DateTime.now(),
+      updatedAt: meta.updatedAt,
+      meta: meta,
     );
     final plans = List<DailyPlan>.from(current.plans)..add(plan);
-    await _persist(current.copyWith(plans: _sortPlans(plans)));
+    await _persist(
+      current.copyWith(
+        plans: _sortPlans(plans),
+        deletedPlans: withoutTombstonesFor(current.deletedPlans, <String>[
+          plan.id,
+        ]),
+      ),
+    );
     return plan;
   }
 
   Future<DailyPlan> duplicatePlan({
+    required DateTime sourceDate,
+    required DateTime targetDate,
+    List<String>? sourceSlotIds,
+    List<String>? sourceAssignmentIds,
+    bool includeAssignments = true,
+    bool replaceExisting = false,
+  }) {
+    return _mutate(
+      () => _duplicatePlan(
+        sourceDate: sourceDate,
+        targetDate: targetDate,
+        sourceSlotIds: sourceSlotIds,
+        sourceAssignmentIds: sourceAssignmentIds,
+        includeAssignments: includeAssignments,
+        replaceExisting: replaceExisting,
+      ),
+    );
+  }
+
+  Future<DailyPlan> _duplicatePlan({
     required DateTime sourceDate,
     required DateTime targetDate,
     List<String>? sourceSlotIds,
@@ -126,7 +170,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
 
     final now = DateTime.now();
     final clock = await _device.next();
-    final nowUtc = DateTime.now().toUtc();
+    final nowUtc = now.toUtc();
     // One clock for the whole copy: within a device the counter is monotonic,
     // so a single value still orders this operation against every other one.
     final copyMeta = SyncMeta.stamp(clock, nowUtc);
@@ -135,7 +179,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     if (existingTargetPlan != null) {
       targetPlan = existingTargetPlan.copyWith(
         date: normalizedTarget,
-        updatedAt: now,
+        updatedAt: nowUtc,
         meta: existingTargetPlan.meta.touch(clock, nowUtc),
       );
     } else {
@@ -143,7 +187,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
         id: generateId('plan', deviceId: _device.deviceId),
         date: normalizedTarget,
         createdAt: now,
-        updatedAt: now,
+        updatedAt: copyMeta.updatedAt,
         meta: copyMeta,
       );
     }
@@ -282,19 +326,36 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
         current.plans.where((item) => item.id != targetPlan.id).toList()
           ..add(targetPlan);
 
+    final normalizedAssignments = _normalizeAllAssignments(
+      assignments,
+      clock: clock,
+      now: nowUtc,
+    );
+    final sortedSlots = sortSlots(slots);
     await _persist(
       current.copyWith(
         plans: _sortPlans(plans),
-        slots: sortSlots(slots),
-        assignments: _normalizeAllAssignments(assignments),
-        deletedSlots: deletedSlots,
-        deletedAssignments: deletedAssignments,
+        slots: sortedSlots,
+        assignments: normalizedAssignments,
+        deletedPlans: withoutTombstonesFor(current.deletedPlans, <String>[
+          targetPlan.id,
+        ]),
+        deletedSlots: withoutTombstonesFor(
+          deletedSlots,
+          sortedSlots.map((item) => item.id),
+        ),
+        deletedAssignments: withoutTombstonesFor(
+          deletedAssignments,
+          normalizedAssignments.map((item) => item.id),
+        ),
       ),
     );
     return targetPlan;
   }
 
-  Future<void> upsertSlot(FreeTimeSlot slot) async {
+  Future<void> upsertSlot(FreeTimeSlot slot) => _mutate(() => _upsertSlot(slot));
+
+  Future<void> _upsertSlot(FreeTimeSlot slot) async {
     final current = _current;
     validateFreeTimeSlotAgainstPlan(
       slot: slot,
@@ -320,6 +381,9 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     await _persist(
       current.copyWith(
         slots: sortSlots(slots),
+        deletedSlots: withoutTombstonesFor(current.deletedSlots, <String>[
+          slot.id,
+        ]),
         plans: _touchPlans(current.plans, <String>[
           slot.dailyPlanId,
         ], clock, nowUtc),
@@ -327,7 +391,9 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     );
   }
 
-  Future<void> deleteSlot(String slotId) async {
+  Future<void> deleteSlot(String slotId) => _mutate(() => _deleteSlot(slotId));
+
+  Future<void> _deleteSlot(String slotId) async {
     final current = _current;
     final slot = current.slots.where((item) => item.id == slotId).firstOrNull;
     if (slot == null) {
@@ -364,7 +430,10 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     );
   }
 
-  Future<void> upsertAssignment(SlotTaskAssignment assignment) async {
+  Future<void> upsertAssignment(SlotTaskAssignment assignment) =>
+      _mutate(() => _upsertAssignment(assignment));
+
+  Future<void> _upsertAssignment(SlotTaskAssignment assignment) async {
     final current = _current;
     final slot = current.slots
         .where((item) => item.id == assignment.slotId)
@@ -395,10 +464,19 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
       assignments.add(stamped);
     }
 
-    final normalized = _normalizeAssignments(assignments, stamped.slotId);
+    final normalized = _normalizeAssignments(
+      assignments,
+      stamped.slotId,
+      clock: clock,
+      now: nowUtc,
+    );
     await _persist(
       current.copyWith(
         assignments: normalized,
+        deletedAssignments: withoutTombstonesFor(
+          current.deletedAssignments,
+          <String>[assignment.id],
+        ),
         plans: _touchPlans(current.plans, <String>[
           assignment.dailyPlanId,
         ], clock, nowUtc),
@@ -407,6 +485,20 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
   }
 
   Future<void> moveAssignmentToSlot({
+    required String assignmentId,
+    required String targetSlotId,
+    String? beforeAssignmentId,
+  }) {
+    return _mutate(
+      () => _moveAssignmentToSlot(
+        assignmentId: assignmentId,
+        targetSlotId: targetSlotId,
+        beforeAssignmentId: beforeAssignmentId,
+      ),
+    );
+  }
+
+  Future<void> _moveAssignmentToSlot({
     required String assignmentId,
     required String targetSlotId,
     String? beforeAssignmentId,
@@ -433,6 +525,8 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
       targetSlot: targetSlot,
       existingAssignments: targetAssignments,
       beforeAssignmentId: beforeAssignmentId,
+      clock: clock,
+      now: nowUtc,
     );
     final assignments = List<SlotTaskAssignment>.from(current.assignments);
     final sourceAssignments = assignment.slotId == targetSlot.id
@@ -441,6 +535,8 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
             current
                 .assignmentsForSlot(assignment.slotId)
                 .where((item) => item.id != assignment.id),
+            clock: clock,
+            now: nowUtc,
           );
     assignments.removeWhere(
       (item) =>
@@ -454,7 +550,7 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
         assignments: _normalizeMultipleSlots(assignments, <String>[
           assignment.slotId,
           targetSlot.id,
-        ]),
+        ], clock: clock, now: nowUtc),
         plans: _touchPlans(current.plans, <String>[
           assignment.dailyPlanId,
           targetSlot.dailyPlanId,
@@ -463,7 +559,10 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     );
   }
 
-  Future<void> deleteAssignment(String assignmentId) async {
+  Future<void> deleteAssignment(String assignmentId) =>
+      _mutate(() => _deleteAssignment(assignmentId));
+
+  Future<void> _deleteAssignment(String assignmentId) async {
     final current = _current;
     final assignment = current.assignments
         .where((item) => item.id == assignmentId)
@@ -477,7 +576,12 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
     final assignments = current.assignments
         .where((item) => item.id != assignmentId)
         .toList();
-    final normalized = _normalizeAssignments(assignments, assignment.slotId);
+    final normalized = _normalizeAssignments(
+      assignments,
+      assignment.slotId,
+      clock: clock,
+      now: nowUtc,
+    );
     await _persist(
       current.copyWith(
         assignments: normalized,
@@ -533,15 +637,21 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
 
   List<SlotTaskAssignment> _normalizeAssignments(
     List<SlotTaskAssignment> assignments,
-    String slotId,
-  ) {
-    return _normalizeMultipleSlots(assignments, <String>[slotId]);
+    String slotId, {
+    Hlc? clock,
+    DateTime? now,
+  }) {
+    return _normalizeMultipleSlots(assignments, <String>[
+      slotId,
+    ], clock: clock, now: now);
   }
 
   List<SlotTaskAssignment> _normalizeMultipleSlots(
     List<SlotTaskAssignment> assignments,
-    List<String> slotIds,
-  ) {
+    List<String> slotIds, {
+    Hlc? clock,
+    DateTime? now,
+  }) {
     final targets = slotIds.toSet();
     final currentSlots = assignments.where(
       (item) => targets.contains(item.slotId),
@@ -554,6 +664,8 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
       normalized.addAll(
         normalizeAssignmentsForSlot(
           currentSlots.where((item) => item.slotId == slotId),
+          clock: clock,
+          now: now,
         ),
       );
     }
@@ -561,8 +673,10 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
   }
 
   List<SlotTaskAssignment> _normalizeAllAssignments(
-    List<SlotTaskAssignment> assignments,
-  ) {
+    List<SlotTaskAssignment> assignments, {
+    Hlc? clock,
+    DateTime? now,
+  }) {
     final bySlot = <String, List<SlotTaskAssignment>>{};
     for (final assignment in assignments) {
       bySlot
@@ -572,7 +686,9 @@ class DailyPlanController extends AsyncNotifier<DailyPlanStateData> {
 
     final normalized = <SlotTaskAssignment>[];
     for (final entry in bySlot.entries) {
-      normalized.addAll(normalizeAssignmentsForSlot(entry.value));
+      normalized.addAll(
+        normalizeAssignmentsForSlot(entry.value, clock: clock, now: now),
+      );
     }
     return normalized;
   }

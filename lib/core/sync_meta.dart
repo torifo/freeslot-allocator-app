@@ -49,7 +49,8 @@ class SyncMeta {
         : epoch;
     final rawDeleted = json['deletedAt'];
     final deletedAt = rawDeleted is String ? DateTime.tryParse(rawDeleted)?.toUtc() : null;
-    final migrated = rawClock is! String || (json['migrated'] as bool? ?? false);
+    final rawMigrated = json['migrated'];
+    final migrated = rawClock is! String || (rawMigrated is bool ? rawMigrated : false);
     // Unknown-key preservation only matters for records that already carry a
     // real v2 clock; a v1 record's non-meta fields are just its own entity
     // fields (e.g. id, name), not future-schema extras, so leave extra empty.

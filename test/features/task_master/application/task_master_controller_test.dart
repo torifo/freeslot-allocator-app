@@ -111,6 +111,89 @@ void main() {
     });
   });
 
+
+  group('tombstone / live id coexistence', () {
+    test('re-adding a deleted task drops its tombstone', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'task_master_state_v1': _sampleState().encode(),
+      });
+      final container = await testContainer(now: () => 1000);
+      addTearDown(container.dispose);
+      await container.read(taskMasterControllerProvider.future);
+      final notifier = container.read(taskMasterControllerProvider.notifier);
+
+      await notifier.deleteTask('must-1');
+      await notifier.addOrUpdateTask(
+        TaskMaster(
+          id: 'must-1',
+          title: '請求(再登録)',
+          kind: TaskKind.mustDo,
+          priority: 3,
+          createdAt: DateTime(2026, 5, 1, 10),
+          updatedAt: DateTime(2026, 5, 1, 10),
+        ),
+      );
+
+      final state = container.read(taskMasterControllerProvider).requireValue;
+      expect(state.deletedTasks, isEmpty);
+      expect(state.tasks.where((t) => t.id == 'must-1'), hasLength(1));
+      expect(
+        (state.toJson()['tasks'] as List)
+            .where((dynamic item) => (item as Map)['id'] == 'must-1'),
+        hasLength(1),
+      );
+    });
+
+    test('re-adding a deleted category drops its tombstone', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'task_master_state_v1': _sampleState().encode(),
+      });
+      final container = await testContainer(now: () => 1000);
+      addTearDown(container.dispose);
+      await container.read(taskMasterControllerProvider.future);
+      final notifier = container.read(taskMasterControllerProvider.notifier);
+
+      await notifier.deleteCategory(
+        kind: TaskKind.mustDo,
+        categoryId: 'must-work',
+      );
+      await notifier.upsertCategory(
+        kind: TaskKind.mustDo,
+        category: TaskCategory(id: 'must-work', name: '仕事'),
+      );
+
+      final state = container.read(taskMasterControllerProvider).requireValue;
+      expect(state.deletedMustDoCategories, isEmpty);
+      expect(state.mustDoCategories.map((c) => c.id), contains('must-work'));
+    });
+  });
+
+  group('serialized mutations', () {
+    test('concurrent addOrUpdateTask calls do not lose updates', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final container = await testContainer(now: () => 1000);
+      addTearDown(container.dispose);
+      await container.read(taskMasterControllerProvider.future);
+      final notifier = container.read(taskMasterControllerProvider.notifier);
+
+      TaskMaster build(String id) => TaskMaster(
+        id: id,
+        title: id,
+        kind: TaskKind.mustDo,
+        priority: 3,
+        createdAt: DateTime(2026, 5, 1, 10),
+        updatedAt: DateTime(2026, 5, 1, 10),
+      );
+
+      final a = notifier.addOrUpdateTask(build('a'));
+      final b = notifier.addOrUpdateTask(build('b'));
+      await Future.wait(<Future<void>>[a, b]);
+
+      final state = container.read(taskMasterControllerProvider).requireValue;
+      expect(state.tasks.map((t) => t.id), containsAll(<String>['a', 'b']));
+    });
+  });
+
   group('tombstones', () {
     test('deleteTask moves the task into deletedTasks with a newer clock', () async {
       SharedPreferences.setMockInitialValues(<String, Object>{

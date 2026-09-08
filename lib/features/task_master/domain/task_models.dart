@@ -140,32 +140,33 @@ class TaskMaster {
     'memo': memo,
     'categoryId': categoryId,
     'estimatedMinutes': estimatedMinutes,
+    // updatedAt は meta 側だけを正とする。表示用フィールドは meta から復元する。
     ...meta.toJson(),
-    // updatedAt は meta 側の値を正とし、表示用フィールドと二重管理しない。
-    'updatedAt': updatedAt.toUtc().toIso8601String(),
+    'updatedAt': meta.updatedAt.toUtc().toIso8601String(),
   };
 
   factory TaskMaster.fromJson(Map<String, dynamic> json) {
-    final meta = SyncMeta.fromJson(json, knownKeys: jsonKeys);
-    final updatedAt = DateTime.parse(json['updatedAt'] as String).toUtc();
+    final rawMeta = SyncMeta.fromJson(json, knownKeys: jsonKeys);
+    final legacyUpdatedAt = DateTime.parse(json['updatedAt'] as String).toUtc();
+    final meta = rawMeta.migrated
+        ? SyncMeta(
+            clock: Hlc.migrated,
+            updatedAt: legacyUpdatedAt,
+            migrated: true,
+            extra: rawMeta.extra,
+          )
+        : rawMeta;
     return TaskMaster(
       id: json['id'] as String,
       title: json['title'] as String,
       kind: TaskKindX.fromStorageKey(json['kind'] as String),
       priority: json['priority'] as int? ?? 3,
       createdAt: DateTime.parse(json['createdAt'] as String).toUtc(),
-      updatedAt: updatedAt,
+      updatedAt: meta.updatedAt,
       memo: json['memo'] as String? ?? '',
       categoryId: json['categoryId'] as String?,
       estimatedMinutes: json['estimatedMinutes'] as int? ?? 0,
-      meta: meta.migrated
-          ? SyncMeta(
-              clock: Hlc.migrated,
-              updatedAt: updatedAt,
-              migrated: true,
-              extra: meta.extra,
-            )
-          : meta,
+      meta: meta,
     );
   }
 }
@@ -197,7 +198,25 @@ class TaskMasterStateData {
     List<Tombstone> deletedTasks = const <Tombstone>[],
     List<Tombstone> deletedMustDoCategories = const <Tombstone>[],
     List<Tombstone> deletedWantToDoCategories = const <Tombstone>[],
-  }) : tasks = List<TaskMaster>.unmodifiable(tasks),
+  }) : assert(
+         idsDisjoint(tasks.map((item) => item.id), deletedTasks),
+         'a task id cannot be both live and tombstoned',
+       ),
+       assert(
+         idsDisjoint(
+           mustDoCategories.map((item) => item.id),
+           deletedMustDoCategories,
+         ),
+         'a must-do category id cannot be both live and tombstoned',
+       ),
+       assert(
+         idsDisjoint(
+           wantToDoCategories.map((item) => item.id),
+           deletedWantToDoCategories,
+         ),
+         'a want-to-do category id cannot be both live and tombstoned',
+       ),
+       tasks = List<TaskMaster>.unmodifiable(tasks),
        mustDoCategories = List<TaskCategory>.unmodifiable(mustDoCategories),
        wantToDoCategories = List<TaskCategory>.unmodifiable(wantToDoCategories),
        settingsMeta = settingsMeta ?? SyncMeta.migratedDefault,
@@ -295,14 +314,16 @@ class TaskMasterStateData {
     final bool share;
     final SyncMeta settingsMeta;
     if (settings is Map<String, dynamic>) {
-      share = settings['shareCategories'] as bool? ?? false;
+      final rawShare = settings['shareCategories'];
+      share = rawShare is bool ? rawShare : false;
       settingsMeta = SyncMeta.fromJson(
         settings,
         knownKeys: const <String>{'shareCategories'},
       );
     } else {
       // v1 payload: the flag lived at the top level and carried no meta.
-      share = json['shareCategories'] as bool? ?? false;
+      final rawShare = json['shareCategories'];
+      share = rawShare is bool ? rawShare : false;
       settingsMeta = SyncMeta.migratedDefault;
     }
     return TaskMasterStateData(
@@ -319,9 +340,20 @@ class TaskMasterStateData {
       ),
       shareCategories: share,
       settingsMeta: settingsMeta,
-      deletedTasks: tasks.tombstones,
-      deletedMustDoCategories: mustDo.tombstones,
-      deletedWantToDoCategories: wantToDo.tombstones,
+      // A payload that carries both a live record and its tombstone is
+      // corrupt; keep the live record so nothing is silently lost.
+      deletedTasks: withoutTombstonesFor(
+        tasks.tombstones,
+        tasks.live.map((item) => item['id'] as String? ?? ''),
+      ),
+      deletedMustDoCategories: withoutTombstonesFor(
+        mustDo.tombstones,
+        mustDo.live.map((item) => item['id'] as String? ?? ''),
+      ),
+      deletedWantToDoCategories: withoutTombstonesFor(
+        wantToDo.tombstones,
+        wantToDo.live.map((item) => item['id'] as String? ?? ''),
+      ),
     );
   }
 

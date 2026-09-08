@@ -67,26 +67,28 @@ class DailyPlan {
     'id': id,
     'date': formatDateKey(date),
     'createdAt': createdAt.toUtc().toIso8601String(),
+    // updatedAt は meta 側だけを正とする。表示用フィールドは meta から復元する。
     ...meta.toJson(),
-    'updatedAt': updatedAt.toUtc().toIso8601String(),
+    'updatedAt': meta.updatedAt.toUtc().toIso8601String(),
   };
 
   factory DailyPlan.fromJson(Map<String, dynamic> json) {
-    final meta = SyncMeta.fromJson(json, knownKeys: jsonKeys);
-    final updatedAt = DateTime.parse(json['updatedAt'] as String).toUtc();
+    final rawMeta = SyncMeta.fromJson(json, knownKeys: jsonKeys);
+    final legacyUpdatedAt = DateTime.parse(json['updatedAt'] as String).toUtc();
+    final meta = rawMeta.migrated
+        ? SyncMeta(
+            clock: Hlc.migrated,
+            updatedAt: legacyUpdatedAt,
+            migrated: true,
+            extra: rawMeta.extra,
+          )
+        : rawMeta;
     return DailyPlan(
       id: json['id'] as String,
       date: parseDateKey(json['date'] as String),
       createdAt: DateTime.parse(json['createdAt'] as String).toUtc(),
-      updatedAt: updatedAt,
-      meta: meta.migrated
-          ? SyncMeta(
-              clock: Hlc.migrated,
-              updatedAt: updatedAt,
-              migrated: true,
-              extra: meta.extra,
-            )
-          : meta,
+      updatedAt: meta.updatedAt,
+      meta: meta,
     );
   }
 }
@@ -284,7 +286,19 @@ class DailyPlanStateData {
     List<Tombstone> deletedPlans = const <Tombstone>[],
     List<Tombstone> deletedSlots = const <Tombstone>[],
     List<Tombstone> deletedAssignments = const <Tombstone>[],
-  }) : plans = List<DailyPlan>.unmodifiable(plans),
+  }) : assert(
+         idsDisjoint(plans.map((item) => item.id), deletedPlans),
+         'a plan id cannot be both live and tombstoned',
+       ),
+       assert(
+         idsDisjoint(slots.map((item) => item.id), deletedSlots),
+         'a slot id cannot be both live and tombstoned',
+       ),
+       assert(
+         idsDisjoint(assignments.map((item) => item.id), deletedAssignments),
+         'an assignment id cannot be both live and tombstoned',
+       ),
+       plans = List<DailyPlan>.unmodifiable(plans),
        slots = List<FreeTimeSlot>.unmodifiable(slots),
        assignments = List<SlotTaskAssignment>.unmodifiable(assignments),
        deletedPlans = List<Tombstone>.unmodifiable(deletedPlans),
@@ -379,9 +393,20 @@ class DailyPlanStateData {
         SlotTaskAssignment.fromJson,
         strict: strict,
       ),
-      deletedPlans: plans.tombstones,
-      deletedSlots: slots.tombstones,
-      deletedAssignments: assignments.tombstones,
+      // A payload that carries both a live record and its tombstone is
+      // corrupt; keep the live record so nothing is silently lost.
+      deletedPlans: withoutTombstonesFor(
+        plans.tombstones,
+        plans.live.map((item) => item['id'] as String? ?? ''),
+      ),
+      deletedSlots: withoutTombstonesFor(
+        slots.tombstones,
+        slots.live.map((item) => item['id'] as String? ?? ''),
+      ),
+      deletedAssignments: withoutTombstonesFor(
+        assignments.tombstones,
+        assignments.live.map((item) => item['id'] as String? ?? ''),
+      ),
     );
   }
 

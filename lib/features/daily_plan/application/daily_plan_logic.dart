@@ -1,3 +1,4 @@
+import '../../../core/hlc.dart';
 import '../domain/daily_plan_models.dart';
 
 class DailyPlanValidationException implements Exception {
@@ -42,9 +43,16 @@ List<FreeTimeSlot> sortSlots(Iterable<FreeTimeSlot> slots) {
   return items;
 }
 
+/// Renumbers `sortOrder` to the slot's time order.
+///
+/// A renumbering is a real change that peers must see, so an entry whose
+/// `sortOrder` actually moves is stamped with [clock]/[now] when both are
+/// given. Entries that keep their position keep their meta untouched.
 List<SlotTaskAssignment> normalizeAssignmentsForSlot(
-  Iterable<SlotTaskAssignment> assignments,
-) {
+  Iterable<SlotTaskAssignment> assignments, {
+  Hlc? clock,
+  DateTime? now,
+}) {
   final items = assignments.toList()
     ..sort((a, b) {
       final startCompare = a.startAt.compareTo(b.startAt);
@@ -58,11 +66,16 @@ List<SlotTaskAssignment> normalizeAssignmentsForSlot(
       return a.sortOrder.compareTo(b.sortOrder);
     });
 
-  return items
-      .asMap()
-      .entries
-      .map((entry) => entry.value.copyWith(sortOrder: entry.key))
-      .toList();
+  return items.asMap().entries.map((entry) {
+    final item = entry.value;
+    if (item.sortOrder == entry.key) {
+      return item;
+    }
+    return item.copyWith(
+      sortOrder: entry.key,
+      meta: clock != null && now != null ? item.meta.touch(clock, now) : null,
+    );
+  }).toList();
 }
 
 DateTime shiftDateTimeByDays(DateTime value, int days) {
@@ -74,6 +87,8 @@ List<SlotTaskAssignment> moveAssignmentToSlotPosition({
   required FreeTimeSlot targetSlot,
   required List<SlotTaskAssignment> existingAssignments,
   String? beforeAssignmentId,
+  Hlc? clock,
+  DateTime? now,
 }) {
   final remainingAssignments = existingAssignments
       .where((item) => item.id != assignment.id)
@@ -123,18 +138,22 @@ List<SlotTaskAssignment> moveAssignmentToSlotPosition({
     );
   }
 
-  return normalizeAssignmentsForSlot(normalized);
+  return normalizeAssignmentsForSlot(normalized, clock: clock, now: now);
 }
 
 SlotTaskAssignment moveAssignmentToSlotEnd({
   required SlotTaskAssignment assignment,
   required FreeTimeSlot targetSlot,
   required List<SlotTaskAssignment> existingAssignments,
+  Hlc? clock,
+  DateTime? now,
 }) {
   return moveAssignmentToSlotPosition(
     assignment: assignment,
     targetSlot: targetSlot,
     existingAssignments: existingAssignments,
+    clock: clock,
+    now: now,
   ).last;
 }
 

@@ -73,3 +73,22 @@ List<T> parseLive<T>(
   }
   return items;
 }
+
+/// True when no id appears both as a live record and as a tombstone.
+///
+/// A live record and a tombstone sharing an id would serialize twice into the
+/// same array and let a peer resurrect or re-delete the record at random.
+bool idsDisjoint(Iterable<String> liveIds, Iterable<Tombstone> tombstones) {
+  final live = liveIds.toSet();
+  return !tombstones.any((item) => live.contains(item.id));
+}
+
+/// Drops every tombstone whose id is in [liveIds], so a re-added record never
+/// coexists with its own tombstone.
+List<Tombstone> withoutTombstonesFor(
+  Iterable<Tombstone> tombstones,
+  Iterable<String> liveIds,
+) {
+  final live = liveIds.toSet();
+  return tombstones.where((item) => !live.contains(item.id)).toList();
+}

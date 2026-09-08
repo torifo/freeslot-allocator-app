@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:frelocator/core/hlc.dart';
 import 'package:frelocator/features/daily_plan/application/daily_plan_controller.dart';
 import 'package:frelocator/features/daily_plan/data/daily_plan_repository.dart';
 import 'package:frelocator/features/daily_plan/application/daily_plan_logic.dart';
@@ -235,6 +236,91 @@ void main() {
       await expectLater(
         notifier.deleteSlot('slot-1'),
         throwsA(isA<DailyPlanValidationException>()),
+      );
+    });
+  });
+
+
+  group('sortOrder stamping', () {
+    test('reordering inside a slot stamps only the entries whose sortOrder moved', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'daily_plan_state_v1': _sampleState().encode(),
+      });
+      final container = await testContainer(now: () => 1000);
+      addTearDown(container.dispose);
+
+      await container.read(dailyPlanControllerProvider.future);
+      final notifier = container.read(dailyPlanControllerProvider.notifier);
+
+      final before = container.read(dailyPlanControllerProvider).requireValue;
+      Hlc clockOf(DailyPlanStateData state, String id) =>
+          state.assignments.singleWhere((item) => item.id == id).meta.clock;
+
+      final beforeFirst = clockOf(before, 'assignment-source-1');
+      final beforeSecond = clockOf(before, 'assignment-source-2');
+      final beforeOther = clockOf(before, 'assignment-source-3');
+
+      await notifier.moveAssignmentToSlot(
+        assignmentId: 'assignment-source-2',
+        targetSlotId: 'slot-source-1',
+        beforeAssignmentId: 'assignment-source-1',
+      );
+
+      final after = container.read(dailyPlanControllerProvider).requireValue;
+      expect(
+        clockOf(after, 'assignment-source-2').compareTo(beforeSecond),
+        greaterThan(0),
+        reason: '移動した予定はスタンプされる',
+      );
+      expect(
+        clockOf(after, 'assignment-source-1').compareTo(beforeFirst),
+        greaterThan(0),
+        reason: 'sortOrder が変わった予定もスタンプされる',
+      );
+      expect(
+        clockOf(after, 'assignment-source-3'),
+        beforeOther,
+        reason: '別スロットの予定は触らない',
+      );
+      expect(
+        after
+            .assignmentsForSlot('slot-source-1')
+            .map((item) => item.id)
+            .toList(),
+        <String>['assignment-source-2', 'assignment-source-1'],
+      );
+    });
+  });
+
+  group('tombstone / live id coexistence', () {
+    test('re-adding a deleted slot drops its tombstone', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'daily_plan_state_v1': _sampleState().encode(),
+      });
+      final container = await testContainer(now: () => 1000);
+      addTearDown(container.dispose);
+
+      await container.read(dailyPlanControllerProvider.future);
+      final notifier = container.read(dailyPlanControllerProvider.notifier);
+
+      await notifier.deleteSlot('slot-target-1');
+      await notifier.upsertSlot(
+        FreeTimeSlot(
+          id: 'slot-target-1',
+          dailyPlanId: 'plan-target',
+          startAt: DateTime(2026, 4, 20, 9),
+          endAt: DateTime(2026, 4, 20, 10),
+          label: '復活枠',
+        ),
+      );
+
+      final state = container.read(dailyPlanControllerProvider).requireValue;
+      expect(state.deletedSlots, isEmpty);
+      expect(state.slots.where((item) => item.id == 'slot-target-1'), hasLength(1));
+      expect(
+        (state.toJson()['slots'] as List)
+            .where((dynamic item) => (item as Map)['id'] == 'slot-target-1'),
+        hasLength(1),
       );
     });
   });
