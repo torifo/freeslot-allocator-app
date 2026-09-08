@@ -15,13 +15,17 @@ const int kMaxImportBytes = 20 * 1024 * 1024;
 /// from the device itself and must never be able to steer the path.
 final RegExp _unsafe = RegExp(r'[^A-Za-z0-9_-]');
 
-/// `20260909-010203`, always in UTC so two devices never disagree about the
-/// order of their exports.
+/// `20260909-010203`, in the exporting device's own local time.
+///
+/// The stamp exists so a person can pick their export out of a share sheet or
+/// a downloads folder; a UTC name meant a file exported at nine in the evening
+/// in Tokyo was labelled noon. The document itself still carries a UTC
+/// `exportedAt`, which is what the merge orders by.
 String exportStamp(DateTime at) {
-  final u = at.toUtc();
+  final l = at.toLocal();
   String two(int v) => v.toString().padLeft(2, '0');
-  return '${u.year.toString().padLeft(4, '0')}${two(u.month)}${two(u.day)}'
-      '-${two(u.hour)}${two(u.minute)}${two(u.second)}';
+  return '${l.year.toString().padLeft(4, '0')}${two(l.month)}${two(l.day)}'
+      '-${two(l.hour)}${two(l.minute)}${two(l.second)}';
 }
 
 /// `frelocator-<deviceId>-<stamp>.json` — a plain `.json` name the hub's

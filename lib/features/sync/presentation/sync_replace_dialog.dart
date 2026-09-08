@@ -46,7 +46,7 @@ class SyncReplaceDialog extends StatelessWidget {
       actions: <Widget>[
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('やめる'),
+          child: const Text('キャンセル'),
         ),
         TextButton(
           onPressed: () => Navigator.of(context).pop(SyncMode.takeHub),

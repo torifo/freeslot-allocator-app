@@ -193,13 +193,32 @@ void main() {
     await pump(tester, withScanner: _FakeScanner(error: QrScannerError.permissionDenied));
 
     expect(find.textContaining('カメラの使用が許可されていません'), findsOneWidget);
+    // The other route is named for the platform the test runs on (macOS here).
     expect(find.textContaining('ファイルから取り込む'), findsOneWidget);
     expect(find.byKey(const Key('fake-scanner')), findsNothing);
   });
 
+  testWidgets('a camera that cannot start is a failure, not a slow scan', (tester) async {
+    await pump(tester, withScanner: _FakeScanner(error: QrScannerError.permissionDenied));
+
+    // The panel used to keep ticking under the error and eventually claim the
+    // transfer was 「時間がかかっています」 (I-9).
+    expect(find.text('失敗'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 20));
+    expect(find.textContaining('時間がかかっています'), findsNothing);
+  });
+
   testWidgets('any other camera failure gets the generic Japanese line', (tester) async {
     await pump(tester, withScanner: _FakeScanner(error: QrScannerError.other));
-    expect(find.text(syncErrorMessage('camera')), findsOneWidget);
+    expect(find.textContaining(syncErrorMessage('camera')), findsWidgets);
+  });
+
+  testWidgets('the instructions name no hub tool', (tester) async {
+    await pump(tester);
+    // `sync_status` / `lan.qrPage` belong to the macOS guide, not here (C-1).
+    expect(find.textContaining('sync_status'), findsNothing);
+    expect(find.textContaining('lan.qrPage'), findsNothing);
+    expect(find.textContaining('PC 側で QR 画面を開き'), findsOneWidget);
   });
 
   testWidgets('a merge that fails leaves the screen scannable again', (tester) async {
