@@ -300,4 +300,223 @@ void main() {
       expect(window.end, defaultEnd);
     });
   });
+
+  group('nextHalfHourBoundary', () {
+    test('keeps a time already on a boundary', () {
+      expect(
+        nextHalfHourBoundary(DateTime(2026, 4, 18, 9, 30)),
+        DateTime(2026, 4, 18, 9, 30),
+      );
+    });
+
+    test('rounds up to the next boundary', () {
+      expect(
+        nextHalfHourBoundary(DateTime(2026, 4, 18, 9, 1)),
+        DateTime(2026, 4, 18, 9, 30),
+      );
+      expect(
+        nextHalfHourBoundary(DateTime(2026, 4, 18, 9, 45)),
+        DateTime(2026, 4, 18, 10),
+      );
+    });
+
+    test('rounds up when only seconds have passed the boundary', () {
+      expect(
+        nextHalfHourBoundary(DateTime(2026, 4, 18, 9, 30, 1)),
+        DateTime(2026, 4, 18, 10),
+      );
+    });
+
+    test('rolls into the next day at the end of it', () {
+      expect(
+        nextHalfHourBoundary(DateTime(2026, 4, 18, 23, 40)),
+        DateTime(2026, 4, 19),
+      );
+    });
+  });
+
+  group('defaultFreeSlotRange', () {
+    final today = DateTime(2026, 4, 18);
+
+    test('is one hour long from the next boundary on the day being planned', () {
+      final range = defaultFreeSlotRange(DateTime(2026, 4, 18, 9, 12), today);
+      expect(range.start, DateTime(2026, 4, 18, 9, 30));
+      expect(range.end, DateTime(2026, 4, 18, 10, 30));
+    });
+
+    test('opens at 09:00 on any day but today', () {
+      // 「次の 30 分」 is a statement about now, and now is not on the day being
+      // planned: a slot at 23:30 tonight is nonsense on next Tuesday
+      // (M-1).
+      final range = defaultFreeSlotRange(
+        DateTime(2026, 4, 18, 22, 40),
+        DateTime(2026, 4, 21),
+      );
+      expect(range.start, DateTime(2026, 4, 21, 9));
+      expect(range.end, DateTime(2026, 4, 21, 10));
+
+      final past = defaultFreeSlotRange(
+        DateTime(2026, 4, 18, 9, 12),
+        DateTime(2026, 4, 10),
+      );
+      expect(past.start, DateTime(2026, 4, 10, 9));
+      expect(past.end, DateTime(2026, 4, 10, 10));
+    });
+
+    test('stays on the day being planned at the end of it', () {
+      // The boundary itself rolls into tomorrow; the dialog only reads the
+      // clock times, so a start of 00:00 would silently be this morning.
+      final range = defaultFreeSlotRange(DateTime(2026, 4, 18, 23, 40), today);
+      expect(range.start, DateTime(2026, 4, 18, 23));
+      expect(range.end, DateTime(2026, 4, 18, 23, 59));
+    });
+
+    test('gives up the full hour rather than the day when it is nearly over', () {
+      final range = defaultFreeSlotRange(DateTime(2026, 4, 18, 22, 45), today);
+      expect(range.start, DateTime(2026, 4, 18, 23));
+      expect(range.end, DateTime(2026, 4, 18, 23, 59));
+    });
+
+    test('never starts in the past on the day being planned', () {
+      for (final minute in <int>[0, 1, 29, 30, 31, 59]) {
+        final now = DateTime(2026, 4, 18, 14, minute);
+        final range = defaultFreeSlotRange(now, today);
+        expect(range.start.isBefore(now), isFalse, reason: '\$now');
+        expect(range.end.isAfter(range.start), isTrue, reason: '\$now');
+      }
+    });
+  });
+
+  group('followingEndMinutes', () {
+    test('leaves the end alone while the start is still before it', () {
+      expect(
+        followingEndMinutes(
+          previousStartMinutes: 9 * 60,
+          previousEndMinutes: 11 * 60,
+          newStartMinutes: 10 * 60,
+        ),
+        11 * 60,
+      );
+    });
+
+    test('carries the previous length when the start passes the end', () {
+      expect(
+        followingEndMinutes(
+          previousStartMinutes: 9 * 60,
+          previousEndMinutes: 10 * 60,
+          newStartMinutes: 14 * 60,
+        ),
+        15 * 60,
+      );
+    });
+
+    test('falls back to an hour when there was no length', () {
+      expect(
+        followingEndMinutes(
+          previousStartMinutes: 9 * 60,
+          previousEndMinutes: 9 * 60,
+          newStartMinutes: 20 * 60,
+        ),
+        21 * 60,
+      );
+    });
+
+    test('may push the end into the next day', () {
+      expect(
+        followingEndMinutes(
+          previousStartMinutes: 60,
+          previousEndMinutes: 180,
+          newStartMinutes: 23 * 60,
+        ),
+        25 * 60,
+      );
+    });
+  });
+
+  group('assignmentEndForEstimate', () {
+    final slotEnd = DateTime(2026, 4, 18, 18);
+
+    test('uses the task estimate', () {
+      expect(
+        assignmentEndForEstimate(
+          start: DateTime(2026, 4, 18, 13),
+          estimatedMinutes: 90,
+          slotEnd: slotEnd,
+        ),
+        DateTime(2026, 4, 18, 14, 30),
+      );
+    });
+
+    test('falls back to 30 minutes when the task has no estimate', () {
+      expect(
+        assignmentEndForEstimate(
+          start: DateTime(2026, 4, 18, 13),
+          estimatedMinutes: 0,
+          slotEnd: slotEnd,
+        ),
+        DateTime(2026, 4, 18, 13, 30),
+      );
+    });
+
+    test('never runs past the slot', () {
+      expect(
+        assignmentEndForEstimate(
+          start: DateTime(2026, 4, 18, 17, 30),
+          estimatedMinutes: 240,
+          slotEnd: slotEnd,
+        ),
+        slotEnd,
+      );
+    });
+
+    test('clamps a start that is already at or past the end of the slot', () {
+      // The old guard gave up here and handed back start + estimate, an
+      // assignment sitting outside the slot it belongs to (M-2).
+      expect(
+        assignmentEndForEstimate(
+          start: slotEnd,
+          estimatedMinutes: 30,
+          slotEnd: slotEnd,
+        ),
+        slotEnd,
+      );
+      expect(
+        assignmentEndForEstimate(
+          start: DateTime(2026, 4, 18, 19),
+          estimatedMinutes: 30,
+          slotEnd: slotEnd,
+        ),
+        slotEnd,
+      );
+    });
+  });
+
+  group('remainingFreeMinutes', () {
+    test('subtracts the assigned minutes', () {
+      expect(remainingFreeMinutes(freeMinutes: 180, assignedMinutes: 45), 135);
+    });
+
+    test('clamps an over-booked day at zero', () {
+      expect(remainingFreeMinutes(freeMinutes: 60, assignedMinutes: 200), 0);
+    });
+  });
+
+  group('formatHoursMinutes', () {
+    test('says it the way a person would', () {
+      // 「0 時間 45 分」 and 「1 時間 0 分」 are what a clock says, not what a
+      // reader says (I-5).
+      const cases = <int, String>{
+        0: '0 分',
+        45: '45 分',
+        60: '1 時間',
+        90: '1 時間 30 分',
+        150: '2 時間 30 分',
+        1500: '25 時間',
+        -5: '0 分',
+      };
+      cases.forEach((minutes, expected) {
+        expect(formatHoursMinutes(minutes), expected, reason: '\$minutes');
+      });
+    });
+  });
 }

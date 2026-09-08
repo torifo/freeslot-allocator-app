@@ -1,8 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
 
 import '../../../core/confirm_dialog.dart';
 import '../../../core/error_view.dart';
@@ -27,10 +27,17 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('TaskMaster'),
+        title: const Text('タスク'),
         actions: [
           IconButton(
-            onPressed: () => context.go('/categories'),
+            // `push`, not `go`, even though /categories is also one of the
+            // shell's five branches (M-7). Reached from here it is a detour
+            // the user finishes and leaves: pushing it above the shell keeps
+            // the task list underneath and gives the screen a back arrow,
+            // where `go` would swap the whole branch and strand the user on
+            // the 設定 tab. The bottom bar and the rail still reach it as a
+            // destination in its own right.
+            onPressed: () => context.push('/categories'),
             icon: const Icon(Icons.tune),
             tooltip: 'カテゴリ設定',
           ),
@@ -50,63 +57,95 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
               ? <TaskKind>[TaskKind.mustDo, TaskKind.wantToDo]
               : <TaskKind>[_filter!];
 
+          // One empty state for the whole screen (M-3): a list with nothing in
+          // it used to say 「まだタスクがありません」 once per section and then
+          // again at the bottom, three ways of saying the same nothing.
+          final isEmpty = visibleTasks.isEmpty;
+
           return ListView(
             padding: const EdgeInsets.all(20),
             children: [
+              // Three chips, three equal columns (M-4). A Wrap with a
+              // half-width override put すべて and やるべきこと on one row and
+              // left やりたいこと stranded on its own.
               LayoutBuilder(
                 builder: (context, constraints) {
-                  final isCompact = constraints.maxWidth < 420;
-                  final chipWidth = isCompact
-                      ? (constraints.maxWidth - 8) / 2
-                      : null;
-                  return Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      _buildFilterChip(
-                        label: 'すべて',
-                        selected: _filter == null,
-                        width: chipWidth,
-                        onSelected: (_) => setState(() => _filter = null),
-                      ),
-                      ...TaskKind.values.map(
-                        (kind) => _buildFilterChip(
-                          label: kind.label,
-                          selected: _filter == kind,
-                          width: chipWidth,
-                          onSelected: (_) => setState(() => _filter = kind),
+                  const gap = 8.0;
+                  final filters = <({String label, TaskKind? kind})>[
+                    (label: 'すべて', kind: null),
+                    for (final kind in TaskKind.values)
+                      (label: kind.label, kind: kind),
+                  ];
+                  // A narrow phone (or a large text scale) cannot give three
+                  // columns enough room for 「やりたいこと」 without cutting the
+                  // word short, so there the chips wrap and keep their own
+                  // natural widths.
+                  if (constraints.maxWidth < 360) {
+                    return Wrap(
+                      spacing: gap,
+                      runSpacing: gap,
+                      children: <Widget>[
+                        for (final filter in filters)
+                          _buildFilterChip(
+                            label: filter.label,
+                            selected: _filter == filter.kind,
+                            onSelected: (_) =>
+                                setState(() => _filter = filter.kind),
+                          ),
+                      ],
+                    );
+                  }
+                  final chipWidth =
+                      (constraints.maxWidth - gap * (filters.length - 1)) /
+                      filters.length;
+                  return Row(
+                    children: <Widget>[
+                      for (final (index, filter) in filters.indexed)
+                        Padding(
+                          padding: EdgeInsets.only(left: index == 0 ? 0 : gap),
+                          child: _buildFilterChip(
+                            label: filter.label,
+                            selected: _filter == filter.kind,
+                            width: chipWidth,
+                            onSelected: (_) =>
+                                setState(() => _filter = filter.kind),
+                          ),
                         ),
-                      ),
                     ],
                   );
                 },
               ),
               const SizedBox(height: 16),
-              ...sections.map((kind) {
-                final sectionTasks = visibleTasks
-                    .where((task) => task.kind == kind)
-                    .toList();
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 16),
-                  child: _TaskSectionCard(
-                    title: kind.label,
-                    tasks: sectionTasks,
-                    categoryNameForTask: (task) => _categoryName(data, task),
-                    onEdit: (task) => _openTaskDialog(context, existing: task),
-                    onDelete: (task) => _confirmDeleteTask(context, task),
-                    onReorder: (orderedIds) => ref
-                        .read(taskMasterControllerProvider.notifier)
-                        .reorderTasks(kind: kind, orderedIds: orderedIds),
-                  ),
-                );
-              }),
-              if (visibleTasks.isEmpty)
-                const Card(
+              if (isEmpty)
+                Card(
                   child: Padding(
-                    padding: EdgeInsets.all(20),
-                    child: Text('タスクはまだありません。画面右下の追加ボタンから登録してください。'),
+                    padding: const EdgeInsets.all(20),
+                    child: Text(
+                      _filter == null
+                          ? 'タスクはまだありません。画面右下の追加ボタンから登録してください。'
+                          : '${_filter!.label}のタスクはまだありません。画面右下の追加ボタンから登録してください。',
+                    ),
                   ),
-                ),
+                )
+              else
+                ...sections.map((kind) {
+                  final sectionTasks = visibleTasks
+                      .where((task) => task.kind == kind)
+                      .toList();
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    child: _TaskSectionCard(
+                      title: kind.label,
+                      tasks: sectionTasks,
+                      categoryNameForTask: (task) => _categoryName(data, task),
+                      onEdit: (task) => _openTaskDialog(context, existing: task),
+                      onDelete: (task) => _confirmDeleteTask(context, task),
+                      onReorder: (orderedIds) => ref
+                          .read(taskMasterControllerProvider.notifier)
+                          .reorderTasks(kind: kind, orderedIds: orderedIds),
+                    ),
+                  );
+                }),
             ],
           );
         },
@@ -124,6 +163,12 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
       return;
     }
     await ref.read(taskMasterControllerProvider.notifier).deleteTask(task.id);
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(
+      this.context,
+    ).showSnackBar(SnackBar(content: Text('「${task.title}」を削除しました')));
   }
 
   Widget _buildFilterChip({
@@ -133,9 +178,19 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
     double? width,
   }) {
     final chip = ChoiceChip(
+      // `double.infinity` rather than the column width again: the label sits
+      // inside the chip's own padding, so repeating the number made every chip
+      // wider than its column (M-4). A label too long for the column is cut
+      // with an ellipsis rather than wrapping and standing taller than its
+      // neighbours.
       label: SizedBox(
-        width: width,
-        child: Text(label, textAlign: TextAlign.center),
+        width: width == null ? null : double.infinity,
+        child: Text(
+          label,
+          textAlign: TextAlign.center,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
       ),
       selected: selected,
       onSelected: onSelected,
@@ -174,6 +229,13 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
             await ref
                 .read(taskMasterControllerProvider.notifier)
                 .addOrUpdateTask(task);
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(existing == null ? 'タスクを追加しました' : 'タスクを保存しました'),
+                ),
+              );
+            }
           } on TaskMasterValidationException catch (error) {
             if (context.mounted) {
               ScaffoldMessenger.of(
@@ -193,6 +255,17 @@ class _TaskMasterScreenState extends ConsumerState<TaskMasterScreen> {
       ),
     );
   }
+}
+
+/// The first non-blank line of a memo, or null when there is nothing to show.
+String? firstMemoLine(String memo) {
+  for (final line in memo.split('\n')) {
+    final trimmed = line.trim();
+    if (trimmed.isNotEmpty) {
+      return trimmed;
+    }
+  }
+  return null;
 }
 
 class _TaskEditDialog extends StatefulWidget {
@@ -215,7 +288,7 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
   late final TextEditingController _titleController;
   late final TextEditingController _memoController;
   late final TextEditingController _estimatedController;
-  late final TextEditingController _priorityController;
+  late int _priority;
   late TaskKind _kind;
   String? _categoryId;
   bool _isSaving = false;
@@ -229,9 +302,7 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
     _estimatedController = TextEditingController(
       text: task?.estimatedMinutes.toString() ?? '',
     );
-    _priorityController = TextEditingController(
-      text: (task?.priority ?? 3).toString(),
-    );
+    _priority = (task?.priority ?? 3).clamp(1, 5);
     _kind = task?.kind ?? TaskKind.mustDo;
     _categoryId = task?.categoryId;
   }
@@ -241,7 +312,6 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
     _titleController.dispose();
     _memoController.dispose();
     _estimatedController.dispose();
-    _priorityController.dispose();
     super.dispose();
   }
 
@@ -250,7 +320,6 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
       return;
     }
     final title = _titleController.text.trim();
-    final priority = int.tryParse(_priorityController.text.trim()) ?? 3;
     final now = DateTime.now();
     setState(() => _isSaving = true);
     try {
@@ -259,7 +328,7 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
           id: widget.initialTask?.id ?? generateId('task'),
           title: title,
           kind: _kind,
-          priority: priority < 1 ? 1 : priority,
+          priority: _priority,
           createdAt: widget.initialTask?.createdAt ?? now,
           updatedAt: now,
           memo: _memoController.text.trim(),
@@ -355,21 +424,54 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
                 onChanged: (value) => setState(() => _categoryId = value),
               ),
               const SizedBox(height: 12),
-              TextFormField(
-                controller: _priorityController,
-                keyboardType: TextInputType.number,
-                textInputAction: TextInputAction.next,
+              // Five buttons rather than a free-text number: 優先度 has exactly
+              // five legal values, and a text field let 「あ」 or 「99」 through
+              // to a silent clamp on save (I-7).
+              InputDecorator(
                 decoration: const InputDecoration(
                   labelText: '優先度',
-                  helperText: '上に並ぶほど優先度が高くなります。あとでドラッグでも調整できます。',
+                  helperText: '1 がいちばん高い優先度です。あとでドラッグでも調整できます。',
+                  // Two lines: at a large text scale the helper used to be cut
+                  // off mid-sentence (I-6).
+                  helperMaxLines: 2,
+                  errorMaxLines: 2,
+                ),
+                child: SegmentedButton<int>(
+                  showSelectedIcon: false,
+                  segments: <ButtonSegment<int>>[
+                    for (var value = 1; value <= 5; value += 1)
+                      ButtonSegment<int>(value: value, label: Text('$value')),
+                  ],
+                  selected: <int>{_priority},
+                  onSelectionChanged: (selection) =>
+                      setState(() => _priority = selection.first),
                 ),
               ),
               const SizedBox(height: 12),
               TextFormField(
                 controller: _estimatedController,
                 keyboardType: TextInputType.number,
+                inputFormatters: <TextInputFormatter>[
+                  FilteringTextInputFormatter.digitsOnly,
+                ],
                 textInputAction: TextInputAction.next,
-                decoration: const InputDecoration(labelText: '見積もり時間（分）'),
+                decoration: const InputDecoration(
+                  labelText: '見積もり時間（分）',
+                  helperText: '空欄は 0 分として扱います。',
+                  helperMaxLines: 2,
+                  errorMaxLines: 2,
+                ),
+                validator: (value) {
+                  final text = value?.trim() ?? '';
+                  if (text.isEmpty) {
+                    return null;
+                  }
+                  final minutes = int.tryParse(text);
+                  if (minutes == null || minutes > 1440) {
+                    return '見積もりは 0〜1440 分で入力してください。';
+                  }
+                  return null;
+                },
               ),
               const SizedBox(height: 12),
               TextFormField(
@@ -378,7 +480,12 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
                 textInputAction: TextInputAction.newline,
                 minLines: 3,
                 maxLines: 4,
-                decoration: const InputDecoration(labelText: 'メモ'),
+                decoration: const InputDecoration(
+                  labelText: 'メモ',
+                  // Without this the label floats mid-height against a
+                  // multi-line box (M-16).
+                  alignLabelWithHint: true,
+                ),
               ),
             ],
           ),
@@ -439,14 +546,16 @@ class _TaskSectionCard extends StatelessWidget {
           children: [
             Text(title, style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 4),
-            const Text('上にあるタスクほど優先度が高くなります。ドラッグで並び替えできます。'),
-            const SizedBox(height: 12),
+            // The drag hint is advice about a gesture; with nothing to drag it
+            // was just noise above an empty box (M-3).
             if (tasks.isEmpty)
               const Padding(
-                padding: EdgeInsets.only(bottom: 8),
+                padding: EdgeInsets.only(top: 4, bottom: 8),
                 child: Text('まだタスクがありません。'),
               )
-            else
+            else ...[
+              const Text('上にあるタスクほど優先度が高くなります。ドラッグで並び替えできます。'),
+              const SizedBox(height: 12),
               ReorderableListView.builder(
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
@@ -475,14 +584,19 @@ class _TaskSectionCard extends StatelessWidget {
                     child: ListTile(
                       contentPadding: const EdgeInsets.only(left: 12, right: 4),
                       title: Text(task.title),
+                      // The update timestamp told the user nothing they could
+                      // act on; the first line of the memo is what they wrote
+                      // to remind themselves (I-15 / M-1).
                       subtitle: Text(
                         [
                           categoryNameForTask(task) ?? '未分類',
                           '優先度 ${task.priority}',
                           if (task.estimatedMinutes > 0)
                             '${task.estimatedMinutes}分',
-                          DateFormat('yyyy/MM/dd HH:mm').format(task.updatedAt.toLocal()),
+                          ?firstMemoLine(task.memo),
                         ].join(' / '),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                       ),
                       isThreeLine: task.memo.isNotEmpty,
                       trailing: Row(
@@ -517,6 +631,7 @@ class _TaskSectionCard extends StatelessWidget {
                   );
                 },
               ),
+            ],
           ],
         ),
       ),

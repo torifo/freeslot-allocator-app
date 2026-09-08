@@ -50,8 +50,8 @@ void main() {
     expect(find.textContaining('「直前の同期前に戻す」で 1 回だけ元に戻せます'), findsOneWidget);
   });
 
-  testWidgets('やめる returns nothing', (tester) async {
-    expect(await _open(tester, 'やめる'), isNull);
+  testWidgets('キャンセル returns nothing', (tester) async {
+    expect(await _open(tester, 'キャンセル'), isNull);
   });
 
   testWidgets('PC の状態で置き換える returns take_hub', (tester) async {

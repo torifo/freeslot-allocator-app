@@ -254,6 +254,10 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
               padding: const EdgeInsets.all(16),
               children: <Widget>[
                 _statusCard(settings),
+                if (!settings.isPaired && (settings.host ?? '').isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  _unpairedHostCard(),
+                ],
                 const SizedBox(height: 16),
                 _lanCard(settings),
                 const SizedBox(height: 16),
@@ -299,6 +303,47 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
     ),
   );
 
+  /// A host was typed in but the pairing never happened.
+  ///
+  /// The two are separate steps and the screen used to show neither: 「未ペア
+  /// リング」 above a filled-in 接続先 read like a contradiction rather than
+  /// like a job half done (C-2).
+  Widget _unpairedHostCard() => Card(
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              const Icon(Icons.info_outline),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  '接続先は設定済みですが、まだペアリングしていません。'
+                  'PC のペアリング画面の QR を読み取るか、URL を手入力してください。',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton.tonalIcon(
+              onPressed: () async {
+                await context.push<void>('/sync/pair');
+                await _reload();
+              },
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('ペアリングへ進む'),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+
   Widget _lanCard(SyncSettings s) => Card(
     child: Column(
       children: <Widget>[
@@ -327,7 +372,7 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
         ListTile(
           leading: const Icon(Icons.edit),
           title: const Text('接続先を手入力'),
-          subtitle: const Text('エミュレーターや IP が変わったとき'),
+          subtitle: const Text('QR が読めないとき（PC の IP を直接入力）'),
           onTap: () => _editHost(s),
         ),
         if (s.isPaired)
@@ -389,8 +434,11 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
     // and a controller disposed on the way out would be used after disposal.
     final host = _hostField ??= TextEditingController();
     final port = _portField ??= TextEditingController();
-    host.text = s.host ?? '10.0.2.2';
-    port.text = '${s.port}';
+    // Empty, with the shape of an address as a hint: `10.0.2.2` is the
+    // Android emulator's view of its host machine and meant nothing to anyone
+    // holding a real phone (C-2 / I-8).
+    host.text = s.host ?? '';
+    port.text = '${s.port == 0 ? 47820 : s.port}';
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -398,12 +446,15 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
           // Validated in the dialog rather than swallowed on the way out: an
           // empty host or a port outside 1..65535 cannot be dialled at all, and
           // silently keeping the old value would look like the edit was saved.
-          final hostError = host.text.trim().isEmpty ? 'ホストを入力してください' : null;
+          final hostError = hostValidationError(host.text);
           final parsed = int.tryParse(port.text.trim());
           final portError = parsed == null || parsed < 1 || parsed > 65535
               ? 'ポートは 1〜65535 の数字です'
               : null;
           return AlertDialog(
+            // Scrollable so the keyboard pushes the fields rather than hiding
+            // the title behind itself (M-16).
+            scrollable: true,
             title: const Text('接続先'),
             content: Column(
               mainAxisSize: MainAxisSize.min,
@@ -414,7 +465,9 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
                   onChanged: (_) => setDialogState(() {}),
                   decoration: InputDecoration(
                     labelText: 'ホスト（IP）',
+                    hintText: '192.168.x.x',
                     errorText: hostError,
+                    errorMaxLines: 2,
                   ),
                 ),
                 TextField(
@@ -423,7 +476,9 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
                   onChanged: (_) => setDialogState(() {}),
                   decoration: InputDecoration(
                     labelText: 'ポート',
+                    hintText: '47820',
                     errorText: portError,
+                    errorMaxLines: 2,
                   ),
                 ),
               ],
@@ -431,7 +486,7 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
             actions: <Widget>[
               TextButton(
                 onPressed: () => Navigator.of(ctx).pop(false),
-                child: const Text('やめる'),
+                child: const Text('キャンセル'),
               ),
               FilledButton(
                 onPressed: hostError == null && portError == null
@@ -447,12 +502,63 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
     final newHost = host.text.trim();
     final newPort = int.tryParse(port.text.trim());
     if (ok != true) return;
-    if (newHost.isEmpty || newPort == null || newPort < 1 || newPort > 65535) {
+    if (hostValidationError(newHost) != null ||
+        newPort == null ||
+        newPort < 1 ||
+        newPort > 65535) {
       return;
     }
     await ref.read(syncSettingsStoreProvider).save(
       s.copyWith(host: newHost, port: newPort),
     );
     await _reload();
+    if (!mounted) return;
+    // Saving used to leave the dialog and say nothing at all (C-2).
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('接続先を保存しました')));
   }
+}
+
+/// An IPv4 or IPv6 address, or a host name of the shape a LAN actually hands
+/// out — the value is dialled directly, so anything else can only fail later,
+/// at a point where the error says 「PC に接続できません」 and blames the network.
+///
+/// Surrounding whitespace is trimmed rather than rejected: it is what a paste
+/// from a terminal or a chat message carries, and telling the user off for it
+/// when the fix is obvious helps nobody (I-3).
+final RegExp _ipv4 = RegExp(
+  r'^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$',
+);
+
+/// Anything made only of digits and dots is meant to be an IPv4 address, so it
+/// is held to [_ipv4] rather than being waved through as a host name — the
+/// hostname grammar happily accepts `999.999.999.999` and `192.168` (I-4).
+final RegExp _dottedDigits = RegExp(r'^[\d.]+$');
+final RegExp _hostname = RegExp(
+  r'^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$',
+);
+
+/// Deliberately loose: the shapes IPv6 takes (`::1`, `fe80::1%en0`-less
+/// literals, an embedded IPv4 tail) are more than a regexp should arbitrate
+/// here, and the socket rejects a wrong one with a clear error anyway.
+final RegExp _ipv6ish = RegExp(r'^[0-9A-Fa-f:.]+$');
+
+/// Why [raw] cannot be used as a hub address, or null when it can.
+String? hostValidationError(String raw) {
+  final value = raw.trim();
+  if (value.isEmpty) return 'ホストを入力してください';
+  const message = 'IP アドレス（192.168.x.x）かホスト名を入力してください';
+  // Brackets are how an IPv6 literal is written next to a port; the address
+  // itself is what gets dialled.
+  final bare = value.startsWith('[') && value.endsWith(']')
+      ? value.substring(1, value.length - 1)
+      : value;
+  if (bare.contains(':')) {
+    return _ipv6ish.hasMatch(bare) && !bare.contains(':::') ? null : message;
+  }
+  if (_dottedDigits.hasMatch(bare)) {
+    return _ipv4.hasMatch(bare) ? null : message;
+  }
+  return _hostname.hasMatch(bare) ? null : message;
 }

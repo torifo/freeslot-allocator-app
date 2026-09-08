@@ -56,7 +56,9 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
           IconButton(
             onPressed: () => _duplicateFromAnotherDate(),
             icon: const Icon(Icons.content_copy_outlined),
-            tooltip: '別日に複製',
+            // The action reads *from* another day into the one on screen;
+            // 「別日に複製」 said the opposite (I-10).
+            tooltip: '別日から取り込む',
           ),
           IconButton(
             onPressed: () => _pickDate(context),
@@ -78,7 +80,7 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
               ? Icons.calendar_month_outlined
               : Icons.add_alarm_outlined,
         ),
-        label: Text(currentDailyPlan == null ? '当日計画を準備' : '自由時間枠を追加'),
+        label: Text(currentDailyPlan == null ? '当日計画を作成' : '自由時間枠を追加'),
       ),
       body: dailyPlanState.when(
         data: (dailyPlanData) => taskMasterState.when(
@@ -90,13 +92,18 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
 
             return ListView(
               // Bottom room for the extended FAB so the last slot stays
-              // reachable.
-              padding: const EdgeInsets.fromLTRB(20, 20, 20, 88),
+              // reachable — 88 still left the FAB clipping the final row at a
+              // large text scale (I-11).
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 96),
               children: [
                 _DateSummaryCard(
                   date: _selectedDate,
                   plan: plan,
                   slotCount: slots.length,
+                  freeMinutes: slots.fold<int>(
+                    0,
+                    (sum, slot) => sum + slot.durationMinutes,
+                  ),
                   assignedMinutes: slots.fold<int>(
                     0,
                     (sum, slot) =>
@@ -132,18 +139,16 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'この日の DailyPlan はまだありません。',
+                            'この日の日次計画はまだありません。',
                             style: Theme.of(context).textTheme.titleMedium,
                           ),
                           const SizedBox(height: 8),
-                          const Text(
-                            '先に当日計画を準備し、その後モーダルから自由時間の開始・終了を選択して追加します。',
-                          ),
+                          const Text('まず当日計画を作成し、そのあと自由時間の開始・終了を選んで枠を追加します。'),
                           const SizedBox(height: 12),
                           FilledButton.tonalIcon(
                             onPressed: _createPlanForSelectedDate,
                             icon: const Icon(Icons.calendar_month_outlined),
-                            label: const Text('当日計画を準備'),
+                            label: const Text('当日計画を作成'),
                           ),
                         ],
                       ),
@@ -243,32 +248,44 @@ class _DailyPlanScreenState extends ConsumerState<DailyPlanScreen> {
   }
 
   Future<void> _duplicateFromAnotherDate() async {
-    final sourceDate = await showDatePicker(
-      context: context,
-      initialDate: _selectedDate.subtract(const Duration(days: 1)),
-      firstDate: DateTime(2024),
-      lastDate: DateTime(2035),
-      helpText: '複製元の日付を選択',
-    );
-    if (sourceDate == null) {
-      return;
-    }
-
-    final normalizedSource = dateOnly(sourceDate);
     final currentState = ref
         .read(dailyPlanControllerProvider)
         .maybeWhen(data: (value) => value, orElse: () => null);
     if (currentState == null) {
       return;
     }
+    // Only days that actually hold a plan can be imported from, so the picker
+    // greys the rest out instead of letting the user find that out afterwards
+    // from a snack bar (I-10).
+    final daysWithPlan = <DateTime>{
+      for (final candidate in currentState.plans) dateOnly(candidate.date),
+    };
+    if (daysWithPlan.where((day) => day != _selectedDate).isEmpty) {
+      _showMessage('取り込み元になる日次計画がまだありません。');
+      return;
+    }
+    final sourceDate = await showDatePicker(
+      context: context,
+      initialDate: null,
+      firstDate: DateTime(2024),
+      lastDate: DateTime(2035),
+      helpText: '取り込み元の日付を選択',
+      selectableDayPredicate: (day) =>
+          daysWithPlan.contains(dateOnly(day)) && dateOnly(day) != _selectedDate,
+    );
+    if (sourceDate == null) {
+      return;
+    }
+
+    final normalizedSource = dateOnly(sourceDate);
     final sourcePlan = currentState.planForDate(normalizedSource);
     if (sourcePlan == null) {
-      _showMessage('複製元の DailyPlan が見つかりません。');
+      _showMessage('取り込み元の日次計画が見つかりません。');
       return;
     }
     final sourceSlots = currentState.slotsForPlan(sourcePlan.id);
     if (sourceSlots.isEmpty) {
-      _showMessage('複製元の DailyPlan に自由時間枠がありません。');
+      _showMessage('取り込み元の日次計画に自由時間枠がありません。');
       return;
     }
     final sourceAssignmentsBySlot = <String, List<SlotTaskAssignment>>{
@@ -482,6 +499,7 @@ class _DateSummaryCard extends StatelessWidget {
     required this.date,
     required this.plan,
     required this.slotCount,
+    required this.freeMinutes,
     required this.assignedMinutes,
     required this.primaryActionLabel,
     required this.onPrimaryAction,
@@ -492,6 +510,7 @@ class _DateSummaryCard extends StatelessWidget {
   final DateTime date;
   final DailyPlan? plan;
   final int slotCount;
+  final int freeMinutes;
   final int assignedMinutes;
   final String primaryActionLabel;
   final VoidCallback onPrimaryAction;
@@ -501,6 +520,14 @@ class _DateSummaryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasConfiguredSlots = plan != null && slotCount > 0;
+    // Three states, not two: a day with no plan at all and a plan with no
+    // slots in it are different problems with different next steps, and 「枠
+    // 未設定」 on a day that has no plan pointed at the wrong one (M-6).
+    final badgeLabel = plan == null
+        ? '未作成'
+        : hasConfiguredSlots
+        ? '枠 $slotCount 件'
+        : '枠 未設定';
 
     return Container(
       padding: const EdgeInsets.all(22),
@@ -579,7 +606,10 @@ class _DateSummaryCard extends StatelessWidget {
                       borderRadius: BorderRadius.circular(999),
                     ),
                     child: Text(
-                      hasConfiguredSlots ? '作成済み' : '未作成',
+                      // 「作成済み」 was true of a plan with no slots in it,
+                      // which is the state the user most needs to notice
+                      // (I-14).
+                      badgeLabel,
                       style: japaneseSerifTextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.w600,
@@ -591,11 +621,29 @@ class _DateSummaryCard extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 16),
-              Row(
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
                 children: [
-                  _HeroPill(label: '自由時間枠', value: '$slotCount 件'),
-                  const SizedBox(width: 10),
-                  _HeroPill(label: '割り当て', value: '$assignedMinutes 分'),
+                  _HeroPill(
+                    label: '自由時間',
+                    value: formatHoursMinutes(freeMinutes),
+                  ),
+                  _HeroPill(
+                    label: '割り当て',
+                    value: formatHoursMinutes(assignedMinutes),
+                  ),
+                  // The number the user is actually after: what is still free
+                  // once everything already planned is taken out (M-12).
+                  _HeroPill(
+                    label: '残り',
+                    value: formatHoursMinutes(
+                      remainingFreeMinutes(
+                        freeMinutes: freeMinutes,
+                        assignedMinutes: assignedMinutes,
+                      ),
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: 16),
@@ -609,7 +657,7 @@ class _DateSummaryCard extends StatelessWidget {
                     onTap: onPrimaryAction,
                   ),
                   _HeroButton(label: '別日を作成', onTap: onCreateAnotherPlan),
-                  _HeroButton(label: '別日に複製', onTap: onDuplicatePlan),
+                  _HeroButton(label: '別日から取り込む', onTap: onDuplicatePlan),
                 ],
               ),
             ],
@@ -783,7 +831,7 @@ class _DailyTimelineSectionState extends State<_DailyTimelineSection> {
             Text('自由時間タイムライン', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 4),
             Text(
-              'Googleカレンダーのように時間軸で自由時間枠を確認できます。',
+              '時間軸の上で、その日の自由時間枠を確認できます。',
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 12),
@@ -861,8 +909,14 @@ class _DailyTimelineSectionState extends State<_DailyTimelineSection> {
                                   right: 0,
                                   height: height.clamp(48, double.infinity),
                                   child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
+                                    // Right padding as well as left: the block
+                                    // used to run flush to the grid's rounded
+                                    // edge and read as if it escaped it (M-16).
+                                    padding: const EdgeInsets.fromLTRB(
+                                      8,
+                                      0,
+                                      12,
+                                      0,
                                     ),
                                     child: _TimelineSlotBlock(
                                       slot: slot,
@@ -885,7 +939,7 @@ class _DailyTimelineSectionState extends State<_DailyTimelineSection> {
             ),
             const SizedBox(height: 12),
             Text(
-              'タイムラインは自由時間の見え方を確認するための表示です。自由時間枠の登録は上部のボタンからモーダルで行います。',
+              'タイムラインは見え方の確認用です。自由時間枠の登録は上部のボタンから行います。',
               style: Theme.of(context).textTheme.bodySmall,
             ),
             if (widget.slots.isNotEmpty) ...[
@@ -1074,7 +1128,9 @@ class _TimelineSlotBlock extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: AppColors.cream,
+      // A tint of the accent rather than plain cream: on the cream grid the
+      // block had nothing but a hairline to separate it from the background.
+      color: AppColors.claySoft.withValues(alpha: 0.55),
       borderRadius: BorderRadius.circular(12),
       shadowColor: Colors.transparent,
       child: InkWell(
@@ -1231,44 +1287,62 @@ class _SlotCard extends StatelessWidget {
               const Text('まだ予定は入っていません。'),
               const SizedBox(height: 8),
               _AssignmentDropZone(
+                active: isDragging,
                 onAccept: (assignment) => onMoveAssignment(assignment),
                 label: 'ここにドロップして先頭から配置',
-                isDragging: isDragging,
               ),
             ] else ...[
               const Text('長押しでドラッグすると、各予定の手前か末尾に再配置できます。'),
-              if (containsDraggedAssignment) ...[
-                const SizedBox(height: 8),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
-                  ),
-                  decoration: BoxDecoration(
-                    color: colorScheme.primaryContainer.withValues(alpha: 0.55),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    '移動中: ドロップ先を選ぶと、この枠の予定順を組み替えます。',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: colorScheme.onPrimaryContainer,
-                    ),
-                  ),
-                ),
-              ],
+              // Like the drop zones, this grows out of nothing rather than
+              // appearing at full height under the finger that just started
+              // the drag (I-6).
+              AnimatedSize(
+                duration: const Duration(milliseconds: 140),
+                curve: Curves.easeOut,
+                alignment: Alignment.topCenter,
+                child: !containsDraggedAssignment
+                    ? const SizedBox(width: double.infinity, height: 0)
+                    : Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: colorScheme.primaryContainer.withValues(
+                              alpha: 0.55,
+                            ),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            '移動中: ドロップ先を選ぶと、この枠の予定順を組み替えます。',
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(
+                                  color: colorScheme.onPrimaryContainer,
+                                ),
+                          ),
+                        ),
+                      ),
+              ),
               const SizedBox(height: 8),
               ...assignments.indexed.expand((entry) {
                 final (index, assignment) = entry;
                 return <Widget>[
+                  // Drop targets are scaffolding for a gesture in progress, so
+                  // outside a drag they show nothing (M-16) — but they stay in
+                  // the tree at zero height and grow into place, because a row
+                  // of them appearing on long-press moved the list out from
+                  // under the finger that started the drag (I-6).
                   _AssignmentDropZone(
+                    active: isDragging,
                     onAccept: (dragged) => onMoveAssignment(
                       dragged,
                       beforeAssignmentId: assignment.id,
                     ),
                     label:
                         '${DateFormat('HH:mm').format(assignment.startAt)} の前に挿入',
-                    isDragging: isDragging,
                     noOpAssignmentIds: <String>{
                       assignment.id,
                       if (index > 0) assignments[index - 1].id,
@@ -1330,9 +1404,9 @@ class _SlotCard extends StatelessWidget {
                 ];
               }),
               _AssignmentDropZone(
+                active: isDragging,
                 onAccept: (assignment) => onMoveAssignment(assignment),
                 label: '末尾に移動',
-                isDragging: isDragging,
                 noOpAssignmentIds: <String>{assignments.last.id},
               ),
             ],
@@ -1343,23 +1417,46 @@ class _SlotCard extends StatelessWidget {
   }
 }
 
+/// A place to drop an assignment, present at all times and visible only while
+/// a drag is running.
+///
+/// It used to be added to the tree on drag start, which reflowed the list at
+/// the moment the user's finger was resting on a row: the tile they had picked
+/// up slid away under them. Staying put at zero height and animating open
+/// keeps the layout still (I-6).
 class _AssignmentDropZone extends StatelessWidget {
   const _AssignmentDropZone({
     required this.onAccept,
     required this.label,
-    required this.isDragging,
+    required this.active,
     this.noOpAssignmentIds = const <String>{},
   });
 
   final ValueChanged<SlotTaskAssignment> onAccept;
   final String label;
-  final bool isDragging;
+
+  /// Whether a drag is running. Collapsed and untouchable otherwise.
+  final bool active;
 
   /// Assignments whose drop here would not change the order.
   final Set<String> noOpAssignmentIds;
 
   @override
   Widget build(BuildContext context) {
+    return IgnorePointer(
+      ignoring: !active,
+      child: AnimatedSize(
+        duration: const Duration(milliseconds: 140),
+        curve: Curves.easeOut,
+        alignment: Alignment.topCenter,
+        child: active
+            ? _buildTarget(context)
+            : const SizedBox(width: double.infinity, height: 0),
+      ),
+    );
+  }
+
+  Widget _buildTarget(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     return DragTarget<SlotTaskAssignment>(
       onWillAcceptWithDetails: (details) =>
@@ -1377,18 +1474,12 @@ class _AssignmentDropZone extends StatelessWidget {
           decoration: BoxDecoration(
             color: isActive
                 ? colorScheme.secondaryContainer
-                : (isDragging
-                      ? colorScheme.surfaceContainerHighest.withValues(
-                          alpha: 0.45,
-                        )
-                      : null),
+                : colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
               color: isActive
                   ? colorScheme.secondary
-                  : (isDragging
-                        ? colorScheme.primary.withValues(alpha: 0.55)
-                        : colorScheme.outlineVariant),
+                  : colorScheme.primary.withValues(alpha: 0.55),
               width: isActive ? 2 : 1,
             ),
           ),
@@ -1399,19 +1490,17 @@ class _AssignmentDropZone extends StatelessWidget {
                 size: 18,
                 color: isActive
                     ? colorScheme.onSecondaryContainer
-                    : (isDragging ? colorScheme.primary : null),
+                    : colorScheme.primary,
               ),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   isActive ? '$label にドロップ' : label,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    fontWeight: isActive || isDragging
-                        ? FontWeight.w600
-                        : FontWeight.w400,
+                    fontWeight: FontWeight.w600,
                     color: isActive
                         ? colorScheme.onSecondaryContainer
-                        : (isDragging ? colorScheme.primary : null),
+                        : colorScheme.primary,
                   ),
                 ),
               ),
@@ -1705,25 +1794,49 @@ class _SlotEditDialog extends StatefulWidget {
 }
 
 class _SlotEditDialogState extends State<_SlotEditDialog> {
+  /// The last minute of the day after the plan's own — an end cannot be pushed
+  /// past it, because there is no third day to put it on.
+  static const int _maxEndMinutes = 2 * 24 * 60 - 1;
+
   late final TextEditingController _labelController;
   late TimeOfDay _startTime;
   late TimeOfDay _endTime;
   late bool _endNextDay;
   bool _isSaving = false;
 
+  /// Minutes from midnight of the plan's day. The end runs past 1440 when it
+  /// falls on the next day, which is what makes the two comparable at all.
+  int get _startMinutes => _startTime.hour * 60 + _startTime.minute;
+  int get _endMinutes =>
+      _endTime.hour * 60 + _endTime.minute + (_endNextDay ? 24 * 60 : 0);
+
+  void _setEndMinutes(int minutes) {
+    final clamped = minutes.clamp(0, _maxEndMinutes);
+    _endNextDay = clamped >= 24 * 60;
+    final withinDay = clamped % (24 * 60);
+    _endTime = TimeOfDay(hour: withinDay ~/ 60, minute: withinDay % 60);
+  }
+
   @override
   void initState() {
     super.initState();
     final initial = widget.initialSlot;
     _labelController = TextEditingController(text: initial?.label ?? '');
-    final initialStart = initial?.startAt ?? widget.planDate;
-    _startTime = TimeOfDay.fromDateTime(initialStart);
-    final defaultEnd =
-        initial?.endAt ?? initialStart.add(const Duration(hours: 1));
-    _endTime = TimeOfDay.fromDateTime(defaultEnd);
+    if (initial == null) {
+      // A new slot opens on the next half hour rather than on 00:00, which is
+      // never what anyone wanted and cost two pickers to get away from (M-6).
+      final range = defaultFreeSlotRange(DateTime.now(), widget.planDate);
+      _startTime = TimeOfDay.fromDateTime(range.start);
+      _endTime = _startTime;
+      _endNextDay = false;
+      _setEndMinutes(_startMinutes + 60);
+      return;
+    }
+    _startTime = TimeOfDay.fromDateTime(initial.startAt);
+    _endTime = TimeOfDay.fromDateTime(initial.endAt);
     _endNextDay = !dateOnly(
-      defaultEnd,
-    ).isAtSameMomentAs(dateOnly(initialStart));
+      initial.endAt,
+    ).isAtSameMomentAs(dateOnly(initial.startAt));
   }
 
   @override
@@ -1739,11 +1852,15 @@ class _SlotEditDialogState extends State<_SlotEditDialog> {
       widget.planDate.add(Duration(days: _endNextDay ? 1 : 0)),
       _endTime,
     );
+    final durationMinutes = _endMinutes - _startMinutes;
+    final isValid = durationMinutes > 0;
+    final colorScheme = Theme.of(context).colorScheme;
     return AlertDialog(
       scrollable: true,
       title: Text(widget.initialSlot == null ? '自由時間枠を追加' : '自由時間枠を編集'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           TextField(
             controller: _labelController,
@@ -1754,15 +1871,26 @@ class _SlotEditDialogState extends State<_SlotEditDialog> {
             width: double.infinity,
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surfaceContainerLowest,
+              color: colorScheme.surfaceContainerLowest,
               borderRadius: BorderRadius.circular(12),
             ),
             child: Text(
-              '開始と終了はモーダル内で分単位に選択できます。\n'
+              '開始と終了は分単位で選べます。\n'
               '${DateFormat('MM/dd HH:mm').format(startAt)} - ${DateFormat('MM/dd HH:mm').format(endAt)}'
-              ' / ${endAt.difference(startAt).inMinutes}分',
+              // A backwards range used to print as 「-180分」; it now says what
+              // is wrong instead of showing a negative length (I-1).
+              '${isValid ? ' / $durationMinutes分' : ''}',
             ),
           ),
+          if (!isValid) ...[
+            const SizedBox(height: 8),
+            Text(
+              '終了は開始より後にしてください。終了が翌日なら「終了は翌日」を入れてください。',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: colorScheme.error),
+            ),
+          ],
           const SizedBox(height: 12),
           _TimelinePickerRow(
             label: '開始',
@@ -1777,9 +1905,23 @@ class _SlotEditDialogState extends State<_SlotEditDialog> {
                   initialValue: _startTime,
                 ),
               );
-              if (picked != null) {
-                setState(() => _startTime = picked);
+              if (picked == null) {
+                return;
               }
+              setState(() {
+                final previousStart = _startMinutes;
+                final previousEnd = _endMinutes;
+                _startTime = picked;
+                // Dragging the start past the end used to leave a slot of
+                // negative length; the end follows, keeping its old span (I-1).
+                _setEndMinutes(
+                  followingEndMinutes(
+                    previousStartMinutes: previousStart,
+                    previousEndMinutes: previousEnd,
+                    newStartMinutes: _startMinutes,
+                  ),
+                );
+              });
             },
           ),
           const SizedBox(height: 12),
@@ -1815,7 +1957,7 @@ class _SlotEditDialogState extends State<_SlotEditDialog> {
           child: const Text('キャンセル'),
         ),
         FilledButton(
-          onPressed: _isSaving
+          onPressed: _isSaving || !isValid
               ? null
               : () async {
                   setState(() => _isSaving = true);
@@ -2129,14 +2271,19 @@ class _AssignmentEditDialogState extends State<_AssignmentEditDialog> {
     super.initState();
     final initial = widget.initialAssignment;
     final defaultStart = initial?.startAt ?? widget.slot.startAt;
-    final tentativeEnd = widget.slot.startAt.add(const Duration(minutes: 30));
+    final firstTask = initial == null
+        ? widget.taskMasterData.tasks.firstOrNull
+        : null;
+    // A new assignment is as long as the task says it will take; only an
+    // existing one keeps the times it was saved with (I-2).
     final defaultEnd =
         initial?.endAt ??
-        (tentativeEnd.isAfter(widget.slot.endAt)
-            ? widget.slot.endAt
-            : tentativeEnd);
-    final firstTaskId =
-        initial?.taskId ?? widget.taskMasterData.tasks.firstOrNull?.id ?? '';
+        assignmentEndForEstimate(
+          start: defaultStart,
+          estimatedMinutes: firstTask?.estimatedMinutes ?? 0,
+          slotEnd: widget.slot.endAt,
+        );
+    final firstTaskId = initial?.taskId ?? firstTask?.id ?? '';
 
     _titleController = TextEditingController(
       text:
@@ -2176,7 +2323,7 @@ class _AssignmentEditDialogState extends State<_AssignmentEditDialog> {
           if (tasks.isEmpty)
             const Padding(
               padding: EdgeInsets.only(bottom: 12),
-              child: Text('TaskMaster にタスクがありません。先にタスクを作成してください。'),
+              child: Text('タスクがありません。先にタスクを登録してください。'),
             )
           else
             DropdownButtonFormField<String>(
@@ -2199,9 +2346,25 @@ class _AssignmentEditDialogState extends State<_AssignmentEditDialog> {
                     .firstOrNull;
                 setState(() {
                   _taskId = value;
-                  if (task != null) {
-                    _titleController.text = task.title;
+                  if (task == null) {
+                    return;
                   }
+                  _titleController.text = task.title;
+                  // Choosing the source task is also choosing how long it
+                  // takes; the end used to stay on whatever it was (I-2).
+                  final start = _combine(
+                    widget.slot.startAt.add(
+                      Duration(days: _startNextDay ? 1 : 0),
+                    ),
+                    _startTime,
+                  );
+                  final end = assignmentEndForEstimate(
+                    start: start,
+                    estimatedMinutes: task.estimatedMinutes,
+                    slotEnd: widget.slot.endAt,
+                  );
+                  _endTime = TimeOfDay.fromDateTime(end);
+                  _endNextDay = !_isSameDay(end, widget.slot.startAt);
                 });
               },
             ),
@@ -2254,7 +2417,10 @@ class _AssignmentEditDialogState extends State<_AssignmentEditDialog> {
             controller: _memoController,
             minLines: 2,
             maxLines: 3,
-            decoration: const InputDecoration(labelText: 'メモ'),
+            decoration: const InputDecoration(
+              labelText: 'メモ',
+              alignLabelWithHint: true,
+            ),
           ),
           if (selectedTask != null) ...[
             const SizedBox(height: 12),

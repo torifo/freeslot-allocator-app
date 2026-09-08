@@ -3,9 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
+import '../../../app/router.dart';
 import '../../../app/theme.dart';
 import '../../../core/error_view.dart';
 import '../../daily_plan/application/daily_plan_controller.dart';
+import '../../daily_plan/application/daily_plan_logic.dart';
 import '../../daily_plan/domain/daily_plan_models.dart';
 import '../../task_master/application/task_master_controller.dart';
 import '../../task_master/domain/task_models.dart';
@@ -53,10 +55,19 @@ class _NarrowHome extends StatelessWidget {
         ? <FreeTimeSlot>[]
         : planData.slotsForPlan(plan.id);
     final freeMin = slots.fold(0, (s, slot) => s + slot.durationMinutes);
+    final assignedMin = slots.fold(
+      0,
+      (s, slot) =>
+          s +
+          planData
+              .assignmentsForSlot(slot.id)
+              .fold<int>(0, (inner, item) => inner + item.durationMinutes),
+    );
 
     return Scaffold(
       backgroundColor: AppColors.bg,
-      bottomNavigationBar: const HomeBottomNav(),
+      // No bottom navigation here: the router shell owns it now, so it stays
+      // put on every top-level screen instead of only on this one.
       body: SafeArea(
         child: Column(
           children: [
@@ -68,6 +79,7 @@ class _NarrowHome extends StatelessWidget {
                   _HeroCard(
                     date: today,
                     freeMinutes: freeMin,
+                    assignedMinutes: assignedMin,
                     hasPlan: plan != null,
                   ),
                   const SizedBox(height: 20),
@@ -98,6 +110,14 @@ class _WideHome extends StatelessWidget {
         ? <FreeTimeSlot>[]
         : planData.slotsForPlan(plan.id);
     final freeMin = slots.fold(0, (s, slot) => s + slot.durationMinutes);
+    final assignedMin = slots.fold(
+      0,
+      (s, slot) =>
+          s +
+          planData
+              .assignmentsForSlot(slot.id)
+              .fold<int>(0, (inner, item) => inner + item.durationMinutes),
+    );
 
     return Scaffold(
       backgroundColor: AppColors.bg,
@@ -105,7 +125,7 @@ class _WideHome extends StatelessWidget {
         child: Row(
           children: [
             // ── Sidebar ──────────────────────────────────────
-            _Sidebar(taskData: taskData, today: today),
+            _Sidebar(today: today),
 
             // ── Main content ─────────────────────────────────
             Expanded(
@@ -121,6 +141,7 @@ class _WideHome extends StatelessWidget {
                           _HeroCard(
                             date: today,
                             freeMinutes: freeMin,
+                            assignedMinutes: assignedMin,
                             hasPlan: plan != null,
                           ),
                           const SizedBox(height: 24),
@@ -257,26 +278,19 @@ class _WideHeader extends StatelessWidget {
 }
 
 // ── Sidebar (PC) ──────────────────────────────────────────────
+/// The brand column beside the wide home: identity, the category legend and
+/// the week card.
+///
+/// It used to carry its own five nav buttons. Navigation now belongs to the
+/// router shell's [ShellNavigationRail], which every branch gets — two lists
+/// of the same destinations, one of them only ever right on this screen, was
+/// the bug (C-1).
 class _Sidebar extends StatelessWidget {
-  const _Sidebar({required this.taskData, required this.today});
-  final TaskMasterStateData taskData;
+  const _Sidebar({required this.today});
   final DateTime today;
 
   @override
   Widget build(BuildContext context) {
-    final items = [
-      _NavItem(glyph: '○', label: '今日', route: '/', active: true),
-      _NavItem(glyph: '▣', label: '日次計画', route: '/daily-plan'),
-      _NavItem(
-        glyph: '✓',
-        label: 'TaskMaster',
-        route: '/tasks',
-        badge: '${taskData.tasks.length}',
-      ),
-      _NavItem(glyph: '▤', label: 'カテゴリ設定', route: '/categories'),
-      _NavItem(glyph: '◐', label: '週次レポート', route: '/weekly-report'),
-    ];
-
     return Container(
       width: 236,
       decoration: const BoxDecoration(
@@ -315,8 +329,6 @@ class _Sidebar extends StatelessWidget {
               ],
             ),
           ),
-          const Divider(height: 28),
-          ...items.map((item) => _SidebarNavButton(item: item)),
           const Divider(height: 28),
           const Padding(
             padding: EdgeInsets.only(left: 9, bottom: 8),
@@ -385,7 +397,10 @@ class _Sidebar extends StatelessWidget {
                 ),
                 const SizedBox(height: 10),
                 SizedBox(
-                  height: 40,
+                  // Tall enough for the highest bar (30) plus its day label:
+                  // 40 clipped the row by 7 px wherever the wide layout was
+                  // actually rendered.
+                  height: 48,
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: List.generate(7, (i) {
@@ -441,92 +456,17 @@ class _Sidebar extends StatelessWidget {
   }
 }
 
-class _NavItem {
-  const _NavItem({
-    required this.glyph,
-    required this.label,
-    required this.route,
-    this.active = false,
-    this.badge,
-  });
-  final String glyph;
-  final String label;
-  final String route;
-  final bool active;
-  final String? badge;
-}
-
-class _SidebarNavButton extends StatelessWidget {
-  const _SidebarNavButton({required this.item});
-  final _NavItem item;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 1),
-      child: Material(
-        color: item.active ? AppColors.claySoft : Colors.transparent,
-        borderRadius: BorderRadius.circular(7),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(7),
-          onTap: () => context.go(item.route),
-          child: Container(
-            constraints: const BoxConstraints(minHeight: 48),
-            alignment: Alignment.centerLeft,
-            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 8),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 14,
-                  child: Text(
-                    item.glyph,
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: item.active ? AppColors.clay : AppColors.ink3,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 9),
-                Expanded(
-                  child: Text(
-                    item.label,
-                    style: japaneseSerifTextStyle(
-                      fontSize: 13,
-                      fontWeight: item.active
-                          ? FontWeight.w600
-                          : FontWeight.w500,
-                      color: item.active ? AppColors.clayInk : AppColors.ink2,
-                      letterSpacing: 0.4,
-                    ),
-                  ),
-                ),
-                if (item.badge != null)
-                  Text(
-                    item.badge!,
-                    style: japaneseSerifTextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w500,
-                      color: item.active ? AppColors.clayInk : AppColors.ink3,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 // ── Hero card ─────────────────────────────────────────────────
 class _HeroCard extends StatelessWidget {
   const _HeroCard({
     required this.date,
     required this.freeMinutes,
+    required this.assignedMinutes,
     required this.hasPlan,
   });
   final DateTime date;
   final int freeMinutes;
+  final int assignedMinutes;
   final bool hasPlan;
 
   @override
@@ -663,6 +603,16 @@ class _HeroCard extends StatelessWidget {
                   ),
                 ],
               ),
+              // The headline is the day's whole free time; what the user acts
+              // on is what is left of it once the plan is taken out (M-12).
+              if (hasPlan) ...[
+                const SizedBox(height: 10),
+                Text(
+                  '残り ${formatHoursMinutes(remainingFreeMinutes(freeMinutes: freeMinutes, assignedMinutes: assignedMinutes))}'
+                  '（割り当て済み ${formatHoursMinutes(assignedMinutes)}）',
+                  style: TextStyle(fontSize: 11, color: AppColors.onDeepMt),
+                ),
+              ],
               if (!hasPlan) ...[
                 const SizedBox(height: 14),
                 Container(
@@ -675,7 +625,7 @@ class _HeroCard extends StatelessWidget {
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
-                    '今日の計画がまだありません。日次計画から準備しましょう。',
+                    '今日の計画がまだありません。日次計画から作成しましょう。',
                     style: TextStyle(fontSize: 11, color: AppColors.onDeepMt),
                   ),
                 ),
@@ -839,7 +789,7 @@ class _QuickActions extends StatelessWidget {
     ),
     _Action(
       glyph: '任',
-      label: 'TaskMaster を開く',
+      label: 'タスク一覧を開く',
       sub: 'タスクを登録・編集する',
       route: '/tasks',
     ),
@@ -983,15 +933,36 @@ class _ActionRow extends StatelessWidget {
 }
 
 // ── Bottom navigation (mobile) ────────────────────────────────
-/// Bottom navigation of the home screen.
+/// The app's persistent bottom navigation, drawn by the router shell on every
+/// top-level screen rather than by the home screen alone.
+///
+/// [currentIndex] indexes [shellBranchPaths], so the highlighted tab is always
+/// the branch the shell is actually showing — it used to hard-code 今日 as
+/// active, which said "home" on the tasks screen.
 ///
 /// The bar adds the system navigation inset below its 70 px content so the
 /// icons and labels stay above the gesture bar on edge-to-edge devices
 /// (Android 15+); without it the lower half of the row is hidden.
 class HomeBottomNav extends StatelessWidget {
-  const HomeBottomNav({super.key});
+  const HomeBottomNav({super.key, required this.currentIndex, this.onSelect});
+
+  /// Index into [shellBranchPaths] of the destination being shown.
+  final int currentIndex;
+
+  /// How a tap changes destination. Left null (in tests, or anywhere outside
+  /// the shell) the bar falls back to a plain `context.go`.
+  final ValueChanged<int>? onSelect;
 
   static const double contentHeight = 70;
+
+  void _select(BuildContext context, int index) {
+    final select = onSelect;
+    if (select != null) {
+      select(index);
+      return;
+    }
+    context.go(shellBranchPaths[index]);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1009,42 +980,53 @@ class HomeBottomNav extends StatelessWidget {
           _NavBtn(
             icon: Icons.home_outlined,
             label: '今日',
-            active: true,
-            onTap: () => context.go('/'),
+            active: currentIndex == 0,
+            onTap: () => _select(context, 0),
           ),
           _NavBtn(
             icon: Icons.checklist_rounded,
             label: 'タスク',
-            onTap: () => context.go('/tasks'),
+            active: currentIndex == 1,
+            onTap: () => _select(context, 1),
           ),
-          // Center FAB
+          // Centre button — the daily plan, the one screen the whole app is for.
           Expanded(
             child: Center(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => context.go('/daily-plan'),
-                child: SizedBox(
-                  width: 48,
-                  height: 48,
-                  child: Center(
-                    child: Container(
-                      width: 46,
-                      height: 46,
-                      decoration: BoxDecoration(
-                        color: AppColors.clay,
-                        borderRadius: BorderRadius.circular(13),
-                        boxShadow: [
-                          BoxShadow(
-                            color: AppColors.clay.withValues(alpha: 0.4),
-                            blurRadius: 12,
-                            offset: const Offset(0, 3),
-                          ),
-                        ],
-                      ),
-                      child: const Icon(
-                        Icons.add,
-                        color: Colors.white,
-                        size: 22,
+              child: Semantics(
+                selected: currentIndex == 2,
+                button: true,
+                label: '日次計画',
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => _select(context, 2),
+                  child: SizedBox(
+                    width: 48,
+                    height: 48,
+                    child: Center(
+                      child: Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          color: AppColors.clay,
+                          borderRadius: BorderRadius.circular(13),
+                          border: currentIndex == 2
+                              ? Border.all(color: AppColors.clayInk, width: 2)
+                              : null,
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppColors.clay.withValues(alpha: 0.4),
+                              blurRadius: 12,
+                              offset: const Offset(0, 3),
+                            ),
+                          ],
+                        ),
+                        child: Icon(
+                          currentIndex == 2
+                              ? Icons.calendar_today_rounded
+                              : Icons.add,
+                          color: Colors.white,
+                          size: 22,
+                        ),
                       ),
                     ),
                   ),
@@ -1055,15 +1037,84 @@ class HomeBottomNav extends StatelessWidget {
           _NavBtn(
             icon: Icons.bar_chart_rounded,
             label: '週次',
-            onTap: () => context.go('/weekly-report'),
+            active: currentIndex == 3,
+            onTap: () => _select(context, 3),
           ),
           _NavBtn(
             icon: Icons.category_outlined,
             label: '設定',
-            onTap: () => context.go('/categories'),
+            active: currentIndex == 4,
+            onTap: () => _select(context, 4),
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The wide-layout twin of [HomeBottomNav]: the same five destinations, in the
+/// same order, down the left edge.
+///
+/// Built by the router shell, so every top-level screen has it — the sidebar
+/// [_WideHome] used to draw was home's alone, which left the other four
+/// branches with no navigation at all above 800 dp (C-1).
+class ShellNavigationRail extends StatelessWidget {
+  const ShellNavigationRail({
+    super.key,
+    required this.currentIndex,
+    this.onSelect,
+  });
+
+  /// Index into [shellBranchPaths] of the destination being shown.
+  final int currentIndex;
+
+  /// How a tap changes destination; a plain `context.go` outside the shell.
+  final ValueChanged<int>? onSelect;
+
+  static const List<({IconData icon, String label})> destinations =
+      <({IconData icon, String label})>[
+        (icon: Icons.home_outlined, label: '今日'),
+        (icon: Icons.checklist_rounded, label: 'タスク'),
+        (icon: Icons.calendar_today_rounded, label: '日次計画'),
+        (icon: Icons.bar_chart_rounded, label: '週次'),
+        (icon: Icons.category_outlined, label: '設定'),
+      ];
+
+  @override
+  Widget build(BuildContext context) {
+    return NavigationRail(
+      backgroundColor: AppColors.cream,
+      selectedIndex: currentIndex,
+      labelType: NavigationRailLabelType.all,
+      indicatorColor: AppColors.claySoft,
+      selectedIconTheme: const IconThemeData(color: AppColors.clay, size: 22),
+      unselectedIconTheme: const IconThemeData(color: AppColors.ink3, size: 22),
+      selectedLabelTextStyle: const TextStyle(
+        fontSize: 11,
+        color: AppColors.clay,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 0.4,
+      ),
+      unselectedLabelTextStyle: const TextStyle(
+        fontSize: 11,
+        color: AppColors.ink3,
+        letterSpacing: 0.4,
+      ),
+      onDestinationSelected: (index) {
+        final select = onSelect;
+        if (select != null) {
+          select(index);
+          return;
+        }
+        context.go(shellBranchPaths[index]);
+      },
+      destinations: <NavigationRailDestination>[
+        for (final destination in destinations)
+          NavigationRailDestination(
+            icon: Icon(destination.icon),
+            label: Text(destination.label),
+          ),
+      ],
     );
   }
 }

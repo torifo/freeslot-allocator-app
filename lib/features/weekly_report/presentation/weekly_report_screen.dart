@@ -116,14 +116,14 @@ class _WeeklyReportScreenState extends ConsumerState<WeeklyReportScreen> {
                 Card(
                   child: ListTile(
                     title: const Text('この週の割り当て時間'),
-                    subtitle: const Text('DailyPlan に入っている実割り当ての合計'),
+                    subtitle: const Text('日次計画に入っている実割り当ての合計'),
                     trailing: Text('$plannedMinutes分'),
                   ),
                 ),
                 const SizedBox(height: 12),
                 Card(
                   child: ListTile(
-                    title: const Text('TaskMaster 見積もり総量'),
+                    title: const Text('タスクの見積もり総量'),
                     subtitle: const Text('この週に割り当てた予定の見積もり合計'),
                     trailing: Text('$totalEstimateMinutes分'),
                   ),

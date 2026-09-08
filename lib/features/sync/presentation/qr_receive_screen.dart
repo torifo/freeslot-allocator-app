@@ -1,3 +1,6 @@
+import 'dart:io' show Platform;
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -23,7 +26,8 @@ class QrReceiveScreen extends ConsumerStatefulWidget {
   ConsumerState<QrReceiveScreen> createState() => _QrReceiveScreenState();
 }
 
-class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen> {
+class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen>
+    with WidgetsBindingObserver {
   final QrFrameSet _frames = QrFrameSet();
   final SyncProgressController _progress = SyncProgressController();
 
@@ -34,17 +38,60 @@ class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen> {
   bool _busy = false;
   String? _note;
 
+  /// True once the camera has reported it cannot run. The progress ticker is
+  /// stopped at the same time: a scan that can never start is a failure, not a
+  /// slow one, and the panel used to sit there saying 「時間がかかっています」
+  /// under a permission error (I-9).
+  bool _cameraFailed = false;
+
+  /// Bumped on every retry so the scanner subtree is built fresh: reusing the
+  /// old element would leave the plugin sitting on the camera it already
+  /// failed to open.
+  int _scanAttempt = 0;
+
+  /// The other way of getting the data across, named for the platform the user
+  /// is actually holding rather than for both at once.
+  String get _fallbackAction =>
+      !kIsWeb && Platform.isMacOS ? '「ファイルから取り込む」' : '「PC へ書き出す」';
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _progress.start(SyncKind.qr);
     _progress.stage(SyncStage.scanning);
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _progress.dispose();
     super.dispose();
+  }
+
+  /// Coming back from the settings app is the usual way a camera permission
+  /// gets granted, so the screen tries again by itself rather than making the
+  /// user find the button.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _cameraFailed) {
+      _retryCamera();
+    }
+  }
+
+  /// Puts the camera back in play after it refused to start (I-2).
+  ///
+  /// The panel is started over rather than left saying 失敗: the user asked for
+  /// another attempt, and a stale failure under a live preview reads as if the
+  /// retry did nothing.
+  void _retryCamera() {
+    if (!_cameraFailed) return;
+    setState(() {
+      _cameraFailed = false;
+      _scanAttempt += 1;
+    });
+    _progress.start(SyncKind.qr);
+    _progress.stage(SyncStage.scanning);
   }
 
   Future<void> _ingest(List<String> codes) async {
@@ -188,11 +235,18 @@ class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen> {
         children: <Widget>[
           Text(
             scanner.isAvailable
-                ? 'PC の Claude Code で sync_status を実行し、lan.qrPage の URL を開いて、'
-                  'その画面にカメラを向け続けてください。コマは繰り返し表示されるので、順番は気にしなくて大丈夫です。'
+                // No tool names here: `sync_status` and `lan.qrPage` belong to
+                // the hub's own guide (`McpGuideSection`), not to the screen a
+                // phone user is standing in front of (C-1).
+                ? 'PC 側で QR 画面を開き、この画面のカメラを向け続けてください。'
+                  '（PC の Claude Code をお使いの場合は「PC と同期」の案内を参照）\n'
+                  'コマは繰り返し表示されるので、順番は気にしなくて大丈夫です。'
                 : 'この端末にはカメラがないため QR では受け取れません。'
-                  'PC の「ファイルから取り込む」か LAN 同期を使ってください。',
+                  '$_fallbackActionか LAN 同期を使ってください。',
           ),
+          // Rendered while the camera is failing too: the explanation of what
+          // went wrong belongs where the preview would have been, next to the
+          // button that tries again (I-2).
           if (scanner.isAvailable && !_done) ...<Widget>[
             const SizedBox(height: 12),
             SizedBox(
@@ -203,15 +257,28 @@ class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen> {
                   .clamp(160.0, 420.0),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(8),
-                child: scanner.build(
-                  onCodes: _ingest,
-                  // The hub flips frames every 200–1000 ms; the plugin's default
-                  // 250 ms throttle would drop whole frames of that animation.
-                  speed: QrScanSpeed.unrestricted,
-                  errorBuilder: _cameraError,
+                child: KeyedSubtree(
+                  key: ValueKey<int>(_scanAttempt),
+                  child: scanner.build(
+                    onCodes: _ingest,
+                    // The hub flips frames every 200–1000 ms; the plugin's
+                    // default 250 ms throttle would drop whole frames of that
+                    // animation.
+                    speed: QrScanSpeed.unrestricted,
+                    errorBuilder: _cameraError,
+                  ),
                 ),
               ),
             ),
+            if (_cameraFailed)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: FilledButton.icon(
+                  onPressed: _retryCamera,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('もう一度試す'),
+                ),
+              ),
           ],
           SyncProgressPanel(
             controller: _progress,
@@ -231,22 +298,31 @@ class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen> {
     );
   }
 
-  Widget _cameraError(BuildContext context, QrScannerError error) => ColoredBox(
-    color: Theme.of(context).colorScheme.surfaceContainerHighest,
-    child: Center(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Text(
-          error == QrScannerError.permissionDenied
-              // No `openAppSettings` here: `permission_handler` is not a
-              // dependency of this app, and the other two routes work today.
-              ? 'カメラの使用が許可されていません。\n'
-                '端末の設定アプリでこのアプリのカメラを許可するか、'
-                '「ファイルから取り込む」か LAN 同期を使ってください。'
-              : syncErrorMessage('camera'),
-          textAlign: TextAlign.center,
+  Widget _cameraError(BuildContext context, QrScannerError error) {
+    // No `openAppSettings` here: `permission_handler` is not a dependency of
+    // this app, and the other two routes work today.
+    final message = error == QrScannerError.permissionDenied
+        ? 'カメラの使用が許可されていません。\n'
+              '端末の設定アプリでこのアプリのカメラを許可するか、'
+              '$_fallbackActionか LAN 同期を使ってください。'
+        : '${syncErrorMessage('camera')}\n$_fallbackActionか LAN 同期を使ってください。';
+    // Reported during a build, so the panel is moved to 失敗 after this frame
+    // rather than inside it.
+    if (!_cameraFailed) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _cameraFailed) return;
+        setState(() => _cameraFailed = true);
+        _progress.fail('camera', message);
+      });
+    }
+    return ColoredBox(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Text(message, textAlign: TextAlign.center),
         ),
       ),
-    ),
-  );
+    );
+  }
 }

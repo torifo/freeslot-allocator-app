@@ -10,7 +10,9 @@ import 'package:frelocator/services/sync/file_exporter.dart';
 import 'package:frelocator/services/sync/sync_document.dart';
 
 SyncDocument _doc({String deviceId = 'android-1'}) => SyncDocument(
-  exportedAt: DateTime.utc(2026, 9, 9, 1, 2, 3),
+  // A local wall time, because the file name is stamped in local time; the
+  // JSON assertions below use the matching UTC instant.
+  exportedAt: DateTime(2026, 9, 9, 1, 2, 3),
   deviceId: deviceId,
   taskMaster: TaskMasterStateData.initial(),
   dailyPlan: DailyPlanStateData.initial(),
@@ -88,17 +90,20 @@ void main() {
     expect(json['deviceId'], 'android-1');
     // The hub merges on `settings`, so it must never be omitted.
     expect((json['taskMaster'] as Map<String, dynamic>)['settings'], isNotNull);
-    expect(json['exportedAt'], '2026-09-09T01:02:03.000Z');
+    expect(
+      json['exportedAt'],
+      DateTime(2026, 9, 9, 1, 2, 3).toUtc().toIso8601String(),
+    );
   });
 
-  test('stamps the name in UTC even when the document carries a local time', () {
-    final local = SyncDocument(
-      exportedAt: DateTime.utc(2026, 9, 9, 1, 2, 3).toLocal(),
+  test('stamps the name in local time even from a UTC document', () {
+    final utc = SyncDocument(
+      exportedAt: DateTime(2026, 9, 9, 1, 2, 3).toUtc(),
       deviceId: 'd',
       taskMaster: TaskMasterStateData.initial(),
       dailyPlan: DailyPlanStateData.initial(),
     );
-    expect(exportFileName(local), 'frelocator-d-20260909-010203.json');
+    expect(exportFileName(utc), 'frelocator-d-20260909-010203.json');
   });
 
   test('a device id can never steer the path', () {
@@ -114,7 +119,7 @@ void main() {
     final path = await writeExportFile(_doc(), directory: dir.path);
     final read = await readImportFile(path);
     expect(read.deviceId, 'android-1');
-    expect(read.exportedAt, DateTime.utc(2026, 9, 9, 1, 2, 3));
+    expect(read.exportedAt, DateTime(2026, 9, 9, 1, 2, 3).toUtc());
   });
 
   test('readImportFile validates strictly', () async {

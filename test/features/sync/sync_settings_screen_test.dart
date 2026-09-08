@@ -519,6 +519,24 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.widget<FilledButton>(save).onPressed, isNull);
 
+    // A pasted address with a stray space is trimmed, not refused (I-3).
+    await tester.enterText(portField, '47999');
+    await tester.enterText(hostField, '192.168.1.99 ');
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilledButton>(save).onPressed, isNotNull);
+
+    // Neither an address nor a host name: it can only fail later, at a point
+    // where the error would blame the network (C-2).
+    await tester.enterText(hostField, '999.999.999.999');
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilledButton>(save).onPressed, isNull);
+
+    await tester.enterText(hostField, '999.1.1.1/etc');
+    await tester.pumpAndSettle();
+    expect(find.textContaining('IP アドレス'), findsOneWidget);
+    expect(tester.widget<FilledButton>(save).onPressed, isNull);
+
+    await tester.enterText(hostField, '192.168.1.99');
     await tester.enterText(portField, '47999');
     await tester.pumpAndSettle();
     await tester.tap(find.text('保存'));
@@ -527,6 +545,48 @@ void main() {
     final saved = await SyncSettingsStore().load();
     expect(saved.host, '192.168.1.99');
     expect(saved.port, 47999);
+    // Saving used to say nothing at all (C-2).
+    expect(find.text('接続先を保存しました'), findsOneWidget);
+  });
+
+  testWidgets('接続先を手入力 opens empty on a phone that has never paired', (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final container = await testContainer();
+    await _pumpScreen(tester, container);
+
+    await tester.tap(find.text('接続先を手入力'));
+    await tester.pumpAndSettle();
+
+    // Not `10.0.2.2`: that is the Android emulator's view of its host machine
+    // and meant nothing to anyone holding a real phone (C-2 / I-8).
+    final host = tester.widget<TextField>(find.byType(TextField).at(0));
+    expect(host.controller!.text, isEmpty);
+    expect(host.decoration!.hintText, '192.168.x.x');
+    final port = tester.widget<TextField>(find.byType(TextField).at(1));
+    expect(port.controller!.text, '47820');
+  });
+
+  testWidgets('a host without a pairing says so and offers the way out', (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    await SyncSettingsStore().save(const SyncSettings(host: '192.168.1.50'));
+    final container = await testContainer();
+    await _pumpScreen(tester, container);
+
+    expect(find.text('未ペアリング'), findsOneWidget);
+    expect(
+      find.textContaining('接続先は設定済みですが、まだペアリングしていません。'),
+      findsOneWidget,
+    );
+    expect(find.text('ペアリングへ進む'), findsOneWidget);
+  });
+
+  testWidgets('the sync screen names no hub tool outside the macOS guide', (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final container = await testContainer();
+    await _pumpScreen(tester, container);
+
+    expect(find.textContaining('エミュレーター'), findsNothing);
+    expect(find.text('QR が読めないとき（PC の IP を直接入力）'), findsOneWidget);
   });
 
   testWidgets('ファイルから取り込む reports a picker refusal without opening a panel', (tester) async {
