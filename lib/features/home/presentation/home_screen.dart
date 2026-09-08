@@ -56,7 +56,7 @@ class _NarrowHome extends StatelessWidget {
 
     return Scaffold(
       backgroundColor: AppColors.bg,
-      bottomNavigationBar: const _BottomNav(),
+      bottomNavigationBar: const HomeBottomNav(),
       body: SafeArea(
         child: Column(
           children: [
@@ -983,14 +983,23 @@ class _ActionRow extends StatelessWidget {
 }
 
 // ── Bottom navigation (mobile) ────────────────────────────────
-class _BottomNav extends StatelessWidget {
-  const _BottomNav();
+/// Bottom navigation of the home screen.
+///
+/// The bar adds the system navigation inset below its 70 px content so the
+/// icons and labels stay above the gesture bar on edge-to-edge devices
+/// (Android 15+); without it the lower half of the row is hidden.
+class HomeBottomNav extends StatelessWidget {
+  const HomeBottomNav({super.key});
+
+  static const double contentHeight = 70;
 
   @override
   Widget build(BuildContext context) {
     final textScale = MediaQuery.textScalerOf(context).scale(1).clamp(1.0, 1.4);
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
     return Container(
-      height: 70 * textScale,
+      height: contentHeight * textScale + bottomInset,
+      padding: EdgeInsets.only(bottom: bottomInset),
       decoration: const BoxDecoration(
         color: AppColors.cream,
         border: Border(top: BorderSide(color: AppColors.line2)),
