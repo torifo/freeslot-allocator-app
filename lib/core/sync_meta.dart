@@ -35,7 +35,7 @@ class SyncMeta {
   /// they are filled with the deterministic migrated sentinel so both devices
   /// derive the same value. [knownKeys] are the entity's own fields; anything
   /// else (except meta keys) is kept in [extra].
-  factory SyncMeta.fromJson(Map<String, dynamic> json, {Set<String> knownKeys = const <String>{}}) {
+  factory SyncMeta.fromJson(Map<String, dynamic> json, {required Set<String> knownKeys}) {
     final rawClock = json['clock'];
     final clock = rawClock is String ? (Hlc.tryParse(rawClock) ?? Hlc.migrated) : Hlc.migrated;
     final rawUpdated = json['updatedAt'];

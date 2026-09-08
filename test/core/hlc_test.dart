@@ -26,6 +26,12 @@ void main() {
       expect(Hlc.migrated.compareTo(Hlc(physical: 1, counter: 0, deviceId: 'x')) < 0, isTrue);
       expect(Hlc.migrated.toString(), '0-0-migrated');
     });
+
+    test('rejects malformed input', () {
+      expect(() => Hlc.parse('-5-0-dev'), throwsFormatException);
+      expect(() => Hlc.parse('5--1-dev'), throwsFormatException);
+      expect(() => Hlc.parse('abc-0-dev'), throwsFormatException);
+    });
   });
 
   group('HlcClock', () {
@@ -47,6 +53,14 @@ void main() {
       expect(next.physical, 5000);
       expect(next.counter, 3);
       expect(next.deviceId, 'dev');
+    });
+
+    test('observing a lower counter at the same physical time does not decrease the clock', () {
+      final clock = HlcClock(deviceId: 'dev', now: () => 1000);
+      clock.observe(Hlc(physical: 5000, counter: 5, deviceId: 'other'));
+      clock.observe(Hlc(physical: 5000, counter: 1, deviceId: 'other'));
+      expect(clock.last.physical, 5000);
+      expect(clock.last.counter, 5);
     });
   });
 }

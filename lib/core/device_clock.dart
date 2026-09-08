@@ -1,7 +1,6 @@
-import 'dart:io' show Platform;
 import 'dart:math';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show TargetPlatform, defaultTargetPlatform, debugPrint, kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -23,12 +22,22 @@ class DeviceClock {
   final String deviceId;
   final HlcClock _clock;
 
+  /// Chains persistence writes so a slower write can never clobber a faster
+  /// one with a smaller value; see [next] and [observe].
+  Future<void> _persistChain = Future.value();
+
   static String defaultPlatformPrefix() {
     if (kIsWeb) return 'web';
-    if (Platform.isAndroid) return 'android';
-    if (Platform.isMacOS) return 'macos';
-    if (Platform.isIOS) return 'ios';
-    return 'other';
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.android:
+        return 'android';
+      case TargetPlatform.macOS:
+        return 'macos';
+      case TargetPlatform.iOS:
+        return 'ios';
+      default:
+        return 'other';
+    }
   }
 
   static Future<DeviceClock> load({String? platformPrefix, int Function()? now}) async {
@@ -38,7 +47,12 @@ class DeviceClock {
       final random = Random.secure();
       final suffix = List.generate(8, (_) => random.nextInt(16).toRadixString(16)).join();
       deviceId = '${platformPrefix ?? defaultPlatformPrefix()}-$suffix';
-      await prefs.setString(_deviceIdKey, deviceId);
+      final ok = await prefs.setString(_deviceIdKey, deviceId);
+      if (!ok) {
+        // Fatal: without a persisted device id, a restart would mint a new
+        // identity and desync this device's HLC history from the hub.
+        throw StateError('Failed to persist $_deviceIdKey');
+      }
     }
     final last = Hlc.tryParse(prefs.getString(_lastClockKey));
     return DeviceClock._(prefs, deviceId, HlcClock(deviceId: deviceId, now: now, last: last));
@@ -46,12 +60,31 @@ class DeviceClock {
 
   Future<Hlc> next() async {
     final value = _clock.next();
-    await _prefs.setString(_lastClockKey, value.toString());
+    await _persist(value);
     return value;
   }
 
   Future<void> observe(Hlc remote) async {
     _clock.observe(remote);
-    await _prefs.setString(_lastClockKey, _clock.last.toString());
+    await _persist(_clock.last);
+  }
+
+  /// Chains [value]'s write onto any writes already in flight, so writes
+  /// complete in issue order and a later (larger) value can never be
+  /// overwritten by an earlier (smaller) one that was still persisting.
+  Future<void> _persist(Hlc value) {
+    final chained = _persistChain.then((_) async {
+      final storedRaw = _prefs.getString(_lastClockKey);
+      final stored = Hlc.tryParse(storedRaw);
+      if (stored != null && stored.compareTo(value) >= 0) {
+        return;
+      }
+      final ok = await _prefs.setString(_lastClockKey, value.toString());
+      if (!ok) {
+        debugPrint('DeviceClock: failed to persist $_lastClockKey');
+      }
+    });
+    _persistChain = chained;
+    return chained;
   }
 }

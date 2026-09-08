@@ -12,4 +12,12 @@ void main() {
   test('changes when content changes', () {
     expect(contentHash({'id': 'c1', 'name': 'a'}), isNot(contentHash({'id': 'c1', 'name': 'b'})));
   });
+
+  test('integral doubles hash the same as ints', () {
+    expect(contentHash({'a': 1.0}), contentHash({'a': 1}));
+  });
+
+  test('non-String map keys throw', () {
+    expect(() => contentHash({'a': <int, String>{1: 'x'}}), throwsArgumentError);
+  });
 }

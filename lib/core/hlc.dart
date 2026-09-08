@@ -24,11 +24,13 @@ class Hlc implements Comparable<Hlc> {
     if (first <= 0 || second <= first) {
       throw FormatException('Invalid HLC: $value');
     }
-    return Hlc(
-      physical: int.parse(value.substring(0, first)),
-      counter: int.parse(value.substring(first + 1, second)),
-      deviceId: value.substring(second + 1),
-    );
+    final physical = int.tryParse(value.substring(0, first));
+    final counter = int.tryParse(value.substring(first + 1, second));
+    final deviceId = value.substring(second + 1);
+    if (physical == null || physical < 0 || counter == null || counter < 0 || deviceId.isEmpty) {
+      throw FormatException('Invalid HLC: $value');
+    }
+    return Hlc(physical: physical, counter: counter, deviceId: deviceId);
   }
 
   static Hlc? tryParse(String? value) {

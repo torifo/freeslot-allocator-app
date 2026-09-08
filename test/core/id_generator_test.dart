@@ -18,5 +18,9 @@ void main() {
       };
       expect(ids.length, 5000);
     });
+
+    test('pads a short device id fragment', () {
+      expect(deviceFragment('abc'), 'abc0');
+    });
   });
 }

@@ -29,4 +29,16 @@ void main() {
     await clock.observe(Hlc.parse('900-0-other'));
     expect((await clock.next()).physical, 900);
   });
+
+  test('concurrent next() calls persist in a strictly increasing chain', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    var counter = 0;
+    final clock = await DeviceClock.load(platformPrefix: 'test', now: () => counter++);
+    final issued = await Future.wait(List.generate(20, (_) => clock.next()));
+    final reloaded = await DeviceClock.load(platformPrefix: 'test', now: () => 0);
+    final later = await reloaded.next();
+    for (final hlc in issued) {
+      expect(later.compareTo(hlc) > 0, isTrue);
+    }
+  });
 }

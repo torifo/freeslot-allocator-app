@@ -4,7 +4,7 @@ import 'package:frelocator/core/sync_meta.dart';
 
 void main() {
   test('fromJson fills v1 defaults when meta keys are absent', () {
-    final meta = SyncMeta.fromJson(<String, dynamic>{'id': 'x', 'name': 'y'});
+    final meta = SyncMeta.fromJson(<String, dynamic>{'id': 'x', 'name': 'y'}, knownKeys: const {'id', 'name'});
     expect(meta.clock, Hlc.migrated);
     expect(meta.updatedAt, DateTime.utc(1970));
     expect(meta.deletedAt, isNull);
