@@ -7,6 +7,7 @@ import '../../../app/router.dart';
 import '../../../app/theme.dart';
 import '../../../core/error_view.dart';
 import '../../daily_plan/application/daily_plan_controller.dart';
+import '../../daily_plan/application/daily_plan_logic.dart';
 import '../../daily_plan/domain/daily_plan_models.dart';
 import '../../task_master/application/task_master_controller.dart';
 import '../../task_master/domain/task_models.dart';
@@ -54,6 +55,14 @@ class _NarrowHome extends StatelessWidget {
         ? <FreeTimeSlot>[]
         : planData.slotsForPlan(plan.id);
     final freeMin = slots.fold(0, (s, slot) => s + slot.durationMinutes);
+    final assignedMin = slots.fold(
+      0,
+      (s, slot) =>
+          s +
+          planData
+              .assignmentsForSlot(slot.id)
+              .fold<int>(0, (inner, item) => inner + item.durationMinutes),
+    );
 
     return Scaffold(
       backgroundColor: AppColors.bg,
@@ -70,6 +79,7 @@ class _NarrowHome extends StatelessWidget {
                   _HeroCard(
                     date: today,
                     freeMinutes: freeMin,
+                    assignedMinutes: assignedMin,
                     hasPlan: plan != null,
                   ),
                   const SizedBox(height: 20),
@@ -100,6 +110,14 @@ class _WideHome extends StatelessWidget {
         ? <FreeTimeSlot>[]
         : planData.slotsForPlan(plan.id);
     final freeMin = slots.fold(0, (s, slot) => s + slot.durationMinutes);
+    final assignedMin = slots.fold(
+      0,
+      (s, slot) =>
+          s +
+          planData
+              .assignmentsForSlot(slot.id)
+              .fold<int>(0, (inner, item) => inner + item.durationMinutes),
+    );
 
     return Scaffold(
       backgroundColor: AppColors.bg,
@@ -123,6 +141,7 @@ class _WideHome extends StatelessWidget {
                           _HeroCard(
                             date: today,
                             freeMinutes: freeMin,
+                            assignedMinutes: assignedMin,
                             hasPlan: plan != null,
                           ),
                           const SizedBox(height: 24),
@@ -525,10 +544,12 @@ class _HeroCard extends StatelessWidget {
   const _HeroCard({
     required this.date,
     required this.freeMinutes,
+    required this.assignedMinutes,
     required this.hasPlan,
   });
   final DateTime date;
   final int freeMinutes;
+  final int assignedMinutes;
   final bool hasPlan;
 
   @override
@@ -665,6 +686,16 @@ class _HeroCard extends StatelessWidget {
                   ),
                 ],
               ),
+              // The headline is the day's whole free time; what the user acts
+              // on is what is left of it once the plan is taken out (M-12).
+              if (hasPlan) ...[
+                const SizedBox(height: 10),
+                Text(
+                  '残り ${formatHoursMinutes(remainingFreeMinutes(freeMinutes: freeMinutes, assignedMinutes: assignedMinutes))}'
+                  '（割り当て済み ${formatHoursMinutes(assignedMinutes)}）',
+                  style: TextStyle(fontSize: 11, color: AppColors.onDeepMt),
+                ),
+              ],
               if (!hasPlan) ...[
                 const SizedBox(height: 14),
                 Container(
@@ -677,7 +708,7 @@ class _HeroCard extends StatelessWidget {
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
-                    '今日の計画がまだありません。日次計画から準備しましょう。',
+                    '今日の計画がまだありません。日次計画から作成しましょう。',
                     style: TextStyle(fontSize: 11, color: AppColors.onDeepMt),
                   ),
                 ),
