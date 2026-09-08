@@ -16,3 +16,15 @@ describe('invariant fixtures', () => {
     });
   }
 });
+
+describe('hub-only fixtures', () => {
+  const hubOnlyDir = join(here, 'fixtures/hub-only/sync_invariants');
+  const hubOnlyNames = ['07_non_finite_sort_order.json'];
+
+  for (const name of hubOnlyNames) {
+    const fx = JSON.parse(readFileSync(join(hubOnlyDir, name), 'utf8'));
+    it(fx.name, () => {
+      expect(checkInvariants(fx.document).map((v) => v.code)).toEqual(fx.expectedCodes);
+    });
+  }
+});

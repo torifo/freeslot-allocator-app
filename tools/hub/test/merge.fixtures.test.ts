@@ -45,6 +45,29 @@ describe('merge fixtures', () => {
   }
 });
 
+describe('hub-only fixtures', () => {
+  const hubOnlyDir = join(here, 'fixtures/hub-only/sync_merge');
+  const hubOnlyNames = ['09_assignment_without_slot_id.json'];
+
+  for (const name of hubOnlyNames) {
+    const fx = JSON.parse(readFileSync(join(hubOnlyDir, name), 'utf8'));
+    it(fx.name, () => {
+      const a = fx.a as SyncDocumentJson;
+      const b = fx.b as SyncDocumentJson;
+      const ab = merge(a, b);
+      const ba = merge(b, a);
+      expect(normalize(ab.document.taskMaster)).toEqual(normalize(fx.expected.taskMaster));
+      expect(normalize(ab.document.dailyPlan)).toEqual(normalize(fx.expected.dailyPlan));
+      expect(normalize(ba.document.taskMaster)).toEqual(normalize(ab.document.taskMaster));
+      expect(normalize(ba.document.dailyPlan)).toEqual(normalize(ab.document.dailyPlan));
+      expect(ab.warnings).toEqual(fx.expectedWarnings ?? []);
+      expect(normalize(merge(ab.document, b).document.taskMaster)).toEqual(
+        normalize(ab.document.taskMaster),
+      );
+    });
+  }
+});
+
 describe('merge determinism', () => {
   const base = (deviceId: string): SyncDocumentJson => ({
     version: 2,

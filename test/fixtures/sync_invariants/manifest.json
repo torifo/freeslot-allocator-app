@@ -4,6 +4,5 @@
   "03_overlapping_assignments.json",
   "04_sort_order_gap.json",
   "05_duplicate_category_name.json",
-  "06_slot_time_reversed.json",
-  "07_non_finite_sort_order.json"
+  "06_slot_time_reversed.json"
 ]

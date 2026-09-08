@@ -6,6 +6,5 @@
   "05_migrated_same_hash_no_change.json",
   "06_migrated_diff_hash_lexicographic.json",
   "07_dangling_category_kept.json",
-  "08_settings_merge.json",
-  "09_assignment_without_slot_id.json"
+  "08_settings_merge.json"
 ]
