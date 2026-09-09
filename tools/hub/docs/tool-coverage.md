@@ -5,7 +5,7 @@
 Flutter アプリ（`lib/`）が実行できる変更操作を洗い出し、既存ツールと突き合わせた。
 
 対象コミット: `feature/hub-tool-coverage`（FRELOCATOR main から分岐）
-監査時点のツール数: 26 → 実装後: 39
+監査時点のツール数: 26 → 実装後: 39 → 競合の記録と解決（Plan 3b）を加えて 43
 
 ---
 
@@ -95,6 +95,10 @@ Flutter アプリ（`lib/`）が実行できる変更操作を洗い出し、既
 | `purge_tombstones` | — |
 | `forget_device` | `deviceId` |
 | `rotate_token` | `deviceId` |
+| `list_conflicts` | `status?`(`open`/`resolved`/`all`), `entityType?`, `limit?` |
+| `get_conflict` | `id` |
+| `resolve_conflict` | `id`, `adopt`(`hub`/`device`/`current`) |
+| `resolve_all_conflicts` | `adopt`, `entityType?`, `dryRun?` |
 
 ## 4. エンティティ × 操作マトリクス
 
@@ -110,6 +114,7 @@ Flutter アプリ（`lib/`）が実行できる変更操作を洗い出し、既
 | assignment | ✔ `assign_task` | ✔ `get_daily_plan` | ✔ `get_daily_plan` / `get_entity` | ✔ `update_assignment` | ✔ `unassign` | ✘ → `move_assignment`（枠内位置指定＝並べ替え） | — | 別枠・別日への移動: ✘ → `move_assignment` |
 | document | — | — | ✔ `export_data` | ✔ `import_file` / ✘ → `import_data`（インライン JSON） | — | — | — | ✔ `undo_last_write`, `purge_tombstones` |
 | device | — | ✔ `sync_status` | ✔ `sync_status` | ✔ `rotate_token` | ✔ `forget_device` | — | — | — |
+| conflict | —（マージが作る） | ✔ `list_conflicts` | ✔ `get_conflict` | ✔ `resolve_conflict` | ✔（解決 30 日後に自動墓標化） | — | ✔ `resolve_all_conflicts` | 採用は新しい clock の編集として書き戻る |
 
 ### 実装しなかったもの（理由つき）
 
@@ -182,14 +187,38 @@ Flutter アプリ（`lib/`）が実行できる変更操作を洗い出し、既
 | `move_assignment` | 割り当てを別の枠／別の日／同じ枠の別位置へ移動する |
 | `import_data` | インライン JSON の v2 ドキュメントを取り込む（`import_file` のファイル無し版） |
 
+## 6b. 競合の記録と解決（Plan 3b・4 個）
+
+同じエンティティを PC とスマホの両方で編集していた場合、マージは HLC の勝者を
+暫定採用して**同期そのものは完了させ**、敗者のスナップショットを
+`document.conflicts[]` の競合レコードとして残す。この 4 個はそのレコードを
+読み・選ぶための操作で、ツール数は 39 → 43 になった。
+
+| ツール | 説明 |
+| --- | --- |
+| `list_conflicts` | 競合レコードを一覧する。`status` 既定は `open`。未解決／解決済みの総数と、日本語の 1 行ラベルを返す |
+| `get_conflict` | 1 件の詳細。両版で**値が違うフィールドだけ**の差分と、いま `data.json` にある版（`clock` / `deletedAt` / 後続の編集に追い越されたか）を返す |
+| `resolve_conflict` | `hub` 版・`device` 版・現状維持（`current`）のいずれかを選ぶ。採用側は**新しい clock の編集として書き戻す**ので、次の同期でスマホとブラウザにも伝播する。墓標を採用するとそのエンティティは再び削除される |
+| `resolve_all_conflicts` | 破壊的。未解決の全件を同じ方針で 1 回の書き込みにまとめて適用する（全か無か）。`dryRun` は何も書かずに結果だけ返す |
+
+- 解決は clock を巻き戻さない。`resolve_conflict` は必ず `clock.next()` を発行し、
+  レコード側にも `resolution` / `resolvedAt` / `resolvedBy` と新しい clock を打つ。
+- 既に解決済みのレコードへの `resolve_conflict` は `ToolError`（すでに解決済みです）。
+  `adopt: 'current'` でも同じ。
+- 採用したいスナップショットが既に生きている版と同じ内容なら `wrote: false` で、
+  レコードだけが解決済みになる。
+- 対象のエンティティが purge で消えている場合、書き込みを伴う採用は拒否する
+  （`adopt: 'current'` なら閉じられる）。
+
 ## 7. 検証
 
-- `npm test` — 17 ファイル / 214 件（監査前は 16 ファイル / 186 件）
+- `npm test` — 26 ファイル / 320 件（監査前は 16 ファイル / 186 件、監査直後は 17 ファイル / 214 件）
 - `npm run typecheck` — エラーなし
 - `npm run build` — 成功
 - `npm run smoke` — `SMOKE OK`。stdio の実プロトコルで
   カテゴリ作成 → タスク作成 → 並べ替え → 部分更新 → 計画作成 → 枠追加 → 割り当て →
   割り当て移動 → 解除 → 枠削除 → タスク削除（墓標を確認）→ `undo_last_write` →
-  `export_data` → `purge_tombstones` の 24 時間マージンまでを一巡し、各段階で
-  `checkInvariants` が空であることを確認する
+  `export_data` → 競合の作成 → `list_conflicts` → `get_conflict` →
+  `resolve_conflict`（スマホ版を採用）→ `purge_tombstones` の 24 時間マージンまでを
+  一巡し、各段階で `checkInvariants` が空であることを確認する（ツール数 43 も検査する）
 - `flutter test`（ワークツリー直下）— 319 件すべて成功。Dart 側と共有フィクスチャは変更していない

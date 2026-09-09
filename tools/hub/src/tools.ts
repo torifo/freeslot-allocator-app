@@ -7,7 +7,8 @@ import { Hlc, HlcClock } from './hlc.js';
 import { copyId, generateId } from './ids.js';
 import { checkInvariants } from './invariants.js';
 import { MAX_BODY } from './limits.js';
-import { isDeleted, TASK_KINDS, type Entity, type SyncDocumentJson } from './model.js';
+import { contentHash } from './hash.js';
+import { isDeleted, TASK_KINDS, type ConflictJson, type ConflictSideJson, type Entity, type SyncDocumentJson } from './model.js';
 import { FileStore } from './store.js';
 import { SyncRejected, type SyncEngine, type SyncProgress, type SyncSummary } from './sync-engine.js';
 
@@ -211,7 +212,50 @@ export const schemas = {
   purgeTombstones: z.object({}),
   forgetDevice: z.object({ deviceId: z.string() }),
   rotateToken: z.object({ deviceId: z.string() }),
+  listConflicts: z.object({
+    status: z.enum(['open', 'resolved', 'all']).optional(),
+    entityType: z.string().optional(),
+    limit: z.number().int().min(1).max(500).optional(),
+  }),
+  getConflict: z.object({ id: z.string() }),
+  resolveConflict: z.object({ id: z.string(), adopt: z.enum(['hub', 'device', 'current']) }),
+  resolveAllConflicts: z.object({
+    adopt: z.enum(['hub', 'device', 'current']),
+    entityType: z.string().optional(),
+    dryRun: z.boolean().optional(),
+  }),
 };
+
+/** What `list_conflicts` shows for one record. */
+export interface ConflictBrief {
+  id: string;
+  entityType: string;
+  entityId: string;
+  /** One Japanese line naming the thing in conflict, e.g. `タスク「確定申告の書類を集める」`. */
+  label: string;
+  detectedAt: string;
+  resolution: string | null;
+}
+
+export interface ResolvedConflict {
+  id: string;
+  adopted: string;
+  /** False when only the record was stamped: `current`, or a side already live byte-for-byte. */
+  wrote: boolean;
+}
+
+/** Japanese names for the entity kinds the app can draw; an unknown kind keeps its raw name. */
+const ENTITY_LABELS: Record<string, string> = {
+  task: 'タスク',
+  category: 'カテゴリ',
+  plan: '日次プラン',
+  slot: '空き時間',
+  assignment: '割り当て',
+  settings: '設定',
+};
+
+/** Meta that belongs to sync bookkeeping, never to the comparison the user sees. */
+const COMPARISON_SKIP = new Set(['id', 'clock', 'updatedAt', 'migrated']);
 
 /** Parses any accepted datetime spelling into a UTC ISO string. */
 const iso = (value: string): string => {
@@ -1310,6 +1354,277 @@ export class HubTools {
       rotated: true,
       note: 'the old token is invalid; the phone must pair again by scanning a new pairing QR',
     };
+  }
+
+  // ---- conflicts (Plan 3b) ----
+
+  /** The records a user can still act on; a tombstoned one is housekeeping, not a choice. */
+  private conflictsOf(doc: SyncDocumentJson): ConflictJson[] {
+    return (doc.conflicts ?? []).filter((c) => !isDeleted(c as unknown as Record<string, unknown>));
+  }
+
+  /** One Japanese line naming the thing in conflict, for a list the user reads. */
+  private static label(conflict: ConflictJson): string {
+    const noun = ENTITY_LABELS[conflict.entityType] ?? conflict.entityType;
+    if (conflict.entityType === 'settings') return noun;
+    const named = (side: ConflictSideJson): string | null => {
+      const snapshot = side.snapshot as Record<string, unknown>;
+      for (const key of ['title', 'name', 'date']) {
+        const value = snapshot[key];
+        if (typeof value === 'string' && value !== '') return value;
+      }
+      return null;
+    };
+    // A tombstone winner carries no fields at all, so the loser's snapshot is
+    // the only place the name survives.
+    const name = named(conflict.winner) ?? named(conflict.loser);
+    return name === null ? `${noun}（${conflict.entityId}）` : `${noun}「${name}」`;
+  }
+
+  /** Only the fields whose values differ; sync meta is excluded, `deletedAt` deliberately is not. */
+  private static differences(conflict: ConflictJson): Array<{ field: string; hub: unknown; device: unknown }> {
+    const snapshotOf = (want: 'hub' | 'device'): Record<string, unknown> =>
+      (conflict.winner.side === want ? conflict.winner : conflict.loser).snapshot as Record<string, unknown>;
+    const hub = snapshotOf('hub');
+    const device = snapshotOf('device');
+    const fields = [...new Set([...Object.keys(hub), ...Object.keys(device)])]
+      .filter((field) => !COMPARISON_SKIP.has(field))
+      .sort();
+    const out: Array<{ field: string; hub: unknown; device: unknown }> = [];
+    for (const field of fields) {
+      const a = hub[field] ?? null;
+      const b = device[field] ?? null;
+      if (JSON.stringify(a) === JSON.stringify(b)) continue;
+      out.push({ field, hub: a, device: b });
+    }
+    return out;
+  }
+
+  /** Whichever list holds the id, or null when nothing does (settings is handled separately). */
+  private locate(doc: SyncDocumentJson, entityId: string): { list: Entity[]; entity: Entity } | null {
+    const lists: Entity[][] = [
+      doc.taskMaster.tasks, doc.taskMaster.mustDoCategories, doc.taskMaster.wantToDoCategories,
+      doc.dailyPlan.plans, doc.dailyPlan.slots, doc.dailyPlan.assignments,
+    ];
+    for (const list of lists) {
+      const entity = (list ?? []).find((e) => e.id === entityId);
+      if (entity) return { list, entity };
+    }
+    return null;
+  }
+
+  /** True when adopting that side would write exactly what is already stored. */
+  private static sameAsLive(
+    snapshot: Record<string, unknown>,
+    live: Record<string, unknown> | undefined,
+    entityType: string,
+  ): boolean {
+    const deletedSnapshot = isDeleted(snapshot);
+    const deletedLive = live === undefined || isDeleted(live);
+    if (deletedSnapshot !== deletedLive) return false;
+    // Two tombstones say the same thing whatever meta they carry.
+    if (deletedSnapshot) return true;
+    const contentOf = (e: Record<string, unknown>): Record<string, unknown> =>
+      entityType === 'settings' ? { shareCategories: e.shareCategories } : e;
+    return contentHash(contentOf(snapshot)) === contentHash(contentOf(live as Record<string, unknown>));
+  }
+
+  /**
+   * Applies one decision inside an open mutation.
+   *
+   * Adopting a side writes it back as a *new* edit rather than rewinding the
+   * clock: the id stays, `clock` advances, `updatedAt` becomes now and
+   * `migrated` is false, so an ordinary merge carries the decision to the phone
+   * and to the browser. Adopting a tombstone deletes the entity again.
+   */
+  private applyResolution(
+    doc: SyncDocumentJson,
+    record: ConflictJson,
+    adopt: 'hub' | 'device' | 'current',
+  ): { record: ConflictJson; wrote: boolean; effect: 'none' | 'added' | 'updated' | 'deleted' } {
+    const at = this.now().toISOString();
+    const stamped: ConflictJson = {
+      ...record,
+      resolution: adopt,
+      resolvedAt: at,
+      resolvedBy: this.store.deviceId,
+      // A new clock, so this decision beats the detection — and any older one — on merge.
+      clock: this.clock.next().toString(),
+      updatedAt: at,
+    };
+    if (adopt === 'current') return { record: stamped, wrote: false, effect: 'none' };
+
+    const side = record.winner.side === adopt ? record.winner : record.loser;
+    const snapshot = side.snapshot as Record<string, unknown>;
+
+    if (record.entityType === 'settings') {
+      const current = doc.taskMaster.settings as unknown as Record<string, unknown>;
+      if (HubTools.sameAsLive(snapshot, current, 'settings')) {
+        return { record: stamped, wrote: false, effect: 'none' };
+      }
+      doc.taskMaster.settings = {
+        ...(snapshot as unknown as SyncDocumentJson['taskMaster']['settings']),
+        shareCategories: Boolean(snapshot.shareCategories),
+        clock: this.clock.next().toString(),
+        updatedAt: at,
+        deletedAt: null,
+        migrated: false,
+      };
+      return { record: stamped, wrote: true, effect: 'updated' };
+    }
+
+    const located = this.locate(doc, record.entityId);
+    if (HubTools.sameAsLive(snapshot, located?.entity, record.entityType)) {
+      return { record: stamped, wrote: false, effect: 'none' };
+    }
+    if (!located) {
+      // Purge can drop a record the conflict still names; a category id alone
+      // does not even say which of the two lists it belonged to, so refuse
+      // rather than guess. `adopt: 'current'` still closes the record.
+      throw new ToolError(
+        `${record.entityType} ${record.entityId} is no longer in the document; resolve it with adopt: "current"`,
+      );
+    }
+    const index = located.list.findIndex((e) => e.id === record.entityId);
+    const previouslyLive = !isDeleted(located.entity);
+    if (isDeleted(snapshot)) {
+      located.list[index] = this.tomb(located.entity);
+      return { record: stamped, wrote: true, effect: 'deleted' };
+    }
+    located.list[index] = {
+      ...(snapshot as Entity),
+      id: record.entityId,
+      clock: this.clock.next().toString(),
+      updatedAt: at,
+      deletedAt: null,
+      migrated: false,
+    };
+    return { record: stamped, wrote: true, effect: previouslyLive ? 'updated' : 'added' };
+  }
+
+  private static summaryOf(effect: 'none' | 'added' | 'updated' | 'deleted'): SyncSummary {
+    return {
+      added: effect === 'added' ? 1 : 0,
+      updated: effect === 'updated' ? 1 : 0,
+      deleted: effect === 'deleted' ? 1 : 0,
+      removed: 0,
+      // Nothing is written unless `checkInvariants` passes, so a returned
+      // summary never carries a warning.
+      warnings: 0,
+      conflicts: 0,
+    };
+  }
+
+  async listConflicts(input: z.infer<typeof schemas.listConflicts>): Promise<{
+    open: number; resolved: number; conflicts: ConflictBrief[];
+  }> {
+    const all = this.conflictsOf(await this.store.read());
+    const open = all.filter((c) => c.resolution == null);
+    const resolved = all.filter((c) => c.resolution != null);
+    const status = input.status ?? 'open';
+    const chosen = status === 'open' ? open : status === 'resolved' ? resolved : all;
+    const filtered = input.entityType
+      ? chosen.filter((c) => c.entityType === input.entityType)
+      : chosen;
+    return {
+      // The two totals count every record on file, whatever this call filtered to.
+      open: open.length,
+      resolved: resolved.length,
+      conflicts: filtered.slice(0, input.limit ?? 100).map((c) => ({
+        id: c.id,
+        entityType: c.entityType,
+        entityId: c.entityId,
+        label: HubTools.label(c),
+        detectedAt: c.detectedAt,
+        resolution: c.resolution ?? null,
+      })),
+    };
+  }
+
+  async getConflict(input: z.infer<typeof schemas.getConflict>): Promise<{
+    conflict: ConflictJson;
+    differences: Array<{ field: string; hub: unknown; device: unknown }>;
+    current: { clock: string | null; deletedAt: string | null; supersedes: boolean };
+  }> {
+    const doc = await this.store.read();
+    const conflict = this.conflictsOf(doc).find((c) => c.id === input.id);
+    if (!conflict) throw new ToolError(`conflict ${input.id} not found`);
+    const live: Entity | undefined =
+      conflict.entityType === 'settings'
+        ? (doc.taskMaster.settings as unknown as Entity)
+        : this.locate(doc, conflict.entityId)?.entity;
+    const clock = live ? String(live.clock) : null;
+    const current = Hlc.tryParse(clock);
+    const winner = Hlc.tryParse(conflict.winner.clock);
+    const loser = Hlc.tryParse(conflict.loser.clock);
+    return {
+      conflict,
+      differences: HubTools.differences(conflict),
+      current: {
+        clock,
+        deletedAt: live && isDeleted(live) ? String(live.deletedAt) : null,
+        // A later edit already overwrote both versions: there is nothing left to choose.
+        supersedes: Boolean(
+          current && winner && loser && Hlc.compare(current, winner) > 0 && Hlc.compare(current, loser) > 0,
+        ),
+      },
+    };
+  }
+
+  async resolveConflict(input: z.infer<typeof schemas.resolveConflict>): Promise<{
+    id: string; adopted: string; wrote: boolean; summary: SyncSummary;
+  }> {
+    let wrote = false;
+    let effect: 'none' | 'added' | 'updated' | 'deleted' = 'none';
+    await this.mutate((doc) => {
+      const list = doc.conflicts ?? [];
+      const index = list.findIndex(
+        (c) => c.id === input.id && !isDeleted(c as unknown as Record<string, unknown>),
+      );
+      if (index < 0) throw new ToolError(`conflict ${input.id} not found`);
+      const record = list[index];
+      if (record.resolution != null) {
+        throw new ToolError(
+          `conflict ${input.id} is already resolved as ${record.resolution}: すでに解決済みです`,
+        );
+      }
+      const applied = this.applyResolution(doc, record, input.adopt);
+      list[index] = applied.record;
+      doc.conflicts = list;
+      wrote = applied.wrote;
+      effect = applied.effect;
+    });
+    return { id: input.id, adopted: input.adopt, wrote, summary: HubTools.summaryOf(effect) };
+  }
+
+  async resolveAllConflicts(input: z.infer<typeof schemas.resolveAllConflicts>): Promise<{
+    resolved: number; skipped: number; results: ResolvedConflict[];
+  }> {
+    const run = (doc: SyncDocumentJson): { resolved: number; skipped: number; results: ResolvedConflict[] } => {
+      const list = doc.conflicts ?? [];
+      const results: ResolvedConflict[] = [];
+      let skipped = 0;
+      for (let index = 0; index < list.length; index += 1) {
+        const record = list[index];
+        if (isDeleted(record as unknown as Record<string, unknown>)) continue;
+        if (input.entityType && record.entityType !== input.entityType) continue;
+        if (record.resolution != null) { skipped += 1; continue; }
+        const applied = this.applyResolution(doc, record, input.adopt);
+        list[index] = applied.record;
+        results.push({ id: record.id, adopted: input.adopt, wrote: applied.wrote });
+      }
+      if (list.length > 0) doc.conflicts = list;
+      return { resolved: results.length, skipped, results };
+    };
+    if (input.dryRun) {
+      // A rehearsal on a copy of the document: nothing is stored. The HLC does
+      // advance, which is harmless — it only ever has to move forward.
+      return run(structuredClone(await this.store.read()));
+    }
+    // One `store.update`: if any single id fails, nothing at all is written.
+    let out: { resolved: number; skipped: number; results: ResolvedConflict[] } | undefined;
+    await this.mutate((doc) => { out = run(doc); });
+    return out as { resolved: number; skipped: number; results: ResolvedConflict[] };
   }
 
   async syncStatus(): Promise<SyncStatus> {

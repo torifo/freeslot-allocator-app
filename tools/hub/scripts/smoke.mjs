@@ -35,12 +35,13 @@ try {
   const { tools } = await client.listTools();
   console.log(`tools listed: ${tools.length}`);
   console.log(tools.map((t) => t.name).join(', '));
-  check('tool count is 39', tools.length === 39, tools.length);
+  check('tool count is 43', tools.length === 43, tools.length);
   const names = new Set(tools.map((t) => t.name));
   const missing = [
     'get_task', 'get_entity', 'reorder_tasks', 'bulk_update_tasks', 'bulk_delete_tasks',
     'merge_categories', 'get_settings', 'set_share_categories', 'create_daily_plan',
     'delete_daily_plan', 'move_daily_plan', 'move_assignment', 'import_data',
+    'list_conflicts', 'get_conflict', 'resolve_conflict', 'resolve_all_conflicts',
   ].filter((name) => !names.has(name));
   check('every tool of this round is registered', missing.length === 0, missing.join(', '));
 
@@ -171,6 +172,38 @@ try {
   const inline = await call('export_data');
   const imported = await call('import_data', { document: { ...inline, deviceId: 'smoke-phone' } });
   check('import_data merges an inline document', imported.deviceId === 'smoke-phone' && imported.summary.added === 0, JSON.stringify(imported.summary));
+
+  // ---- conflict lifecycle (Plan 3b) ----
+  // The phone edits the same task from an older agreement point, so the merge
+  // keeps the hub version (the bigger clock) and files what it dropped.
+  const agreed = new Date(Date.now() - 3600_000).toISOString();
+  const base = await call('export_data');
+  const phoneEdit = {
+    ...base,
+    deviceId: 'smoke-phone',
+    lastSyncAt: agreed,
+    taskMaster: {
+      ...base.taskMaster,
+      tasks: base.taskMaster.tasks.map((t) => (t.id === one.id
+        ? { ...t, title: 'one（スマホ版）', clock: '1-0-smoke-phone', updatedAt: new Date().toISOString() }
+        : t)),
+    },
+  };
+  const conflicted = await call('import_data', { document: phoneEdit });
+  check('the merge reports the conflict it recorded', conflicted.summary.conflicts === 1, JSON.stringify(conflicted.summary));
+  const open = await call('list_conflicts', {});
+  check('list_conflicts shows one open record', open.open === 1 && open.conflicts.length === 1, JSON.stringify(open));
+  check('the record is labelled in Japanese', String(open.conflicts[0].label).startsWith('タスク「'), open.conflicts[0].label);
+  const detail = await call('get_conflict', { id: open.conflicts[0].id });
+  check('get_conflict names title as the only difference', detail.differences.length === 1 && detail.differences[0].field === 'title', JSON.stringify(detail.differences));
+  check('the hub version stays live until the user chooses', (await call('get_task', { id: one.id })).title === 'one');
+  const resolved = await call('resolve_conflict', { id: open.conflicts[0].id, adopt: 'device' });
+  check('resolve_conflict writes the adopted snapshot back', resolved.wrote === true && resolved.adopted === 'device', JSON.stringify(resolved));
+  check('the adopted version is the live one', (await call('get_task', { id: one.id })).title === 'one（スマホ版）');
+  check('the record is marked resolved', (await call('list_conflicts', { status: 'resolved' })).conflicts.length === 1);
+  check('no open conflict is left', (await call('list_conflicts', {})).open === 0);
+  check('resolving the same record twice is refused', await refused('resolve_conflict', { id: open.conflicts[0].id, adopt: 'hub' }));
+  await document('resolve_conflict');
   const purgeAfter = await call('purge_tombstones');
   const margin = Date.now() - Date.parse(purgeAfter.purgedBefore);
   check('purge keeps the 24h margin', margin > 23.5 * 3600_000 && margin < 24.5 * 3600_000, `${Math.round(margin / 60_000)} min`);
