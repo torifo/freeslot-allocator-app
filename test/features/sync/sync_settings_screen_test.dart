@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frelocator/features/daily_plan/domain/daily_plan_models.dart';
 import 'package:frelocator/features/sync/application/sync_in_flight.dart';
+import 'package:frelocator/features/sync/presentation/mcp_guide_section.dart';
 import 'package:frelocator/features/sync/presentation/sync_progress_panel.dart';
 import 'package:frelocator/features/sync/presentation/sync_replace_dialog.dart';
 import 'package:frelocator/features/sync/presentation/sync_settings_screen.dart';
@@ -216,11 +217,15 @@ class _Launcher extends StatelessWidget {
   );
 }
 
-Future<void> _pumpScreen(WidgetTester tester, ProviderContainer container) async {
+Future<void> _pumpScreen(
+  WidgetTester tester,
+  ProviderContainer container, {
+  bool? showWebGuide,
+}) async {
   await tester.pumpWidget(
     UncontrolledProviderScope(
       container: container,
-      child: const MaterialApp(home: SyncSettingsScreen()),
+      child: MaterialApp(home: SyncSettingsScreen(showWebGuide: showWebGuide)),
     ),
   );
   await tester.pumpAndSettle();
@@ -622,6 +627,48 @@ void main() {
     expect(find.byType(SyncProgressPanel), findsNothing);
     expect(applied.received, 0);
   }, skip: !Platform.isMacOS);
+
+  testWidgets('the public web build gets the Claude Code (MCP) guide', (tester) async {
+    // `kIsWeb` is a compile-time constant the VM tests can never flip, so the
+    // screen takes the answer as a parameter — this is the web build's list.
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final container = await testContainer();
+    await _pumpScreen(tester, container, showWebGuide: true);
+
+    final title = find.text('Claude Code（MCP）と連携する');
+    // The card's own SelectableText widgets are Scrollables too, so the list
+    // has to be named rather than found by type.
+    await tester.scrollUntilVisible(
+      title,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(title, findsOneWidget);
+    expect(
+      find.textContaining('git clone https://github.com/torifo/freeslot-allocator-app.git'),
+      findsOneWidget,
+    );
+    // The public build is not the hub's browser build, and says so.
+    expect(find.textContaining('ハブが配信するブラウザ版を使ってください'), findsOneWidget);
+  });
+
+  testWidgets('the web guide spells out all four steps', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(child: WebMcpGuideSection()),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('1. リポジトリを取得してハブをビルドする'), findsOneWidget);
+    expect(find.text('2. Claude Code でリポジトリを開く'), findsOneWidget);
+    expect(find.text('3. ハブが配信するブラウザ版を開く'), findsOneWidget);
+    expect(find.text('4. スマホと同期する'), findsOneWidget);
+    // No `dart:io` on the web: the path is prose, not a probed directory.
+    expect(find.textContaining('~/Library/Application Support/FRELOCATOR/data.json'), findsOneWidget);
+  });
 
   testWidgets('macOS gets the Claude Code (MCP) guide', (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});

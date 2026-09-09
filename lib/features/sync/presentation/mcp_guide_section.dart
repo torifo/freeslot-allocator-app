@@ -90,6 +90,81 @@ class McpGuideSection extends StatelessWidget {
   }
 }
 
+/// Web (public build) only: how to drive FRELOCATOR from Claude Code.
+///
+/// The public web build at app.frelocator.riumu.net talks to no hub, so this
+/// card is the only place an engineer opening that URL can learn that a hub
+/// exists. It deliberately prints no local path — there is no `dart:io` here,
+/// and the reader's machine is not necessarily the one this page runs on.
+class WebMcpGuideSection extends StatelessWidget {
+  const WebMcpGuideSection({super.key});
+
+  static const String _clone =
+      'git clone https://github.com/torifo/freeslot-allocator-app.git && '
+      'cd freeslot-allocator-app/tools/hub && '
+      'npm install && npm run build && npm run build:web';
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('Claude Code（MCP）と連携する', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 8),
+            const Text(
+              'エンジニア向け: PC 上で Claude Code から FRELOCATOR のタスクや計画を編集し、'
+              'スマホに同期できます。'
+              'このブラウザ版（公開 Web）はハブと同期しません。'
+              'ハブが配信するブラウザ版を使ってください。',
+            ),
+            const SizedBox(height: 12),
+            const _Step(
+              no: '1',
+              title: 'リポジトリを取得してハブをビルドする',
+              command: _clone,
+            ),
+            const _Step(
+              no: '2',
+              title: 'Claude Code でリポジトリを開く',
+              command: McpGuideSection._mcpJson,
+            ),
+            const Text(
+              'リポジトリ直下の .mcp.json（同梱）により frelocator-hub が登録され、'
+              'sync_status などのツールが使えます。',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+            const _Step(no: '3', title: 'ハブが配信するブラウザ版を開く'),
+            const Text(
+              'Claude Code で sync_status を実行し、lan.webApp.url をその PC のブラウザで開きます。'
+              'URL にはハブ起動ごとに変わる秘密の文字列が入ります。'
+              'ペアリング用ページは lan.pairingPage、QR 送信は lan.qrPage です。',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+            const _Step(no: '4', title: 'スマホと同期する'),
+            const Text(
+              'スマホ側の「PC と同期」でペアリングすると LAN 経由で同期します。'
+              '競合があれば同期後に「競合」から採用側を選べます。',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'データは PC の ~/Library/Application Support/FRELOCATOR/data.json（macOS）に'
+              '保存され、アプリとハブがロック付きで共有します。',
+              style: TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _Step extends StatelessWidget {
   const _Step({required this.no, required this.title, this.command});
 

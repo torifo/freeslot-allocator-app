@@ -29,7 +29,14 @@ import 'sync_replace_dialog.dart';
 /// 「PC と同期」— the one screen that owns every hand-off with the hub: LAN
 /// sync, pairing, QR receive, file export and (on macOS) file import.
 class SyncSettingsScreen extends ConsumerStatefulWidget {
-  const SyncSettingsScreen({super.key});
+  const SyncSettingsScreen({super.key, this.showWebGuide});
+
+  /// Overrides the 「this is the public web build」 check, for tests.
+  ///
+  /// `kIsWeb` is a compile-time constant, so a test running on the VM can
+  /// never make it true; the screen takes the answer as a parameter instead
+  /// and falls back to the real check when nothing is passed.
+  final bool? showWebGuide;
 
   @override
   ConsumerState<SyncSettingsScreen> createState() => _SyncSettingsScreenState();
@@ -46,6 +53,10 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
   bool _running = false;
 
   bool get _isMac => !kIsWeb && Platform.isMacOS;
+
+  /// The public web build: no hub on the other end, so the MCP guide is the
+  /// only thing on this screen that leads anywhere.
+  bool get _showWebGuide => widget.showWebGuide ?? kIsWeb;
 
   /// Non-null only in the browser the hub itself serves.
   ///
@@ -300,6 +311,10 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
                 if (_isMac) ...<Widget>[
                   const SizedBox(height: 16),
                   const McpGuideSection(),
+                ],
+                if (_showWebGuide) ...<Widget>[
+                  const SizedBox(height: 16),
+                  const WebMcpGuideSection(),
                 ],
               ],
             ),
