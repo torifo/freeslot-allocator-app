@@ -86,6 +86,24 @@
       "resolution": null
     }
   ],
+  "expectedSnapshots": {
+    "cf-b9f246bd6d7b5912": {
+      "winner": {
+        "shareCategories": false,
+        "clock": "20-0-hub-macos",
+        "updatedAt": "2026-09-09T02:00:00.000Z",
+        "deletedAt": null,
+        "migrated": false
+      },
+      "loser": {
+        "shareCategories": true,
+        "clock": "15-0-android-1",
+        "updatedAt": "2026-09-09T01:00:00.000Z",
+        "deletedAt": null,
+        "migrated": false
+      }
+    }
+  },
   "expectedDetectedIds": [
     "cf-b9f246bd6d7b5912"
   ],

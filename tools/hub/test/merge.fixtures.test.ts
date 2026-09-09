@@ -25,7 +25,11 @@ function normalize(value: unknown): unknown {
   return value;
 }
 
-/** Every entity id a document holds, live or tombstoned. */
+/**
+ * Every id a document holds, live or tombstoned — conflict records included,
+ * because they are ordinary entities as far as the merge is concerned and
+ * losing one loses the user's only record of a version that was overwritten.
+ */
 function idsOf(doc: SyncDocumentJson): Set<string> {
   const out = new Set<string>();
   for (const section of [doc.taskMaster, doc.dailyPlan] as unknown as Array<Record<string, unknown>>) {
@@ -37,6 +41,7 @@ function idsOf(doc: SyncDocumentJson): Set<string> {
       }
     }
   }
+  for (const c of doc.conflicts ?? []) out.add(c.id);
   return out;
 }
 
@@ -89,6 +94,22 @@ describe('merge fixtures', () => {
       }
       if (fx.expectedDetectedIds) {
         expect(ab.conflicts.map((c) => c.id)).toEqual(fx.expectedDetectedIds);
+      }
+
+      // The records themselves are fully commutative: `side` is read off the
+      // HLC device id, so swapping the arguments no longer swaps the labels.
+      expect(normalize(ba.document.conflicts ?? [])).toEqual(normalize(ab.document.conflicts ?? []));
+
+      // Cross-language snapshot parity: the fixture pins the exact map each
+      // side stored, and the Dart runner asserts the very same JSON.
+      if (fx.expectedSnapshots) {
+        const snapshots = Object.fromEntries(
+          (ab.document.conflicts ?? []).map((c) => [
+            c.id,
+            { winner: c.winner.snapshot, loser: c.loser.snapshot },
+          ]),
+        );
+        expect(snapshots).toEqual(fx.expectedSnapshots);
       }
     });
   }

@@ -128,11 +128,38 @@ void main() {
       if (expectedDetected != null) {
         expect(ab.conflicts.map((c) => c.id).toList(), expectedDetected.cast<String>());
       }
+
+      // The records themselves are fully commutative: `side` is read off the
+      // HLC device id, so swapping the arguments no longer swaps the labels.
+      expect(
+        normalize(ba.document.conflicts.map((c) => c.toJson()).toList()),
+        normalize(ab.document.conflicts.map((c) => c.toJson()).toList()),
+        reason: 'commutative conflicts',
+      );
+
+      // Cross-language snapshot parity: the fixture pins the exact map each
+      // side stored, and the TypeScript runner asserts the very same JSON.
+      final expectedSnapshots = fixture['expectedSnapshots'] as Map<String, dynamic>?;
+      if (expectedSnapshots != null) {
+        expect(
+          <String, dynamic>{
+            for (final c in ab.document.conflicts)
+              c.id: <String, dynamic>{
+                'winner': c.winner.snapshot,
+                'loser': c.loser.snapshot,
+              },
+          },
+          normalize(expectedSnapshots),
+        );
+      }
     });
   }
 }
 
-/// Every entity id a document JSON holds, live or tombstoned.
+/// Every id a document JSON holds, live or tombstoned — conflict records
+/// included, because they are ordinary entities as far as the merge is
+/// concerned and losing one loses the user's only record of a version that was
+/// overwritten.
 Set<String> idsOf(Map<String, dynamic> doc) {
   final out = <String>{};
   for (final key in const ['taskMaster', 'dailyPlan']) {
@@ -143,6 +170,12 @@ Set<String> idsOf(Map<String, dynamic> doc) {
       for (final dynamic entry in value) {
         if (entry is Map && entry['id'] is String) out.add(entry['id'] as String);
       }
+    }
+  }
+  final conflicts = doc['conflicts'];
+  if (conflicts is List) {
+    for (final dynamic entry in conflicts) {
+      if (entry is Map && entry['id'] is String) out.add(entry['id'] as String);
     }
   }
   return out;
