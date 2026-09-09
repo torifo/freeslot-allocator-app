@@ -90,4 +90,78 @@ describe('StaticSite', () => {
     expect(body).toContain('window.__FRELOCATOR_HUB__');
     rmSync(built, { recursive: true, force: true });
   });
+
+  it('escapes the injected JSON so a hostile data path cannot close the script tag', async () => {
+    const hostile = {
+      ...inject,
+      dataFile: '/tmp/</script><img src=x onerror=alert(1)>/"quoted"/data.json',
+    };
+    const body = String((await site.serve('', hostile)).body);
+    // `</script>` must not survive verbatim anywhere in the document.
+    expect(body).not.toContain('</script><img');
+    expect(body).toContain('\\u003c/script\\u003e');
+    // No closing tag beyond the ones the template and our own block already carry.
+    const clean = String((await site.serve('', inject)).body);
+    expect(body.match(/<\/script>/g)!).toHaveLength(clean.match(/<\/script>/g)!.length);
+  });
+
+  it('escapes U+2028/U+2029, which JSON.stringify leaves as raw line terminators', async () => {
+    const body = String((await site.serve('', { ...inject, dataFile: '/tmp/a\u2028b\u2029c.json' })).body);
+    expect(body).not.toContain('\u2028');
+    expect(body).not.toContain('\u2029');
+    expect(body).toContain('\\u2028');
+  });
+
+  it('HTML-escapes the base attribute so the prefix cannot break out of href', async () => {
+    const body = String((await site.serve('', { ...inject, base: '/a"><script>bad()</script>/' })).body);
+    expect(body).toContain('<base href="/a&quot;&gt;&lt;script&gt;bad()&lt;/script&gt;/">');
+    expect(body).not.toContain('<script>bad()');
+  });
+
+  it('carries a CSP and the shared hardening headers on the app HTML', async () => {
+    const r = await site.serve('', inject);
+    const csp = r.headers?.['content-security-policy'] ?? '';
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'");
+    expect(csp).toContain("worker-src 'self' blob:");
+    // Flutter downloads CJK fallback glyphs from fonts.gstatic.com; see the comment on CSP.
+    expect(csp).toContain('https://fonts.gstatic.com');
+  });
+
+  it('re-hashes a file whose size or mtime moved after load(), so a rebuild is never served stale', async () => {
+    const before = (await site.serve('main.dart.js', inject)).headers!.etag;
+    // A rebuild writes new bytes without the server reloading.
+    writeFileSync(join(dist, 'main.dart.js'), 'console.log(2);// rebuilt with a different length');
+    const after = (await site.serve('main.dart.js', inject)).headers!.etag;
+    expect(after).not.toBe(before);
+    // And the stale ETag must no longer win a conditional request.
+    expect((await site.serve('main.dart.js', inject, before as string)).status).toBe(200);
+    expect((await site.serve('main.dart.js', inject, after as string)).status).toBe(304);
+  });
+
+  it('matches the MIME table case-insensitively without loosening the file lookup', async () => {
+    writeFileSync(join(dist, 'LOUD.PNG'), 'x');
+    const r = await site.serve('LOUD.PNG', inject);
+    expect(r.status).toBe(200);
+    expect(r.type).toBe('image/png');
+    // Only the MIME key is folded; the path handed to the filesystem is untouched,
+    // so a name that does not exist stays a 404 even with a known extension.
+    expect((await site.serve('assets/Missing.PNG', inject)).status).toBe(404);
+  });
+
+  it('404s a real directory and any trailing slash instead of serving the SPA shell', async () => {
+    for (const path of ['assets', 'assets/', 'sync/conflicts/']) {
+      expect((await site.serve(path, inject)).status, path).toBe(404);
+    }
+    // The SPA rule still applies to an extension-less path that names nothing.
+    expect((await site.serve('sync/conflicts', inject)).status).toBe(200);
+  });
+
+  it('tells the browser not to cache the not-built-yet page', async () => {
+    const empty = new StaticSite(join(dir, 'nope'));
+    await empty.load();
+    const r = await empty.serve('', inject);
+    expect(r.status).toBe(503);
+    expect(r.headers?.['cache-control']).toBe('no-store');
+  });
 });

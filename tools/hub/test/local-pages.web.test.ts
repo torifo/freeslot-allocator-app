@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HubConfig } from '../src/config.js';
 import { HlcClock } from '../src/hlc.js';
 import { LocalPages } from '../src/local-pages.js';
@@ -137,5 +137,103 @@ describe('web API', () => {
     const config = await HubConfig.load(dir);
     expect(config.devices().map((d) => d.deviceId)).not.toContain(`web-${WEB_ID}`);
     expect(config.webClients().map((c) => c.id)).toContain(`web-${WEB_ID}`);
+  });
+
+  it('leaves warnings empty on a clean web sync instead of blaming the unknown web device', async () => {
+    const r = await post(`/${secret}/api/sync`, emptyDocument(`web-${WEB_ID}`));
+    expect(r.status).toBe(200);
+    const json = JSON.parse(r.body);
+    expect(json.warnings).toEqual([]);
+    expect(json.summary.warnings).toBe(0);
+  });
+
+  it('answers /api/revision from a stat cache, reading data.json once for repeated polls', async () => {
+    const spy = vi.spyOn(store, 'read');
+    await call('GET', `/${secret}/api/revision`, { headers: { 'x-frelocator-web-id': WEB_ID } });
+    await call('GET', `/${secret}/api/revision`, { headers: { 'x-frelocator-web-id': WEB_ID } });
+    await call('GET', `/${secret}/api/revision`, { headers: { 'x-frelocator-web-id': WEB_ID } });
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
+
+  it('does not record a web client for a bare revision poll', async () => {
+    await call('GET', `/${secret}/api/revision`, { headers: { 'x-frelocator-web-id': WEB_ID } });
+    expect((await HubConfig.load(dir)).webClients()).toEqual([]);
+  });
+
+  it('sends the hardening headers on every local page and a CSP on the app HTML', async () => {
+    for (const path of [`/${secret}/pair`, `/${secret}/app/`, `/${secret}/api/document`]) {
+      const r = await call('GET', path, { headers: { 'x-frelocator-web-id': WEB_ID } });
+      expect(r.headers['referrer-policy'], path).toBe('no-referrer');
+      expect(r.headers['x-content-type-options'], path).toBe('nosniff');
+      expect(r.headers['cross-origin-opener-policy'], path).toBe('same-origin');
+    }
+    const app = await call('GET', `/${secret}/app/`, { headers: { 'x-frelocator-web-id': WEB_ID } });
+    expect(String(app.headers['content-security-policy'])).toContain("default-src 'self'");
+  });
+
+  it('400s a malformed escape or an embedded NUL in the app path', async () => {
+    expect((await call('GET', `/${secret}/app/%zz`)).status).toBe(400);
+    expect((await call('GET', `/${secret}/app/a%00b.js`)).status).toBe(400);
+  });
+
+  it('403s a doubly-encoded traversal that would become ../ after one more decode', async () => {
+    expect((await call('GET', `/${secret}/app/%252e%252e/secret.txt`)).status).toBe(403);
+  });
+
+  it('repeats the headers but no body on HEAD', async () => {
+    const r = await call('HEAD', `/${secret}/app/`, { headers: { 'x-frelocator-web-id': WEB_ID } });
+    expect(r.status).toBe(200);
+    expect(r.body).toBe('');
+    expect(r.headers['content-type']).toContain('text/html');
+  });
+
+  it('names POST in the 405 it sends for a non-API route', async () => {
+    const r = await post(`/${secret}/pair`, {});
+    expect(r.status).toBe(405);
+    expect(JSON.parse(r.body).error.message).toMatch(/POST/);
+  });
+});
+
+describe('local pages without a web build', () => {
+  let bareDir: string; let bare: LocalPages; let bareSecret: string;
+  beforeEach(async () => {
+    bareDir = mkdtempSync(join(tmpdir(), 'hub-noweb-'));
+    const config = await HubConfig.load(bareDir);
+    const bareStore = new FileStore(bareDir, 'hub-test');
+    const site = new StaticSite(join(bareDir, 'web-dist'));
+    await site.load();
+    bare = new LocalPages(config, bareStore, {
+      port: 0,
+      lanUrl: () => 'https://192.168.1.10:47820',
+      site,
+      api: new WebApi(new SyncEngine(bareStore, config, new HlcClock('hub-test')), config),
+    });
+    await bare.start();
+    bareSecret = (bare as unknown as { secret: string }).secret;
+  });
+  afterEach(async () => { await bare.stop(); rmSync(bareDir, { recursive: true, force: true }); });
+
+  const bareCall = (path: string) => new Promise<{ status: number; body: string; headers: Record<string, string | string[] | undefined> }>((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port: bare.port, path, method: 'GET', headers: { host: `127.0.0.1:${bare.port}` } }, (res) => {
+      let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve({ status: res.statusCode!, body: b, headers: res.headers }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+
+  it('reports no web app URL and serves the not-built page over HTTP without caching it', async () => {
+    expect(bare.webAppUrl).toBeNull();
+    const r = await bareCall(`/${bareSecret}/app/`);
+    expect(r.status).toBe(503);
+    expect(r.body).toContain('npm run build:web');
+    expect(r.headers['cache-control']).toBe('no-store');
+  });
+
+  it('does not hand out a cacheable 301 to /app/ when there is nothing to redirect to', async () => {
+    const r = await bareCall(`/${bareSecret}/app`);
+    expect(r.status).toBe(503);
+    expect(r.headers.location).toBeUndefined();
+    expect(r.headers['cache-control']).toBe('no-store');
   });
 });

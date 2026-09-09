@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -32,5 +32,19 @@ describe('build-web', () => {
     writeBuildInfo(dir, { gitRev: 'abc1234', flutterVersion: '3.47.2', builtAt: '2026-09-09T00:00:00.000Z' });
     const info = JSON.parse(readFileSync(join(dir, 'BUILD_INFO.json'), 'utf8'));
     expect(info).toEqual({ gitRev: 'abc1234', flutterVersion: '3.47.2', builtAt: '2026-09-09T00:00:00.000Z' });
+  });
+
+  it('copyTree is idempotent: a second copy leaves exactly the same tree', () => {
+    const src = join(dir, 'src'); const dst = join(dir, 'dst');
+    mkdirSync(join(src, 'assets'), { recursive: true });
+    writeFileSync(join(src, 'index.html'), '<html>new</html>');
+    writeFileSync(join(src, 'assets', 'a.bin'), 'a');
+    copyTree(src, dst);
+    const first = readdirSync(dst, { recursive: true }).map(String).sort();
+    copyTree(src, dst);
+    expect(readdirSync(dst, { recursive: true }).map(String).sort()).toEqual(first);
+    expect(readFileSync(join(dst, 'assets', 'a.bin'), 'utf8')).toBe('a');
+    // The staging directory must not survive a successful copy.
+    expect(existsSync(`${dst}.tmp`)).toBe(false);
   });
 });
