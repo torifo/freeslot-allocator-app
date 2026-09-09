@@ -6,10 +6,13 @@ import 'package:frelocator/features/daily_plan/domain/daily_plan_models.dart';
 import 'package:frelocator/features/task_master/domain/task_models.dart';
 import 'package:frelocator/services/hub_mode/hub_mode.dart';
 import 'package:frelocator/services/storage/hub_backed_store.dart';
+import 'package:frelocator/services/sync/conflict_record.dart';
 import 'package:frelocator/services/sync/lan_sync_types.dart';
 import 'package:frelocator/services/sync/sync_document.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+
+import '../../helpers/conflict_fixtures.dart';
 
 const hub = HubMode(
   base: '/abc/app/',
@@ -38,11 +41,16 @@ final plansB = DailyPlanStateData(
   assignments: <SlotTaskAssignment>[],
 );
 
-Map<String, dynamic> docOf({TaskMasterStateData? tasks, DailyPlanStateData? plans}) => SyncDocument(
+Map<String, dynamic> docOf({
+  TaskMasterStateData? tasks,
+  DailyPlanStateData? plans,
+  List<ConflictRecord> conflicts = const <ConflictRecord>[],
+}) => SyncDocument(
   exportedAt: DateTime.utc(2026, 9, 9),
   deviceId: 'hub-macos',
   taskMaster: tasks ?? TaskMasterStateData.initial(),
   dailyPlan: plans ?? DailyPlanStateData.initial(),
+  conflicts: conflicts,
 ).toJson();
 
 Map<String, dynamic> emptyDoc() => docOf();
@@ -161,6 +169,71 @@ void main() {
     await store.writeAll(TaskMasterStateData.initial(), DailyPlanStateData.initial());
     await store.flush();
     expect(await store.changedSinceLastRead(), isFalse);
+  });
+
+  test('the pushed document carries the conflict records', () async {
+    final record = conflictFixture(entityId: 'tsk-1');
+    final posted = <Map<String, dynamic>>[];
+    final store = storeWith(MockClient((r) async {
+      if (isRevision(r)) return okJson({'revision': 'a' * 16, 'modifiedAt': null});
+      if (r.method == 'GET') return okJson(documentBody(document: docOf(conflicts: <ConflictRecord>[record])));
+      posted.add(jsonDecode(r.body) as Map<String, dynamic>);
+      return okJson(syncBody(document: docOf(conflicts: <ConflictRecord>[record])));
+    }));
+    await store.readTaskMaster();
+    // A resolution made in this browser reaches the hub — and from there the
+    // phone — only as a record, so dropping them from the payload would make
+    // the decision local to the tab.
+    await store.writeConflicts(<ConflictRecord>[record.copyWith(resolution: 'device')]);
+    await store.flush();
+    final sent = (posted.single['conflicts'] as List).single as Map<String, dynamic>;
+    expect(sent['id'], record.id);
+    expect(sent['resolution'], 'device');
+    expect((sent['loser'] as Map)['snapshot']['title'], 'スマホの版');
+  });
+
+  test('a merge that only brings back a conflict record still reloads the screen', () async {
+    final detected = conflictFixture(entityId: 'tsk-1');
+    final store = storeWith(MockClient((r) async {
+      if (isRevision(r)) return okJson({'revision': 'a' * 16, 'modifiedAt': null});
+      if (r.method == 'GET') return okJson(documentBody());
+      // Tasks and plans came back exactly as sent; the merge recorded a
+      // conflict, which is the whole of the news and the conflict screen is
+      // now behind it.
+      return okJson(syncBody(document: docOf(conflicts: <ConflictRecord>[detected])));
+    }));
+    await store.readTaskMaster();
+    await store.writeAll(TaskMasterStateData.initial(), DailyPlanStateData.initial());
+    await store.flush();
+    expect(await store.changedSinceLastRead(), isTrue);
+    expect((await store.readConflicts()).single.id, detected.id);
+  });
+
+  test('updateDocument folds the change into the snapshot being pushed', () async {
+    final posted = <Map<String, dynamic>>[];
+    final store = storeWith(MockClient((r) async {
+      if (isRevision(r)) return okJson({'revision': 'a' * 16, 'modifiedAt': null});
+      if (r.method == 'GET') return okJson(documentBody());
+      posted.add(jsonDecode(r.body) as Map<String, dynamic>);
+      return okJson(syncBody(document: jsonDecode(r.body) as Map<String, dynamic>));
+    }));
+    await store.readTaskMaster();
+    await store.updateDocument(
+      (document) => document.copyWith(
+        taskMaster: document.taskMaster.copyWith(shareCategories: true),
+        conflicts: <ConflictRecord>[conflictFixture(entityId: 'tsk-1')],
+      ),
+    );
+    await store.flush();
+    expect(posted, hasLength(1), reason: 'read and write are one edit, not two');
+    expect((posted.single['taskMaster'] as Map)['settings']['shareCategories'], true);
+    expect(posted.single['conflicts'], hasLength(1));
+
+    // Returning null asks for nothing, so nothing is queued.
+    await store.updateDocument((_) => null);
+    expect(store.hasUnsentEdits.value, isFalse);
+    await store.flush();
+    expect(posted, hasLength(1));
   });
 
   test('a failed POST raises the unsent flag and keeps the local snapshot', () async {

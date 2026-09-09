@@ -4,7 +4,11 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frelocator/features/task_master/domain/task_models.dart';
+import 'package:frelocator/features/daily_plan/domain/daily_plan_models.dart';
 import 'package:frelocator/services/storage/file_backed_store.dart';
+import 'package:frelocator/services/sync/conflict_record.dart';
+
+import '../../helpers/conflict_fixtures.dart';
 
 /// dart:io's `Directory` has no `setLastModified`, so backdating a
 /// directory's own mtime (as opposed to a file's) has to shell out.
@@ -29,6 +33,50 @@ void main() {
   });
   tearDown(() async {
     await tmp.delete(recursive: true);
+  });
+
+  test('an ordinary local edit does not erase the conflict records', () async {
+    final store = FileBackedStore(directory: tmp.path, deviceId: 'macos-1');
+    final record = conflictFixture(entityId: 'tsk-1');
+    await store.writeConflicts(<ConflictRecord>[record]);
+
+    // Writing one half of the document is what the repositories do on every
+    // save; dropping the records here would answer the hub's open question for
+    // it, silently, on the next merge.
+    await store.writeTaskMaster(
+      TaskMasterStateData.initial().copyWith(shareCategories: true),
+    );
+    await store.writeDailyPlan(DailyPlanStateData.initial());
+
+    final kept = await store.readConflicts();
+    expect(kept.single.id, record.id);
+    expect(kept.single.loser.snapshot['title'], 'スマホの版');
+    expect((await store.readTaskMaster()).shareCategories, isTrue);
+    final json = jsonDecode(File('${tmp.path}/data.json').readAsStringSync())
+        as Map<String, dynamic>;
+    expect((json['conflicts'] as List).single['id'], record.id);
+  });
+
+  test('updateDocument reads, transforms and writes under one lock', () async {
+    final store = FileBackedStore(directory: tmp.path, deviceId: 'macos-1');
+    await store.writeConflicts(<ConflictRecord>[conflictFixture(entityId: 'tsk-1')]);
+
+    final written = await store.updateDocument(
+      (document) => document.copyWith(
+        taskMaster: document.taskMaster.copyWith(shareCategories: true),
+        conflicts: <ConflictRecord>[
+          ...document.conflicts,
+          conflictFixture(entityId: 'tsk-2'),
+        ],
+      ),
+    );
+    expect(written.conflicts, hasLength(2));
+    expect((await store.readConflicts()).map((c) => c.entityId).toList(), <String>['tsk-1', 'tsk-2']);
+    expect((await store.readTaskMaster()).shareCategories, isTrue);
+
+    // Returning null is how a caller says there was nothing to do.
+    await store.updateDocument((_) => null);
+    expect(await store.readConflicts(), hasLength(2));
   });
 
   test('returns initial state when the file does not exist', () async {

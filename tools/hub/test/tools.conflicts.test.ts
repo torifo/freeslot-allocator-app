@@ -122,6 +122,56 @@ beforeEach(async () => {
 
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
+describe('settings conflicts', () => {
+  /** The settings entity is one flag; a record on it carries just that. */
+  const settingsSide = (shareCategories: boolean, clock: string): Entity => ({
+    id: 'settings', shareCategories, clock,
+    updatedAt: iso(now - 10_000), deletedAt: null, migrated: false,
+  });
+
+  const settingsRecord = record(
+    'settings',
+    settingsSide(false, HUB_CLOCK),
+    settingsSide(true, DEVICE_CLOCK),
+    { entityType: 'settings', entityId: 'settings' },
+  );
+
+  beforeEach(async () => {
+    await store.update((doc) => {
+      doc.conflicts = [settingsRecord];
+      return doc;
+    });
+  });
+
+  it('adopting the side already stored marks the record and writes nothing', async () => {
+    const r = await tools.resolveConflict({ id: settingsRecord.id, adopt: 'hub' });
+    expect(r.wrote).toBe(false);
+    expect((await store.read()).taskMaster.settings!.shareCategories).toBe(false);
+    expect((await store.read()).conflicts![0].resolution).toBe('hub');
+  });
+
+  it('adopting the other side writes the flag with a clock that beats both versions', async () => {
+    const r = await tools.resolveConflict({ id: settingsRecord.id, adopt: 'device' });
+    expect(r).toMatchObject({ wrote: true, summary: { updated: 1 } });
+    const settings = (await store.read()).taskMaster.settings!;
+    expect(settings.shareCategories).toBe(true);
+    expect(Hlc.compare(Hlc.parse(String(settings.clock)), Hlc.parse(HUB_CLOCK))).toBeGreaterThan(0);
+    expect(Hlc.compare(Hlc.parse(String(settings.clock)), Hlc.parse(DEVICE_CLOCK))).toBeGreaterThan(0);
+    // The settings entity is never a list member, so it can never be "no longer
+    // in the document": the record stays resolvable whatever a purge did.
+    expect(settings.deletedAt).toBeNull();
+  });
+
+  it('list_conflicts and get_conflict read a settings record as 設定', async () => {
+    const listed = await tools.listConflicts({ entityType: 'settings' });
+    expect(listed.conflicts).toHaveLength(1);
+    expect(listed.conflicts[0].label).toBe('設定');
+    const got = await tools.getConflict({ id: settingsRecord.id });
+    expect(got.differences).toEqual([{ field: 'shareCategories', hub: false, device: true }]);
+    expect(got.sideLabels).toEqual({ hub: 'PC 版', device: 'スマホ版' });
+  });
+});
+
 describe('conflict side labels and blame', () => {
   it('get_conflict names the two sides 「PC 版」/「スマホ版」', async () => {
     expect((await tools.getConflict({ id })).sideLabels).toEqual({

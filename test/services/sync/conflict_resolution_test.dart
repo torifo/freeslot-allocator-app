@@ -9,8 +9,11 @@ import 'package:frelocator/services/sync/conflict_resolver.dart';
 import 'package:frelocator/services/sync/lan_sync_client.dart';
 import 'package:frelocator/services/sync/sync_progress.dart';
 import 'package:frelocator/services/sync/sync_service.dart';
+import 'package:frelocator/services/sync/conflict_record.dart';
 import 'package:frelocator/services/sync/sync_settings.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../helpers/conflict_fixtures.dart';
 
 class _FakeClient extends LanSyncClient {
   _FakeClient() : super(allowInsecureForTest: true);
@@ -217,6 +220,79 @@ void main() {
     await expectLater(
       service.resolveConflict('cf-nope', ConflictAdoption.hub),
       throwsA(isA<ConflictResolutionException>()),
+    );
+  });
+
+  test('resolveAll writes nothing at all when one record cannot be applied', () async {
+    final service = await withConflict();
+    final document = await service.data.exportDocument();
+    // A second record whose entity a purge already dropped. Adopting a side of
+    // it is refused, and a resolve is all or nothing: the first record — which
+    // could have been applied — must not be left decided on its own.
+    await service.data.importDocument(
+      document.copyWith(
+        conflicts: <ConflictRecord>[
+          ...document.conflicts,
+          conflictFixture(entityId: 'gone-1'),
+        ],
+      ),
+    );
+
+    await expectLater(
+      service.resolveAll(ConflictAdoption.device),
+      throwsA(isA<ConflictResolutionException>()),
+    );
+
+    final after = await service.data.exportDocument();
+    expect(after.conflicts.every((c) => c.isOpen), isTrue);
+    expect(after.taskMaster.tasks.single.title, 'PC で直した');
+    // And the way out is still open: closing the records writes no entity, so
+    // the purged one cannot refuse it.
+    expect((await service.resolveAll(ConflictAdoption.current)).resolved, 2);
+  });
+
+  test('a settings conflict adopts the recorded カテゴリ共有 flag', () async {
+    final service = await make();
+    final document = await service.data.exportDocument();
+    expect(document.taskMaster.shareCategories, isFalse);
+    final record = conflictFixture(
+      entityId: 'settings',
+      entityType: 'settings',
+      winner: <String, dynamic>{
+        'shareCategories': false, 'clock': hubClock,
+        'updatedAt': '2026-02-01T00:00:00.000Z', 'deletedAt': null, 'migrated': false,
+      },
+      loser: <String, dynamic>{
+        'shareCategories': true, 'clock': deviceClockValue,
+        'updatedAt': '2026-02-01T00:00:00.000Z', 'deletedAt': null, 'migrated': false,
+      },
+    );
+    await service.data.importDocument(
+      document.copyWith(conflicts: <ConflictRecord>[record]),
+    );
+
+    // The PC version is what is already stored, so adopting it is a decision
+    // rather than an edit.
+    final kept = await service.resolveConflict(record.id, ConflictAdoption.hub);
+    expect(kept.resolved, 1);
+    expect(kept.wrote, 0);
+    expect((await service.data.taskRepo.load()).shareCategories, isFalse);
+
+    // Reopen it and take the other side, which is a real write with a clock of
+    // its own so the next merge carries it to the PC.
+    await service.data.importDocument(
+      (await service.data.exportDocument()).copyWith(
+        conflicts: <ConflictRecord>[record],
+      ),
+    );
+    final adopted = await service.resolveConflict(record.id, ConflictAdoption.device);
+    expect(adopted.wrote, 1);
+    final tasks = await service.data.taskRepo.load();
+    expect(tasks.shareCategories, isTrue);
+    expect(
+      tasks.settingsMeta.clock.compareTo(Hlc.parse(hubClock)) > 0,
+      isTrue,
+      reason: 'a decision that loses the next merge is not a decision',
     );
   });
 
