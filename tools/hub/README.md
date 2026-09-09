@@ -122,7 +122,7 @@ FRELOCATOR の macOS 版と同じ `data.json` を編集する MCP サーバー�
 - `/pair` 以外は端末別トークンによる Bearer 認証必須。トークンは `hub.json`（同ディレクトリ、パーミッション 600）にのみ保存され、`sync_status` など MCP 応答には絶対に出さない。
 - ペアリングコードの誤入力は 1 コードあたり 10 回まで。超えるとそのコードはロックされ、新しいコードを発行し直す必要がある。
 - ローカルページ（`/pair` `/qr`）は **URL を知っているプロセスをすべて信頼する**。同じ Mac の他プロセスや他ユーザーから守るため、全ルートはハブ起動ごとのランダムな秘密パス（16 バイト hex）配下に置かれ、その URL は `sync_status` の応答でしか手に入らない。秘密パスの付いていないリクエストは 404。
-- 加えて、ブラウザからの横取りを防ぐガードを掛けている: `GET` / `HEAD` 以外は 405、`Host` が `127.0.0.1:<port>` か `localhost:<port>` でなければ 403（DNS リバインディング対策）、`Origin` ヘッダが付いていれば 403、`Sec-Fetch-Site` が `none` / `same-origin` 以外なら 403。
+- 加えて、ブラウザからの横取りを防ぐガードを掛けている: `Host` が `127.0.0.1:<port>` か `localhost:<port>` でなければ 403（DNS リバインディング対策）、`Origin` が付いていて同一オリジンと完全一致しなければ 403、`Sec-Fetch-Site` が `none` / `same-origin` 以外なら 403。メソッドは `GET` / `HEAD` のみで、`POST` は `/<秘密のパス>/api/` 配下だけが受け付ける（それ以外は 405）。
 - `import_file` が読めるのはデータディレクトリ・`~/Downloads`・`FRELOCATOR_IMPORT_DIRS` 配下だけ。エラーメッセージはファイルの中身を反射しない（`not valid JSON` / `cannot read file` の固定文言）。
 - `hub.json` が壊れている（JSON が壊れている・証明書が不正）場合は `hub.json.broken-<timestamp>` に退避して起動する。証明書ごと失われるため、**全端末が再ペアリングになる**。ローカルのタスク管理ツールは引き続き使えるが、LAN 同期は `configError` 付きで無効になる。
 
@@ -132,8 +132,63 @@ FRELOCATOR の macOS 版と同じ `data.json` を編集する MCP サーバー�
 - `413 payload_too_large`: `/pair` は 8KB、`/sync` は 20MB が上限。応答は `Connection: close` を伴うので、クライアントは接続を張り直してから再送する。
 - `426 upgrade_required`: スマホ側のスキーマバージョンがハブより古い。アプリを更新する。
 
+## ハブ上の Web 版（Plan 3a）
+
+ハブ自身が Flutter web ビルドを配信し、そのブラウザが同一オリジンの JSON API で PC の `data.json` を直接読み書きする。公開 Web 版（`app.frelocator.riumu.net`）とスマホアプリの挙動は変わらない。
+
+- 準備: `cd tools/hub && npm run build:web`（リポジトリ直下で `flutter build web` を回して `web-dist/` に置く。`web-dist/` は git 管理外）。ビルドは `web-dist.tmp` に組み立ててから差し替えるので、途中で失敗しても手元の `web-dist/` は無傷のまま残る。ハブを動かしたまま再ビルドしても構わない（ETag はファイルごとの `mtime`/サイズで持っていて、ずれた分だけ取り直す）。`flutter` が PATH に無いときは、その旨だけ言って止まる。
+- 開き方: `sync_status` の `lan.webApp.url`（`http://127.0.0.1:47821/<秘密のパス>/app/`）をブラウザで開く。URL には起動ごとに変わる秘密プレフィックスが入るので、ブラウザの履歴から開き直さず毎回 `sync_status` から取り直す。
+- このブラウザは PC の `data.json` を **直接** 編集する。ブラウザ内に控えは持たない（リロードで未送信の編集は失われる。未送信がある間は赤い帯と離脱警告が出る）。
+- MCP の編集は 2 秒間隔のポーリングで画面に出る。タブが隠れている間はポーリングを止める。
+- `sync_status.lan.webApp.stale` が `true` のときは、`web-dist/` が今の HEAD と違うコミットで作られている。`npm run build:web` を実行し直す。`gitRev` が読めない・`git` が無い場合は判定できないので `false` のまま。
+- `web-dist/` が無い場合は `built: false` で URL も出ない。ハブ自体は通常どおり起動する。
+- `sync_status.webClients` は画面を開いたブラウザの一覧（表示専用）。墓標の掃除（`purge_tombstones`）のカットオフ計算には **入らない**。不要になったら `forget_device` に `web-<16 桁 hex>` を渡して消せる。最大 16 件で、あふれると `lastSeenAt` が最も古いものから捨てる。`hub.json` への書き戻しは「初めて見た id」か「記録済みの `lastSeenAt` が 5 分より古い」ときだけなので、タブを開けっぱなしにしてもファイルを叩き続けない。
+- ブラウザ側の編集は `web-…` という擬似端末 id で `SyncEngine.sync()` を通るが、ペアリング済み端末としては記録しない（ブラウザは手元に控えを持たないので、墓標の掃除を待たせてはいけない）。そのため web からの同期では端末ごとの `lastSyncAt` 記録を行わず、成功した同期の `warnings` は空になる。
+
+### 動作確認
+
+`npm run smoke` は `web-dist/` があるときだけブラウザ往復も検査する（無ければその節をスキップして緑のまま）。見ているのは、index.html が `window.__FRELOCATOR_HUB__` と書き換え済みの `<base href>` を含むこと・`flutter_bootstrap.js` が配信されること・MCP の `add_task` が `GET /api/document` に出ること・`POST /api/sync` で足したタスクが `list_tasks` に出ること・そのブラウザが `webClients` にだけ載って `devices` には載らないこと・別オリジンからの `POST` と web id ヘッダ無しの呼び出しが 403 になること。
+
+ブラウザでの手動確認（Chrome / Safari）:
+
+1. `sync_status` の `lan.webApp.url` を開く。
+2. MCP から `add_task` → 数秒で画面に出る。
+3. ブラウザで編集 → スマホの「PC と同期」に出る。
+4. タブを隠す → `/api/revision` のリクエストが止まる（Network タブ）。
+5. 保存前にリロード → 未送信バナーと離脱警告が出る。
+
+### API とガード
+
+- `GET /<秘密のパス>/api/document` — 文書全体と `hubDeviceId` / `revision` / `serverTime`。
+- `GET /<秘密のパス>/api/revision` — `revision`（`sha256(data.json)` の先頭 16 桁）と `modifiedAt` だけ。ポーリング用。
+- `POST /<秘密のパス>/api/sync?mode=merge|take_hub|take_web` — LAN の `/sync` と同じ `SyncEngine.sync()` を通る（`take_web` は LAN の `take_phone` と同じ意味）。
+- どのリクエストも `X-FRELOCATOR-Web-Id: <16 桁 hex>` が必須（端末 id は `web-<hex>`）。カスタムヘッダはプリフライト無しでは送れないため、秘密プレフィックスと合わせて二重の壁になる。`POST` は `Content-Type: application/json` も必須。
+- エラーは LAN 側と同じ `{ "error": { "code": ..., "message": ... } }`。
+- `GET /api/revision` は `data.json` の `{mtime, サイズ}` をキーに結果を持ち回す。値が動いていなければデータロックも取らず再ハッシュもしないので、2 秒ごとのポーリングがスマホの同期とロックを奪い合わない。
+
+### ブラウザに残るもの・保存できないとき
+
+- ブラウザ（hub モード）が localStorage に持つのは web id（`frelocator.webId`）と HLC クロックだけです。タスクや計画などの業務データはブラウザに保存されず、常にハブの `data.json` が正です。記録に刻まれる端末 id は保存せず `web-<webId>` として導出します。
+- 保存に失敗したとき: 5xx や接続断などの一時的な失敗は 2→4→8 秒（上限 30 秒）のバックオフで自動再送します。ハブが同じ理由で拒否し続けるもの（`409 purged_before`、`426 upgrade_required`、`400 invalid_document` / `bad_timestamp`、`403`）は再送を止めて編集を手元に保持し、「PC と同期」カードに理由と「PC のデータで置き換える」「ブラウザのデータで置き換える」を出します（それぞれ `POST /<秘密のパス>/api/sync?mode=take_hub` / `?mode=take_web`）。
+
+
+### レスポンスヘッダ
+
+ローカルページのすべての応答に `Referrer-Policy: no-referrer`（秘密プレフィックスを `Referer` に漏らさない）・`X-Content-Type-Options: nosniff`・`Cross-Origin-Opener-Policy: same-origin` を付ける。アプリの HTML にはさらに CSP を付ける:
+
+```
+default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline';
+img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com;
+connect-src 'self' https://fonts.gstatic.com; worker-src 'self' blob:
+```
+
+`'unsafe-inline'`（script）は Flutter が `flutter_bootstrap.js` と `__FRELOCATOR_HUB__` をインラインで置くため、`'wasm-unsafe-eval'` は CanvasKit / skwasm のため。CanvasKit 自体はローカル配信（ビルドの `--no-web-resources-cdn` により `useLocalCanvasKit: true`）なので `script-src` は `'self'` のまま。
+
+唯一の外部許可が `https://fonts.gstatic.com` で、これは Flutter エンジンが日本語の字形を Noto Sans JP のサブセットとして取りに行くため（`fontFallbackBaseUrl` の既定値）。アプリはフォントを同梱していないので、ここを塞ぐと日本語がすべて豆腐になる。実ビルドの `web-dist/` を Chrome で読み込んで確認した結果、外部に出るリクエストはこの Noto のサブセットだけで、`.wasm` を含む他のすべては同一オリジンから配信されている。
+
 ## 開発
 
 - テスト: `npm test`（マージ規則と不変条件は `test/fixtures/sync_merge` を Flutter 側と共有）。
 - 型検査: `npm run typecheck`（`tsconfig.test.json`。テストも含めて検査する）。
+- web 版のビルド: `npm run build:web`（`flutter build web --release` を回して `web-dist.tmp` へ複製してから `web-dist/` に差し替え、`BUILD_INFO.json` に git rev と時刻を書く）。
 - stdio サーバーの疎通確認: `npm run smoke`（ビルドしてから実クライアントでツール一覧を取り、カテゴリ作成から並べ替え・割り当て移動・削除・`undo_last_write`・`purge_tombstones` まで CRUD を一巡させ、各段階で不変条件を検査する）。

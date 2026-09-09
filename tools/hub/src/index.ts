@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { execFile } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { HubConfig } from './config.js';
@@ -7,8 +10,10 @@ import { LanServer } from './lan-server.js';
 import { LocalPages } from './local-pages.js';
 import { lanAddresses } from './net.js';
 import { FileStore } from './store.js';
+import { StaticSite } from './static-server.js';
 import { SyncEngine } from './sync-engine.js';
-import { HubTools, ToolError, schemas } from './tools.js';
+import { HubTools, ToolError, schemas, webAppInfo } from './tools.js';
+import { WebApi } from './web-api.js';
 
 /** Diagnostics go to stderr: stdout carries the MCP stdio protocol and nothing else. */
 const log = (message: string): void => void process.stderr.write(`[hub] ${message}\n`);
@@ -47,11 +52,24 @@ const engine = config ? new SyncEngine(store, config, clock) : null;
 const lan = config && engine
   ? new LanServer(config, engine, { port: lanPort, host: '0.0.0.0', advertise: process.env.FRELOCATOR_MDNS !== 'off', hubDeviceId: store.deviceId })
   : null;
+// `dist/` sits one level under the package root, so web-dist is a sibling of it.
+const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+const site = new StaticSite(join(packageRoot, 'web-dist'));
+await site.load();
+/** Read once: `sync_status` must not fork `git` on every call. */
+const buildInfo = await site.buildInfo();
+const headRev = await new Promise<string | null>((resolve) => {
+  execFile('git', ['rev-parse', 'HEAD'], { cwd: packageRoot }, (error, stdout) =>
+    resolve(error ? null : stdout.trim() || null));
+});
+const webApi = config && engine ? new WebApi(engine, config) : null;
 const pages = config && lan
   ? new LocalPages(config, store, {
       port: localPort,
       lanUrl: () => (lan.address ? `https://${lan.address}:${lan.port}` : null),
       lanAddresses: () => lanAddresses(),
+      site,
+      api: webApi ?? undefined,
     })
   : null;
 
@@ -86,6 +104,15 @@ const tools = config && engine && lan && pages
         // stops another local process from reading the pairing code.
         pairingPage: listening ? pages.pairingPage : null,
         qrPage: listening ? pages.qrPage : null,
+        // The URL only exists while the local pages server is up; the build
+        // information is reported either way, so a stale build is visible
+        // before the user goes looking for the page.
+        webApp: webAppInfo({
+          built: site.available,
+          url: listening ? pages.webAppUrl : null,
+          build: buildInfo,
+          headRev,
+        }),
       }),
     })
   : new HubTools(store, clock);
@@ -154,7 +181,7 @@ register('copy_daily_plan', 'Copy slots and assignments from one date to another
 register('weekly_report', 'Aggregate time by kind/category for a week', schemas.weeklyReport.shape, (i) => wrap(() => tools.weeklyReport(i)));
 register('export_data', 'Return the full v2 document', {}, () => wrap(() => tools.exportData()));
 register('undo_last_write', 'Restore data.json.bak (one generation)', {}, () => wrap(() => tools.undoLastWrite()));
-register('sync_status', 'Data file, LAN URL and certificate fingerprint, pairing/QR page URLs (localhost), paired devices, last sync progress', {}, () => wrap(async () => ({ ...(await tools.syncStatus()), lanError, configError })));
+register('sync_status', 'Data file, LAN URL and certificate fingerprint, pairing/QR page URLs (localhost), the hub-served web app URL (lan.webApp) and the browsers that opened it, paired devices, last sync progress', {}, () => wrap(async () => ({ ...(await tools.syncStatus()), lanError, configError })));
 register('import_file', 'Merge a v2 JSON file exported from the phone into the hub data (the file must live under the data dir, ~/Downloads or FRELOCATOR_IMPORT_DIRS; its deviceId is registered for purge accounting only after the merge succeeds, and no pairing code is consumed)', schemas.importFile.shape, (i) => wrap(() => tools.importFile(i)));
 register('import_data', 'Merge an inline v2 document (same payload as export_data). mode=replace overwrites the hub document with it instead of merging, which is destructive; the previous content stays in data.json.bak, so undo_last_write reverses it', schemas.importData.shape, (i) => wrap(() => tools.importData(i)));
 register('purge_tombstones', 'Physically delete tombstones deleted before min(lastSyncAt of paired devices) - 24h; sets purgedBefore', {}, () => wrap(() => tools.purgeTombstones()));

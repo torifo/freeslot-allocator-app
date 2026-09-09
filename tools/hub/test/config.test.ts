@@ -166,4 +166,47 @@ describe('HubConfig', () => {
     await cfg.forgetDevice('android-1');
     expect(cfg.deviceForToken(token)).toBeUndefined();
   });
+
+  it('does not rewrite hub.json for a web client seen again within the refresh window', async () => {
+    const cfg = await HubConfig.load(dir);
+    const path = join(dir, 'hub.json');
+    await cfg.recordWebClient('web-00112233445566aa', '2026-09-09T00:00:00.000Z');
+    const first = statSync(path).mtimeMs;
+    // A browser polls every few seconds; each poll must not cost a file rewrite.
+    for (let i = 0; i < 5; i += 1) await cfg.recordWebClient('web-00112233445566aa', '2026-09-09T00:00:10.000Z');
+    expect(statSync(path).mtimeMs).toBe(first);
+    expect(cfg.webClients()).toEqual([{ id: 'web-00112233445566aa', lastSeenAt: '2026-09-09T00:00:10.000Z' }]);
+  });
+
+  it('persists again once the recorded lastSeenAt is older than the refresh window', async () => {
+    const cfg = await HubConfig.load(dir);
+    await cfg.recordWebClient('web-00112233445566aa', '2026-09-09T00:00:00.000Z');
+    await cfg.recordWebClient('web-00112233445566aa', '2026-09-09T00:10:00.000Z');
+    const stored = JSON.parse(readFileSync(join(dir, 'hub.json'), 'utf8'));
+    expect(stored.webClients).toEqual([{ id: 'web-00112233445566aa', lastSeenAt: '2026-09-09T00:10:00.000Z' }]);
+  });
+
+  it('caps the web client list and evicts the least recently seen browser', async () => {
+    const cfg = await HubConfig.load(dir);
+    // 20 distinct browsers, oldest first.
+    for (let i = 0; i < 20; i += 1) {
+      await cfg.recordWebClient(`web-${String(i).padStart(16, '0')}`, `2026-09-09T00:${String(i).padStart(2, '0')}:00.000Z`);
+    }
+    const ids = cfg.webClients().map((c) => c.id);
+    expect(ids).toHaveLength(16);
+    expect(ids).not.toContain('web-0000000000000000');
+    expect(ids).not.toContain('web-0000000000000003');
+    expect(ids).toContain('web-0000000000000019');
+    expect(JSON.parse(readFileSync(join(dir, 'hub.json'), 'utf8')).webClients).toHaveLength(16);
+  });
+
+  it('forgets a browser id through forget_device, without touching paired devices', async () => {
+    const cfg = await HubConfig.load(dir);
+    await cfg.registerDevice('android-1', 'Pixel');
+    await cfg.recordWebClient('web-00112233445566aa', '2026-09-09T00:00:00.000Z');
+    await cfg.forgetDevice('web-00112233445566aa');
+    expect(cfg.webClients()).toEqual([]);
+    expect(cfg.devices().map((d) => d.deviceId)).toEqual(['android-1']);
+    await expect(cfg.forgetDevice('web-00112233445566aa')).rejects.toThrow(/unknown device/);
+  });
 });

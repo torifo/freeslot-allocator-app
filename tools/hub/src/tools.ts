@@ -2,7 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve as resolvePath, sep } from 'node:path';
 import { z } from 'zod';
-import type { DeviceRecord, HubConfig } from './config.js';
+import type { DeviceRecord, HubConfig, WebClientRecord } from './config.js';
 import { Hlc, HlcClock } from './hlc.js';
 import { copyId, generateId } from './ids.js';
 import { checkInvariants } from './invariants.js';
@@ -10,6 +10,47 @@ import { MAX_BODY } from './limits.js';
 import { isDeleted, TASK_KINDS, type Entity, type SyncDocumentJson } from './model.js';
 import { FileStore } from './store.js';
 import { SyncRejected, type SyncEngine, type SyncProgress, type SyncSummary } from './sync-engine.js';
+
+/** What `sync_status` reports about the hub-served browser app (Plan 3a). */
+export interface WebAppInfo {
+  /** `http://127.0.0.1:<port>/<secret>/app/`, or null when there is nothing to serve. */
+  url: string | null;
+  built: boolean;
+  gitRev: string | null;
+  builtAt: string | null;
+  /** True when BUILD_INFO.json names a different commit than the checkout's HEAD. */
+  stale: boolean;
+}
+
+/** A BUILD_INFO.json value only counts when it is a string: the file sits in a directory the user can edit. */
+const asString = (value: unknown): string | null => (typeof value === 'string' && value !== '' ? value : null);
+
+/**
+ * Folds the build stamp and the checkout's HEAD into what `sync_status` shows.
+ *
+ * `stale` is deliberately conservative: with no BUILD_INFO.json, no git, or an
+ * unreadable field there is nothing to compare, and telling the user to rebuild
+ * on a guess costs them a `flutter build web`. The revisions are compared by
+ * prefix because BUILD_INFO.json may carry an abbreviated hash.
+ */
+export function webAppInfo(input: {
+  built: boolean;
+  url: string | null;
+  build: Record<string, unknown> | null;
+  headRev: string | null;
+}): WebAppInfo {
+  const gitRev = input.built ? asString(input.build?.gitRev) : null;
+  const headRev = asString(input.headRev);
+  const same = gitRev !== null && headRev !== null
+    && (gitRev === headRev || headRev.startsWith(gitRev) || gitRev.startsWith(headRev));
+  return {
+    url: input.built ? input.url : null,
+    built: input.built,
+    gitRev,
+    builtAt: input.built ? asString(input.build?.builtAt) : null,
+    stale: gitRev !== null && headRev !== null && !same,
+  };
+}
 
 /** What `sync_status` reports about the LAN listener. Never carries a device token. */
 export interface LanInfo {
@@ -21,6 +62,7 @@ export interface LanInfo {
   port: number | null;
   pairingPage: string | null;
   qrPage: string | null;
+  webApp: WebAppInfo;
 }
 
 export interface HubToolsDeps {
@@ -54,6 +96,8 @@ export interface SyncStatus {
   fingerprint: string | null;
   pairing: ReturnType<HubConfig['pairingState']>;
   devices: DeviceStatus[];
+  /** Browsers that opened the hub-served app. Display only: they hold no local store, so they are not part of the purge cutoff. */
+  webClients: WebClientRecord[];
   lastSync: SyncProgress | null;
   lanError: string | null;
   configError: string | null;
@@ -1278,7 +1322,7 @@ export class HubTools {
       configError: null as string | null,
     };
     if (!this.deps) {
-      return { ...base, lan: null, fingerprint: null, pairing: { state: 'none', expiresAt: null, failures: 0 }, devices: [], lastSync: null };
+      return { ...base, lan: null, fingerprint: null, pairing: { state: 'none', expiresAt: null, failures: 0 }, devices: [], webClients: [], lastSync: null };
     }
     const { config, engine, lan } = this.deps;
     return {
@@ -1291,6 +1335,7 @@ export class HubTools {
         ...device,
         progress: engine.progressFor(device.deviceId) ?? null,
       })),
+      webClients: config.webClients(),
       lastSync: engine.lastSync,
     };
   }

@@ -69,6 +69,20 @@ class McpGuideSection extends StatelessWidget {
               'どちらのページもこの Mac からしか開けません。',
               style: TextStyle(fontSize: 12),
             ),
+            const SizedBox(height: 12),
+            Text('ブラウザ版をこの Mac で開く', style: theme.textTheme.labelLarge),
+            const Text(
+              'ハブは FRELOCATOR のブラウザ版も配信できます。'
+              'tools/hub で npm run build:web を一度実行してから、'
+              'sync_status の lan.webApp.url をこの Mac のブラウザで開いてください。'
+              'この URL にもハブを起動するたびに変わる秘密の文字列が入ります。',
+              style: TextStyle(fontSize: 12),
+            ),
+            const Text(
+              'ブラウザ版はこの Mac の data.json を直接読み書きします（ブラウザ側に控えは残りません）。'
+              'lan.webApp.stale が true のときはビルドが古いので、npm run build:web をやり直してください。',
+              style: TextStyle(fontSize: 12),
+            ),
           ],
         ),
       ),

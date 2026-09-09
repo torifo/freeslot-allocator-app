@@ -6,6 +6,7 @@ import '../features/daily_plan/application/daily_plan_controller.dart';
 import '../features/sync/application/sync_in_flight.dart';
 import '../features/task_master/application/task_master_controller.dart';
 import '../features/task_master/data/task_master_repository.dart' show stateStoreProvider;
+import '../services/storage/hub_backed_store.dart';
 import 'router.dart';
 import 'theme.dart';
 
@@ -25,11 +26,25 @@ class _FrelocatorAppState extends ConsumerState<FrelocatorApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Hub mode has no lifecycle events to lean on: a browser tab is never
+    // "resumed", so the store polls the hub and tells us when to reload.
+    final store = ref.read(stateStoreProvider);
+    if (store is HubBackedStore) {
+      _hubStore = store;
+      store.startPolling(onRemoteChange: _reloadIfChanged);
+    }
   }
+
+  /// Set only when this build is served by the local hub.
+  HubBackedStore? _hubStore;
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    // Stops the poll and hands back the `visibilitychange` / `beforeunload`
+    // listeners the store registered on this browser's document and window.
+    _hubStore?.dispose();
+    _hubStore = null;
     super.dispose();
   }
 
@@ -64,12 +79,47 @@ class _FrelocatorAppState extends ConsumerState<FrelocatorApp>
     });
     return MaterialApp.router(
       title: 'Frelocator',
+      builder: _withUnsentBanner,
       locale: const Locale('ja'),
       supportedLocales: const [Locale('ja')],
       localizationsDelegates: GlobalMaterialLocalizations.delegates,
       theme: buildAppTheme(),
       scrollBehavior: const _AppScrollBehavior(),
       routerConfig: appRouter,
+    );
+  }
+
+  /// A browser in hub mode holds the only copy of an edit until the hub takes
+  /// it, so an unsent edit gets a permanent red band rather than a snackbar.
+  Widget _withUnsentBanner(BuildContext context, Widget? child) {
+    final store = _hubStore;
+    final content = child ?? const SizedBox.shrink();
+    if (store == null) return content;
+    return ValueListenableBuilder<bool>(
+      valueListenable: store.hasUnsentEdits,
+      builder: (context, unsent, _) => Column(
+        children: <Widget>[
+          if (unsent)
+            Material(
+              color: Theme.of(context).colorScheme.error,
+              child: SafeArea(
+                bottom: false,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Text(
+                    'PC に保存できていません（再試行中）。'
+                    'この状態でリロードすると未送信の編集は失われます。',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onError,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          Expanded(child: content),
+        ],
+      ),
     );
   }
 }

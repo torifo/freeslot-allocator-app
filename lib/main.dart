@@ -8,13 +8,20 @@ import 'package:intl/date_symbol_data_local.dart';
 
 import 'app/app.dart';
 import 'core/device_clock.dart';
+import 'services/hub_mode/hub_mode.dart';
 
 Future<void> main() async {
   final binding = WidgetsFlutterBinding.ensureInitialized();
   Intl.defaultLocale = 'ja';
   await initializeDateFormatting('ja');
   _lockPortraitOnPhones(binding);
-  final deviceClock = await DeviceClock.load();
+  // In the hub-served browser the record provenance has to match the device id
+  // the store pushes (`web-<webId>`); `readHubMode()` is null everywhere else,
+  // so every other build keeps minting its own id exactly as before.
+  final hub = readHubMode();
+  final deviceClock = await DeviceClock.load(
+    deviceId: hub == null ? null : 'web-${ensureWebId()}',
+  );
   runApp(
     ProviderScope(
       overrides: [deviceClockProvider.overrideWithValue(deviceClock)],

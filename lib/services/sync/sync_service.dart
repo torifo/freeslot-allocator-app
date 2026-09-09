@@ -3,8 +3,8 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/device_clock.dart';
-import '../../core/hlc.dart';
 import '../app_data_service.dart';
+import 'document_clocks.dart';
 import 'hub_discovery.dart';
 import 'lan_sync_client.dart';
 import 'sync_backup_store.dart';
@@ -300,48 +300,9 @@ class SyncService {
   }
 
   /// Pulls this device's clock up to anything the hub has seen, so the next
-  /// local edit sorts after the records that just arrived.
-  Future<void> _observeClocks(SyncDocument doc) async {
-    var best = Hlc.migrated;
-    void consider(Hlc c) {
-      if (c.compareTo(best) > 0) best = c;
-    }
-
-    for (final t in doc.taskMaster.tasks) {
-      consider(t.meta.clock);
-    }
-    for (final t in doc.taskMaster.deletedTasks) {
-      consider(t.meta.clock);
-    }
-    for (final c in [
-      ...doc.taskMaster.mustDoCategories,
-      ...doc.taskMaster.wantToDoCategories,
-    ]) {
-      consider(c.meta.clock);
-    }
-    for (final t in [
-      ...doc.taskMaster.deletedMustDoCategories,
-      ...doc.taskMaster.deletedWantToDoCategories,
-    ]) {
-      consider(t.meta.clock);
-    }
-    for (final p in doc.dailyPlan.plans) {
-      consider(p.meta.clock);
-    }
-    for (final s in doc.dailyPlan.slots) {
-      consider(s.meta.clock);
-    }
-    for (final a in doc.dailyPlan.assignments) {
-      consider(a.meta.clock);
-    }
-    for (final t in [
-      ...doc.dailyPlan.deletedPlans,
-      ...doc.dailyPlan.deletedSlots,
-      ...doc.dailyPlan.deletedAssignments,
-    ]) {
-      consider(t.meta.clock);
-    }
-    consider(doc.taskMaster.settingsMeta.clock);
-    if (!best.isMigrated) await deviceClock.observe(best);
-  }
+  /// local edit sorts after the records that just arrived. The scan itself is
+  /// shared with the hub-mode store (`document_clocks.dart`) so the two paths
+  /// can never disagree about which lists count.
+  Future<void> _observeClocks(SyncDocument doc) =>
+      observeDocumentClocks(deviceClock, doc);
 }

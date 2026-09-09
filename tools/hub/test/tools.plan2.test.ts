@@ -23,6 +23,7 @@ const lanInfo = () => ({
   port: 47820,
   pairingPage: 'http://127.0.0.1:47821/deadbeefdeadbeefdeadbeefdeadbeef/pair',
   qrPage: 'http://127.0.0.1:47821/deadbeefdeadbeefdeadbeefdeadbeef/qr',
+  webApp: { url: null, built: false, gitRev: null, builtAt: null, stale: false },
 });
 
 const importable = (deviceId: string) => {

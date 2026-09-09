@@ -4,7 +4,9 @@ import QRCode from 'qrcode';
 import type { HubConfig } from './config.js';
 import { lanAddresses } from './net.js';
 import { encodeFrames } from './qr-codec.js';
+import { StaticSite, type HubInjection, type Reply } from './static-server.js';
 import type { FileStore } from './store.js';
+import { WebApi } from './web-api.js';
 
 export interface LocalPagesOptions {
   port: number;
@@ -14,6 +16,10 @@ export interface LocalPagesOptions {
   lanAddresses?: () => string[];
   /** Hard frame ceiling for `/qr`; injectable so the 413 path is testable without a huge document. */
   maxFrames?: number;
+  /** Absent when the hub was started without a web build. */
+  site?: StaticSite;
+  /** Absent when the hub serves no browser API. */
+  api?: WebApi;
 }
 
 /** Frames above this are still served, but the page warns that LAN sync is the better route. */
@@ -24,13 +30,23 @@ const QR_MAX_FRAMES = 200;
 const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-interface Reply { status: number; type: string; body: string }
-
 const jsonError = (status: number, code: string, message: string): Reply => ({
   status,
   type: 'application/json',
   body: JSON.stringify({ error: { code, message } }),
 });
+
+/**
+ * Sent on every reply. `no-referrer` keeps the secret prefix out of any
+ * `Referer` the page might otherwise leak, `nosniff` stops a served asset being
+ * re-interpreted as script, and `same-origin` COOP severs the window reference
+ * a page opened from here would otherwise keep.
+ */
+const HARDENING: Record<string, string> = {
+  'referrer-policy': 'no-referrer',
+  'x-content-type-options': 'nosniff',
+  'cross-origin-opener-policy': 'same-origin',
+};
 
 interface FrameCache { hash: string; body: string }
 
@@ -55,6 +71,21 @@ export class LocalPages {
   get pairingPage(): string { return `http://${this.host}:${this.port}/${this.secret}/pair`; }
   get qrPage(): string { return `http://${this.host}:${this.port}/${this.secret}/qr`; }
 
+  /** `http://127.0.0.1:<port>/<secret>/app/`; handed out by `sync_status` only. */
+  get webAppUrl(): string | null {
+    return this.options.site?.available ? `http://${this.host}:${this.port}/${this.secret}/app/` : null;
+  }
+
+  /** What the served page is told about the hub it came from. */
+  private injection(): HubInjection {
+    return {
+      base: `/${this.secret}/app/`,
+      api: `/${this.secret}/api/`,
+      hubDeviceId: this.store.deviceId,
+      dataFile: this.store.filePath,
+    };
+  }
+
   private addresses(): string[] {
     return (this.options.lanAddresses ?? (() => lanAddresses()))();
   }
@@ -63,11 +94,15 @@ export class LocalPages {
     this.secret = randomBytes(16).toString('hex');
     const server = createServer((req, res) => {
       void this.handle(req)
-        .then(({ status, type, body }) => { res.writeHead(status, { 'content-type': type }); res.end(body); })
+        .then(({ status, type, body, headers }) => {
+          res.writeHead(status, { 'content-type': type, ...HARDENING, ...(headers ?? {}) });
+          // A 304 carries no body, and a HEAD answer must repeat the headers without one.
+          res.end(status === 304 || (req.method ?? 'GET') === 'HEAD' ? undefined : body);
+        })
         .catch((error: unknown) => {
           // Diagnostics go to stderr: stdout carries the MCP stdio protocol.
           process.stderr.write(`[local-pages] request failed: ${String((error as Error).stack ?? error)}\n`);
-          res.writeHead(500, { 'content-type': 'application/json' });
+          res.writeHead(500, { 'content-type': 'application/json', ...HARDENING });
           res.end(JSON.stringify({ error: { code: 'internal', message: 'internal error' } }));
         });
     });
@@ -106,34 +141,85 @@ export class LocalPages {
   }
 
   /** Blocks DNS rebinding (`Host: evil.com`) and cross-origin fetches, which always carry `Origin` or a cross-site `Sec-Fetch-Site`. */
-  private guard(req: IncomingMessage): Reply | null {
+  private guard(req: IncomingMessage, isApi: boolean): Reply | null {
     const method = req.method ?? 'GET';
-    if (method !== 'GET' && method !== 'HEAD') {
-      return jsonError(405, 'method_not_allowed', 'only GET and HEAD are accepted');
+    // POST は /<secret>/api/ 配下だけ。ページは今までどおり GET/HEAD のみ。
+    if (method !== 'GET' && method !== 'HEAD' && !(isApi && method === 'POST')) {
+      return jsonError(405, 'method_not_allowed', `${method} is not accepted here; pages take GET and HEAD, and only /<secret>/api/ takes POST`);
     }
     const host = String(req.headers.host ?? '');
     if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) {
       return jsonError(403, 'forbidden_host', 'this page is only reachable as 127.0.0.1 or localhost');
     }
-    if (req.headers.origin !== undefined) {
+    // 以前は「Origin があれば一律 403」。同一オリジンの fetch は Origin を付けるため、
+    // 完全一致だけを許す形に緩める。他は今までどおり拒否。
+    const origin = req.headers.origin;
+    if (origin !== undefined && origin !== `http://127.0.0.1:${this.port}` && origin !== `http://localhost:${this.port}`) {
       return jsonError(403, 'forbidden_origin', 'cross-origin requests are not accepted');
     }
     const site = req.headers['sec-fetch-site'];
     if (site !== undefined && site !== 'none' && site !== 'same-origin') {
       return jsonError(403, 'forbidden_site', 'cross-site requests are not accepted');
     }
+    if (isApi) {
+      // カスタムヘッダはプリフライト無しでクロスオリジン送信できない = 二重の壁。
+      if (WebApi.deviceIdOf(req.headers['x-frelocator-web-id']) === null) {
+        return jsonError(403, 'forbidden_client', 'X-FRELOCATOR-Web-Id must be 16 hex characters');
+      }
+      // フォームの simple request による CSRF を封じる。
+      if (method === 'POST' && !String(req.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
+        return jsonError(400, 'bad_request', 'Content-Type must be application/json');
+      }
+    }
     return null;
   }
 
   private async handle(req: IncomingMessage): Promise<Reply> {
-    const blocked = this.guard(req);
-    if (blocked) return blocked;
-    // Query strings and fragments are ignored: these pages take no input.
-    const route = (req.url ?? '/').split('?')[0].split('#')[0];
+    // Fragments never reach the server; the query string only matters to the API.
+    const [rawRoute, rawQuery] = (req.url ?? '/').split('#')[0].split('?');
+    const route = rawRoute;
     const prefix = `/${this.secret}`;
+    // The guard has to know whether this is an API route before it decides on
+    // the method, the custom header and the content type.
+    const isApi = route === `${prefix}/api` || route.startsWith(`${prefix}/api/`);
+    const blocked = this.guard(req, isApi);
+    if (blocked) return blocked;
+    if (isApi) {
+      const api = this.options.api;
+      if (!api) return jsonError(404, 'not_found', 'the web API is not served by this hub');
+      // Non-null by the guard above; re-derived here so the API never trusts a caller's word.
+      const deviceId = WebApi.deviceIdOf(req.headers['x-frelocator-web-id']);
+      if (deviceId === null) return jsonError(403, 'forbidden_client', 'X-FRELOCATOR-Web-Id must be 16 hex characters');
+      const sub = route === `${prefix}/api` ? '' : route.slice(`${prefix}/api/`.length);
+      return api.handle(req, sub, new URLSearchParams(rawQuery ?? ''), deviceId);
+    }
     if (route === prefix || route === `${prefix}/pair`) return this.pairPage();
     if (route === `${prefix}/qr/frames.json`) return this.framesJson();
     if (route === `${prefix}/qr`) return this.qrPageHtml();
+    if (route === `${prefix}/app`) {
+      // 配信するものが無いのに 301 を返すと、ブラウザがその恒久リダイレクトを
+      // 覚えたまま行き止まりに着地し続ける（301 はキャッシュされる）。
+      const target = this.options.site;
+      if (!target) return jsonError(404, 'not_found', 'the web app is not served by this hub');
+      // ビルドがまだ無いときは「まだビルドされていません」の 503 をそのまま返す。
+      if (!target.available) return target.serve('', this.injection());
+      // 末尾スラッシュが無いと <base href> 配下の相対 URL が 1 段上を指す。
+      return { status: 301, type: 'text/plain', body: '', headers: { location: `${prefix}/app/` } };
+    }
+    if (route === `${prefix}/app/` || route.startsWith(`${prefix}/app/`)) {
+      const site = this.options.site;
+      if (!site) return jsonError(404, 'not_found', 'the web app is not served by this hub');
+      let relative: string;
+      try {
+        relative = decodeURIComponent(route.slice(`${prefix}/app/`.length));
+      } catch {
+        // `%zz` のような壊れたエスケープ。デコードできない以上、検査もできない。
+        return jsonError(400, 'bad_request', 'malformed path');
+      }
+      if (relative.includes('\0')) return jsonError(400, 'bad_request', 'malformed path');
+      const ifNoneMatch = req.headers['if-none-match'];
+      return site.serve(relative, this.injection(), Array.isArray(ifNoneMatch) ? ifNoneMatch[0] : ifNoneMatch);
+    }
     return jsonError(404, 'not_found', 'not found');
   }
 

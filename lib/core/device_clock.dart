@@ -40,9 +40,24 @@ class DeviceClock {
     }
   }
 
-  static Future<DeviceClock> load({String? platformPrefix, int Function()? now}) async {
+  /// [deviceId] forces the identity instead of minting or reading one.
+  ///
+  /// Hub mode passes `web-<webId>`: the browser's records have to carry the
+  /// same device id the store pushes, or the hub attributes this tab's edits to
+  /// a device that never sent anything. It is derived from the web id the
+  /// browser already persists, so it is deliberately *not* stored again — a
+  /// second copy could only ever disagree with the first.
+  static Future<DeviceClock> load({
+    String? platformPrefix,
+    String? deviceId,
+    int Function()? now,
+  }) async {
     final prefs = await SharedPreferences.getInstance();
-    var deviceId = prefs.getString(_deviceIdKey);
+    if (deviceId != null && deviceId.isNotEmpty) {
+      final last = Hlc.tryParse(prefs.getString(_lastClockKey));
+      return DeviceClock._(prefs, deviceId, HlcClock(deviceId: deviceId, now: now, last: last));
+    }
+    deviceId = prefs.getString(_deviceIdKey);
     if (deviceId == null || deviceId.isEmpty) {
       final random = Random.secure();
       final suffix = List.generate(8, (_) => random.nextInt(16).toRadixString(16)).join();
