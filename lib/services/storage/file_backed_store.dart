@@ -344,6 +344,30 @@ class FileBackedStore extends StateStore {
     );
   });
 
+  /// Read, transform and write inside the *same* lock, so the hub cannot slip a
+  /// write in between the two halves of a resolution.
+  @override
+  Future<SyncDocument> updateDocument(
+    FutureOr<SyncDocument?> Function(SyncDocument document) fn,
+  ) => _withLock(() async {
+    final current = await _readLocked();
+    final next = await fn(current);
+    if (next == null) return current;
+    final document = SyncDocument(
+      exportedAt: DateTime.now().toUtc(),
+      deviceId: deviceId,
+      // Carried from what was just read: `fn` is handed a document assembled
+      // here, so these are the store's own bookkeeping, not the caller's.
+      lastSyncAt: current.lastSyncAt,
+      purgedBefore: current.purgedBefore,
+      taskMaster: next.taskMaster,
+      dailyPlan: next.dailyPlan,
+      conflicts: next.conflicts,
+    );
+    await _writeLocked(document);
+    return document;
+  });
+
   @override
   Future<List<ConflictRecord>> readConflicts() =>
       _withLock(() async => (await _readLocked()).conflicts);

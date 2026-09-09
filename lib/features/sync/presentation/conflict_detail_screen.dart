@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -61,8 +63,9 @@ class _Body extends ConsumerWidget {
     final theme = Theme.of(context);
     final hubMode = ref.watch(hubModeProvider) != null;
     final webId = ref.watch(webIdProvider);
-    final hubLabel = conflictSideLabel(_hubSide, hubMode: hubMode, webId: webId);
-    final deviceLabel = conflictSideLabel(_deviceSide, hubMode: hubMode, webId: webId);
+    final names = conflictSideNames(record, hubMode: hubMode, webId: webId);
+    final hubLabel = names.pc;
+    final deviceLabel = names.phone;
     final detected = DateTime.tryParse(record.detectedAt);
     final hub = _hubSide.snapshot;
     final device = _deviceSide.snapshot;
@@ -70,8 +73,12 @@ class _Body extends ConsumerWidget {
         .where((f) => !_skippedFields.contains(f))
         .toList()
       ..sort();
+    // Compared as JSON, not as the strings the table draws: `_display` maps
+    // `null` and `false` onto text of their own, but it is a rendering rule and
+    // a future addition to it must not be able to make two different values
+    // look identical to the comparison.
     final differing = fields
-        .where((f) => _display(hub[f]) != _display(device[f]))
+        .where((f) => jsonEncode(hub[f]) != jsonEncode(device[f]))
         .toList();
     final same = fields.where((f) => !differing.contains(f)).toList();
     final oneSideDeleted = _hubSide.isDeleted || _deviceSide.isDeleted;
@@ -91,7 +98,8 @@ class _Body extends ConsumerWidget {
           Padding(
             padding: const EdgeInsets.only(top: 8),
             child: Text(
-              'この競合はすでに解決済みです（${record.resolution}）。',
+              'この競合はすでに解決済みです'
+              '（${conflictResolutionLabel(record, hubMode: hubMode, webId: webId)}）。',
               style: TextStyle(color: theme.colorScheme.primary),
             ),
           ),
@@ -174,10 +182,14 @@ class _Body extends ConsumerWidget {
 
   Future<void> _resolve(BuildContext context, WidgetRef ref, ConflictAdoption adopt) async {
     final navigator = Navigator.of(context);
-    await runConflictAction(
+    final ok = await runConflictAction(
       context,
       () => ref.read(conflictControllerProvider.notifier).resolve(record.id, adopt),
     );
+    // Only on success. A refusal — a purged entity, an unreadable snapshot —
+    // leaves the record open, so leaving the screen would take the SnackBar
+    // explaining it away with the screen and look like the choice was taken.
+    if (!ok) return;
     // Back to the list, which is where the remaining records are. A detail
     // screen opened as the whole route (tests, deep links) has nothing to pop.
     if (navigator.canPop()) navigator.pop();

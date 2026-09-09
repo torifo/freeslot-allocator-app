@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show Override;
@@ -63,11 +65,11 @@ ConflictRecord _record({
   'detectedAt': '2026-02-03T00:00:00.000Z',
   'detectedBy': 'android-1',
   'winner': <String, dynamic>{
-    'side': 'hub', 'deviceId': winnerDeviceId, 'clock': winner['clock'],
+    'side': sideOfDevice(winnerDeviceId), 'deviceId': winnerDeviceId, 'clock': winner['clock'],
     'updatedAt': winner['updatedAt'], 'snapshot': winner,
   },
   'loser': <String, dynamic>{
-    'side': 'device', 'deviceId': loserDeviceId, 'clock': loser['clock'],
+    'side': sideOfDevice(loserDeviceId), 'deviceId': loserDeviceId, 'clock': loser['clock'],
     'updatedAt': loser['updatedAt'], 'snapshot': loser,
   },
   'resolution': resolution,
@@ -110,6 +112,32 @@ Future<void> seed(List<ConflictRecord> conflicts, {List<Map<String, dynamic>>? t
     deviceClock: clock,
     discover: () async => null,
   );
+}
+
+/// Pushes [screen] on top of a stand-in list screen, so a `pop` is something
+/// the test can see. [pump] puts the screen up as the whole route, where there
+/// is nothing to pop at all.
+Future<void> pushed(WidgetTester tester, Widget screen) async {
+  final navigator = GlobalKey<NavigatorState>();
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: <Override>[
+        deviceClockProvider.overrideWithValue(clock),
+        stateStoreProvider.overrideWithValue(store),
+        syncServiceProvider.overrideWithValue(service),
+        hubModeProvider.overrideWithValue(null),
+        webIdProvider.overrideWithValue(null),
+      ],
+      child: MaterialApp(
+        navigatorKey: navigator,
+        home: const Scaffold(body: Center(child: Text('競合の一覧'))),
+      ),
+    ),
+  );
+  unawaited(
+    navigator.currentState!.push(MaterialPageRoute<void>(builder: (_) => screen)),
+  );
+  await tester.pumpAndSettle();
 }
 
 Future<void> pump(WidgetTester tester, Widget screen, {HubMode? hub, String? webId}) async {
@@ -289,5 +317,74 @@ void main() {
       webId: '00112233445566aa',
     );
     expect(find.text('ブラウザ版'), findsOneWidget);
+  });
+
+  testWidgets('a refused resolution keeps the screen and says why', (tester) async {
+    // Purge dropped the entity the record names, which is the one resolution
+    // the app cannot carry out.
+    await seed(<ConflictRecord>[open], tasks: <Map<String, dynamic>>[]);
+    await pushed(tester, ConflictDetailScreen(id: open.id));
+
+    await tester.tap(find.text('スマホ版を採用'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('この項目はもう端末にありません。「現状のまま」で記録だけ閉じてください。'),
+      findsOneWidget,
+    );
+    // Still here: leaving would take the explanation with it and read as if the
+    // choice had been applied.
+    expect(find.text('スマホ版を採用'), findsOneWidget);
+    expect(find.text('競合の一覧'), findsNothing);
+    expect((await store.readConflicts()).single.isOpen, isTrue);
+  });
+
+  testWidgets('a resolution that goes through does go back to the list', (tester) async {
+    await seed(<ConflictRecord>[open]);
+    await pushed(tester, ConflictDetailScreen(id: open.id));
+
+    await tester.tap(find.text('スマホ版を採用'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('競合の一覧'), findsOneWidget);
+    expect((await store.readConflicts()).single.resolution, 'device');
+  });
+
+  testWidgets('two phones are told apart by device id, not by side', (tester) async {
+    // Since a side is read off the device id, both halves of a record can
+    // legitimately be 「スマホ版」 — and then that name tells the user nothing.
+    final phones = _record(
+      entityId: 'tsk-1',
+      winner: _task('tsk-1', hubTitle, '3000-0-android-2'),
+      loser: _task('tsk-1', phoneTitle, phoneClock),
+      winnerDeviceId: 'android-2',
+      loserDeviceId: 'android-1',
+    );
+    await seed(<ConflictRecord>[phones]);
+    await pump(tester, ConflictDetailScreen(id: phones.id));
+
+    expect(find.text('スマホ版'), findsNothing);
+    expect(find.text('端末 A（android-1）'), findsOneWidget);
+    expect(find.text('端末 B（android-2）'), findsOneWidget);
+    expect(find.text('端末 A（android-1）を採用'), findsOneWidget);
+    expect(find.text('端末 B（android-2）を採用'), findsOneWidget);
+
+    // And the choice still lands on the side the button names.
+    await tester.tap(find.text('端末 B（android-2）を採用'));
+    await tester.pumpAndSettle();
+    expect((await store.readTaskMaster()).tasks.single.title, hubTitle);
+  });
+
+  testWidgets('the list names a two-phone conflict the same way', (tester) async {
+    final phones = _record(
+      entityId: 'tsk-1',
+      winner: _task('tsk-1', hubTitle, '3000-0-android-2'),
+      loser: _task('tsk-1', phoneTitle, phoneClock),
+      winnerDeviceId: 'android-2',
+      loserDeviceId: 'android-1',
+    );
+    await seed(<ConflictRecord>[phones]);
+    await pump(tester, const ConflictListScreen());
+    expect(find.textContaining('いまは端末 B（android-2）'), findsOneWidget);
   });
 }

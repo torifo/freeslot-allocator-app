@@ -122,6 +122,67 @@ beforeEach(async () => {
 
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
+describe('conflict side labels and blame', () => {
+  it('get_conflict names the two sides 「PC 版」/「スマホ版」', async () => {
+    expect((await tools.getConflict({ id })).sideLabels).toEqual({
+      hub: 'PC 版',
+      device: 'スマホ版',
+    });
+  });
+
+  it('get_conflict falls back to device ids when both sides read the same', async () => {
+    // Two phones: `hub`/`device` still name the two halves the adopt values
+    // write, but 「PC 版」 would be a lie about both of them.
+    const phones = record(
+      'tsk-1',
+      task('tsk-1', HUB_TITLE, '25-0-android-2'),
+      task('tsk-1', DEVICE_TITLE, DEVICE_CLOCK),
+    );
+    phones.winner.side = 'device';
+    phones.winner.deviceId = 'android-2';
+    await store.update((doc) => {
+      doc.conflicts = [phones];
+      return doc;
+    });
+    expect((await tools.getConflict({ id: phones.id })).sideLabels).toEqual({
+      // `hub` is whichever side `adopt: "hub"` writes — with no PC side on
+      // either half that is the loser, and the ids are what name them.
+      hub: '端末 A（android-1）',
+      device: '端末 B（android-2）',
+    });
+  });
+
+  it('a resolve refused by the invariants says which record asked for it', async () => {
+    const mine = await tools.addCategory({ kind: 'must_do', name: 'カテゴリ甲' });
+    const other = await tools.addCategory({ kind: 'must_do', name: 'カテゴリ乙' });
+    // Adopting the device version would rename 乙 to 甲, which the document does
+    // not allow — and the raw violation names neither the record nor the
+    // decision that asked for it.
+    const clash = record(
+      other.id,
+      { ...other, name: 'カテゴリ乙', clock: HUB_CLOCK } as Entity,
+      { ...other, name: 'カテゴリ甲', clock: DEVICE_CLOCK } as Entity,
+      { entityType: 'category' },
+    );
+    await store.update((doc) => {
+      doc.conflicts = [clash];
+      return doc;
+    });
+    await expect(tools.resolveConflict({ id: clash.id, adopt: 'device' })).rejects.toThrow(
+      new RegExp(`resolving conflict ${clash.id} would leave the document invalid`),
+    );
+    await expect(tools.resolveAllConflicts({ adopt: 'device' })).rejects.toThrow(
+      new RegExp(`resolving conflict ${clash.id} would leave the document invalid`),
+    );
+    // All or nothing: the refused write left both categories as they were.
+    const after = await store.read();
+    const named = (id: string) => after.taskMaster.mustDoCategories.find((c) => c.id === id)?.name;
+    expect(named(mine.id)).toBe('カテゴリ甲');
+    expect(named(other.id)).toBe('カテゴリ乙');
+    expect(after.conflicts!.every((c) => c.resolution == null)).toBe(true);
+  });
+});
+
 describe('conflict tools', () => {
   it('list_conflicts counts open and resolved and returns a human label', async () => {
     const r = await tools.listConflicts({});

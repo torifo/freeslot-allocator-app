@@ -1392,6 +1392,28 @@ export class HubTools {
     return wanted(conflict.winner.side) ? conflict.winner : conflict.loser;
   }
 
+  /**
+   * What to call the two recorded versions.
+   *
+   * Normally 「PC 版」 and 「スマホ版」. Since a side is derived from the device id
+   * rather than from argument order, though, both versions can come from the
+   * same kind of device — two phones, or the hub and a browser it serves — and
+   * then those two names would not tell them apart. In that case they fall back
+   * to 「端末 A／端末 B」 carrying the device ids. `hub` is always the side
+   * `adopt: "hub"` writes, `device` the other.
+   */
+  private static sideLabels(conflict: ConflictJson): { hub: string; device: string } {
+    const hub = HubTools.sideFor(conflict, 'hub');
+    const device = HubTools.sideFor(conflict, 'device');
+    if (isPcSide(hub.side) !== isPcSide(device.side)) {
+      return { hub: 'PC 版', device: 'スマホ版' };
+    }
+    return {
+      hub: `端末 A（${hub.deviceId}）`,
+      device: `端末 B（${device.deviceId}）`,
+    };
+  }
+
   /** Only the fields whose values differ; sync meta is excluded, `deletedAt` deliberately is not. */
   private static differences(conflict: ConflictJson): Array<{ field: string; hub: unknown; device: unknown }> {
     const snapshotOf = (want: 'hub' | 'device'): Record<string, unknown> =>
@@ -1513,6 +1535,24 @@ export class HubTools {
     return { record: stamped, wrote: true, effect: previouslyLive ? 'updated' : 'added' };
   }
 
+  /**
+   * Names the record a refused resolve was applying when the document stopped
+   * satisfying its invariants.
+   *
+   * `mutate` reports the violation itself — a duplicate category name, an
+   * assignment outside its slot — but not what asked for it, and a resolve is
+   * all-or-nothing: without the id the caller is told the write was rejected
+   * and has no way to find out which decision to take back.
+   */
+  private static blame(error: unknown, id: string | undefined): unknown {
+    if (id === undefined || !(error instanceof ToolError)) return error;
+    if (!error.message.startsWith('invariant violation')) return error;
+    return new ToolError(
+      `resolving conflict ${id} would leave the document invalid, so nothing ` +
+        `was written: ${error.message}`,
+    );
+  }
+
   private static summaryOf(effect: 'none' | 'added' | 'updated' | 'deleted'): SyncSummary {
     return {
       added: effect === 'added' ? 1 : 0,
@@ -1555,6 +1595,7 @@ export class HubTools {
   async getConflict(input: z.infer<typeof schemas.getConflict>): Promise<{
     conflict: ConflictJson;
     differences: Array<{ field: string; hub: unknown; device: unknown }>;
+    sideLabels: { hub: string; device: string };
     current: { clock: string | null; deletedAt: string | null; supersedes: boolean };
   }> {
     const doc = await this.store.read();
@@ -1571,6 +1612,9 @@ export class HubTools {
     return {
       conflict,
       differences: HubTools.differences(conflict),
+      // `hub`/`device` name the two columns above; when both versions come from
+      // the same kind of device those words are not enough on their own.
+      sideLabels: HubTools.sideLabels(conflict),
       current: {
         clock,
         deletedAt: live && isDeleted(live) ? String(live.deletedAt) : null,
@@ -1587,30 +1631,35 @@ export class HubTools {
   }> {
     let wrote = false;
     let effect: 'none' | 'added' | 'updated' | 'deleted' = 'none';
-    await this.mutate((doc) => {
-      const list = doc.conflicts ?? [];
-      const index = list.findIndex(
-        (c) => c.id === input.id && !isDeleted(c as unknown as Record<string, unknown>),
-      );
-      if (index < 0) throw new ToolError(`conflict ${input.id} not found`);
-      const record = list[index];
-      if (record.resolution != null) {
-        throw new ToolError(
-          `conflict ${input.id} is already resolved as ${record.resolution}: すでに解決済みです`,
+    try {
+      await this.mutate((doc) => {
+        const list = doc.conflicts ?? [];
+        const index = list.findIndex(
+          (c) => c.id === input.id && !isDeleted(c as unknown as Record<string, unknown>),
         );
-      }
-      const applied = this.applyResolution(doc, record, input.adopt);
-      list[index] = applied.record;
-      doc.conflicts = list;
-      wrote = applied.wrote;
-      effect = applied.effect;
-    });
+        if (index < 0) throw new ToolError(`conflict ${input.id} not found`);
+        const record = list[index];
+        if (record.resolution != null) {
+          throw new ToolError(
+            `conflict ${input.id} is already resolved as ${record.resolution}: すでに解決済みです`,
+          );
+        }
+        const applied = this.applyResolution(doc, record, input.adopt);
+        list[index] = applied.record;
+        doc.conflicts = list;
+        wrote = applied.wrote;
+        effect = applied.effect;
+      });
+    } catch (error) {
+      throw HubTools.blame(error, input.id);
+    }
     return { id: input.id, adopted: input.adopt, wrote, summary: HubTools.summaryOf(effect) };
   }
 
   async resolveAllConflicts(input: z.infer<typeof schemas.resolveAllConflicts>): Promise<{
     resolved: number; skipped: number; results: ResolvedConflict[];
   }> {
+    let applying: string | undefined;
     const run = (doc: SyncDocumentJson): { resolved: number; skipped: number; results: ResolvedConflict[] } => {
       const list = doc.conflicts ?? [];
       const results: ResolvedConflict[] = [];
@@ -1620,6 +1669,10 @@ export class HubTools {
         if (isDeleted(record as unknown as Record<string, unknown>)) continue;
         if (input.entityType && record.entityType !== input.entityType) continue;
         if (record.resolution != null) { skipped += 1; continue; }
+        // Kept for the error path: the invariant check runs once, after every
+        // decision has been applied, so the last one in is the only lead the
+        // caller gets about which record to leave alone.
+        applying = record.id;
         const applied = this.applyResolution(doc, record, input.adopt);
         list[index] = applied.record;
         results.push({ id: record.id, adopted: input.adopt, wrote: applied.wrote });
@@ -1634,7 +1687,11 @@ export class HubTools {
     }
     // One `store.update`: if any single id fails, nothing at all is written.
     let out: { resolved: number; skipped: number; results: ResolvedConflict[] } | undefined;
-    await this.mutate((doc) => { out = run(doc); });
+    try {
+      await this.mutate((doc) => { out = run(doc); });
+    } catch (error) {
+      throw HubTools.blame(error, applying);
+    }
     return out as { resolved: number; skipped: number; results: ResolvedConflict[] };
   }
 

@@ -70,7 +70,7 @@ class PrefsStateStore extends StateStore {
     );
   }
 
-  /// Encodes both halves *before* touching either key, so a document that
+  /// Encodes all three parts *before* touching any key, so a document that
   /// cannot be serialised is rejected while the stored data is still intact;
   /// a failure during the second write rolls the first one back.
   @override
@@ -81,6 +81,12 @@ class PrefsStateStore extends StateStore {
   }) async {
     final encodedTasks = tasks.encode();
     final encodedPlans = plans.encode();
+    // Encoded here rather than inside `writeConflicts` below: a record this
+    // build cannot serialise would otherwise be discovered only after both
+    // payload keys had already been overwritten.
+    final encodedConflicts = conflicts == null || conflicts.isEmpty
+        ? null
+        : jsonEncode(conflicts.map((c) => c.toJson()).toList());
     final p = await _get();
     final previousTasks = p.getString(taskKey);
     await p.setString(taskKey, encodedTasks);
@@ -94,6 +100,11 @@ class PrefsStateStore extends StateStore {
       }
       rethrow;
     }
-    if (conflicts != null) await writeConflicts(conflicts);
+    if (conflicts == null) return;
+    if (encodedConflicts == null) {
+      await p.remove(conflictKey);
+    } else {
+      await p.setString(conflictKey, encodedConflicts);
+    }
   }
 }

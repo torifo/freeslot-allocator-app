@@ -7,6 +7,7 @@ import 'package:frelocator/features/task_master/domain/task_models.dart';
 import 'package:frelocator/services/app_data_service.dart';
 import 'package:frelocator/services/storage/prefs_state_store.dart';
 import 'package:frelocator/services/storage/state_store.dart';
+import 'package:frelocator/services/sync/conflict_record.dart';
 import 'package:frelocator/services/sync/sync_document.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -32,6 +33,16 @@ class _FlakyStore extends StateStore {
     if (failPlans) throw StateError('disk full');
     return inner.writeDailyPlan(state);
   }
+
+  // Delegated rather than left to the base class: `StateStore.writeConflicts`
+  // refuses by default, so a store that swallowed the records would be caught
+  // here instead of silently dropping them.
+  @override
+  Future<List<ConflictRecord>> readConflicts() => inner.readConflicts();
+
+  @override
+  Future<void> writeConflicts(List<ConflictRecord> conflicts) =>
+      inner.writeConflicts(conflicts);
 }
 
 void main() {

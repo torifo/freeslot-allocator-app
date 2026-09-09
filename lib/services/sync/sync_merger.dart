@@ -393,6 +393,15 @@ class SyncMerger {
     final winnerIsX = identical(_pick(x, y), x);
     final winner = _side(winnerIsX ? x : y);
     final loser = _side(winnerIsX ? y : x);
+    // A conflict is between two *devices*. The recorded `side` cannot carry
+    // that on its own — since the F4 fix both halves can legitimately read
+    // `device` (two phones), which is why the screens fall back to labelling by
+    // device id — but the ids themselves must differ, or the record claims one
+    // device disagreed with itself and there is nothing to choose between.
+    assert(
+      winner.deviceId != loser.deviceId,
+      'conflict on $entityId has ${winner.deviceId} on both sides',
+    );
     return ConflictRecord(
       id: conflictId(entityId, winner.clock, loser.clock),
       entityType: kind,

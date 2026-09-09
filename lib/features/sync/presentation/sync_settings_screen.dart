@@ -317,16 +317,21 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
     // carries no badge yet.
     final count = records is AsyncData<List<ConflictRecord>>
         ? openConflicts(records.value).length
-        : 0;
+        : null;
     return Card(
       child: ListTile(
         title: const Text('競合'),
         subtitle: Text(
-          count == 0
+          // Nothing is known yet, so the row says nothing: claiming
+          // 「未解決の競合はありません」 before the records have been read would
+          // be a statement the screen cannot back up.
+          count == null
+              ? '未解決の競合を確認できます'
+              : count == 0
               ? '未解決の競合はありません'
               : '未解決 $count 件。どちらの版を採用するか選べます。',
         ),
-        trailing: count == 0
+        trailing: count == null || count == 0
             ? const Icon(Icons.chevron_right)
             : Badge(label: Text('$count'), child: const Icon(Icons.chevron_right)),
         onTap: () => context.push('/sync/conflicts'),

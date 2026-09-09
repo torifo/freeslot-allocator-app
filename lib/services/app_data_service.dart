@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/device_clock.dart';
@@ -63,4 +65,18 @@ class AppDataService {
 
   Future<void> importAll(Map<String, dynamic> data) =>
       importDocument(SyncDocument.fromJson(data, strict: true));
+
+  /// Read, transform and write as one step (see [StateStore.updateDocument]).
+  ///
+  /// The guarded form of [exportDocument] followed by [importDocument]: use it
+  /// wherever what is written is derived from what was read, so an edit landing
+  /// in between is merged with rather than overwritten. [fn] may return null to
+  /// leave the store untouched.
+  Future<SyncDocument> updateDocument(
+    FutureOr<SyncDocument?> Function(SyncDocument document) fn,
+  ) => store.updateDocument(
+    // The store assembles the document from its own keys and has no device id
+    // of its own to stamp on it; callers read it, so it is filled in here.
+    (document) => fn(document.copyWith(deviceId: deviceClock.deviceId)),
+  );
 }

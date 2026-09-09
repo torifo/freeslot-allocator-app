@@ -238,6 +238,24 @@ class HubBackedStore extends StateStore {
     });
   }
 
+  /// Applies [fn] to the current snapshot and folds the answer straight back
+  /// into it.
+  ///
+  /// Nothing awaits between reading the snapshot and replacing it, so a write
+  /// from elsewhere in this tab cannot land in the middle. What the hub does
+  /// meanwhile is not this method's problem: the push is a merge, so MCP's
+  /// concurrent edit comes back merged rather than overwritten.
+  @override
+  Future<SyncDocument> updateDocument(
+    FutureOr<SyncDocument?> Function(SyncDocument document) fn,
+  ) async {
+    final current = await _document();
+    final next = await fn(current);
+    if (next == null) return current;
+    await writeAll(next.taskMaster, next.dailyPlan, conflicts: next.conflicts);
+    return _snapshot!;
+  }
+
   /// Live from the hub's document: in this mode there is no local copy, so a
   /// record resolved here is an ordinary document write like any other.
   @override

@@ -115,6 +115,18 @@ function changedAt(e: Raw): number {
  * id, so an unparsable clock lands on `device` — the conservative reading, as
  * the PC ids are the ones this codebase mints with a known prefix.
  */
+/**
+ * Dart's `assert` in TypeScript: a rule that must hold, checked under test and
+ * stripped everywhere else. A merge is the one thing that must never refuse to
+ * run in front of a user, so a broken assumption stops the test suite rather
+ * than the sync.
+ */
+function devAssert(ok: boolean, message: string): void {
+  if (!ok && process.env.NODE_ENV === 'test') {
+    throw new Error(`assertion failed: ${message}`);
+  }
+}
+
 const sideOf = (raw: Raw): ConflictSideJson => {
   const deviceId = Hlc.tryParse(raw.clock)?.deviceId ?? 'unknown';
   return {
@@ -150,6 +162,15 @@ function detect(
   const winnerIsX = pick(x, y, kind) === x;
   const winner = sideOf(winnerIsX ? x : y);
   const loser = sideOf(winnerIsX ? y : x);
+  // A conflict is between two *devices*. The recorded `side` cannot carry that
+  // on its own — both halves can legitimately read `device` (two phones), which
+  // is why the tools fall back to labelling by device id — but the ids
+  // themselves must differ, or the record claims one device disagreed with
+  // itself and there is nothing to choose between.
+  devAssert(
+    winner.deviceId !== loser.deviceId,
+    `conflict on ${entityId} has ${winner.deviceId} on both sides`,
+  );
   return {
     id: conflictId(entityId, winner.clock, loser.clock),
     entityType: kind,

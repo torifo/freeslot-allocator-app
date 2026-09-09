@@ -66,6 +66,26 @@ describe('conflict detection', () => {
     expect(swapped.loser).toMatchObject({ side: 'device', deviceId: 'android-1' });
   });
 
+  it('records two phones as two sides, both `device`', () => {
+    // Since the F4 fix a side is read off the device id, so a phone-vs-phone
+    // conflict is a real record with `device` on both halves; the ids are what
+    // still tell them apart, and the UI labels by them.
+    const other = task('other phone edit', '25-0-android-2', '2026-09-09T02:30:00.000Z');
+    const conflict = merge(doc('a', [other]), doc('b', [device]), OPTIONS).conflicts[0];
+    expect(conflict.winner).toMatchObject({ side: 'device', deviceId: 'android-2' });
+    expect(conflict.loser).toMatchObject({ side: 'device', deviceId: 'android-1' });
+  });
+
+  it('refuses under test to record one device as disagreeing with itself', () => {
+    // The assertion is debug-only — a merge must never refuse to run in front
+    // of a user — but a record with the same device on both sides offers
+    // nothing to choose between, so it stops the suite.
+    const same = task('same device, other content', '25-0-android-1', '2026-09-09T02:30:00.000Z');
+    expect(() => merge(doc('a', [same]), doc('b', [device]), OPTIONS)).toThrow(
+      /assertion failed: conflict on tsk-1 has android-1 on both sides/,
+    );
+  });
+
   it('calls the browser the hub serves a `web` side, which the UI reads as PC too', () => {
     const web = task('browser edit', '25-0-web-abcd', '2026-09-09T02:30:00.000Z');
     const conflict = merge(doc('a', [web]), doc('b', [device]), OPTIONS).conflicts[0];

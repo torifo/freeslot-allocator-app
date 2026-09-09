@@ -308,41 +308,57 @@ class SyncService {
   Future<ConflictResolutionResult> resolveConflict(
     String id,
     ConflictAdoption adopt,
-  ) async {
-    final document = await data.exportDocument();
-    final record = document.conflicts.where((c) => c.id == id).firstOrNull;
-    if (record == null) {
-      throw const ConflictResolutionException('この競合は見つかりませんでした。');
-    }
-    if (!record.isOpen) {
-      throw const ConflictResolutionException('この競合はすでに解決済みです。');
-    }
-    return _resolve(document, adopt, (c) => c.id == id);
-  }
+  ) => _resolve(adopt, (c) => c.id == id, requireOpen: id);
 
   /// The same decision for every open record, optionally of one entity type.
   Future<ConflictResolutionResult> resolveAll(
     ConflictAdoption adopt, {
     String? entityType,
-  }) async => _resolve(
-    await data.exportDocument(),
-    adopt,
-    (c) => entityType == null || c.entityType == entityType,
-  );
+  }) => _resolve(adopt, (c) => entityType == null || c.entityType == entityType);
 
+  /// Read, decide and write as one step.
+  ///
+  /// The decision is measured against the live entity — adopting the version
+  /// that is already stored writes nothing, and a purged entity is refused — so
+  /// it has to be taken on the document that is about to be written, not on a
+  /// copy read some milliseconds earlier. Going through
+  /// [AppDataService.updateDocument] is what makes that true: on the hub's file
+  /// the whole thing runs under the cross-process lock, and in hub mode it
+  /// folds into the snapshot being pushed.
+  ///
+  /// A throw from [applyConflictResolutions] propagates out of the update, so a
+  /// refused resolution writes nothing at all — including the records it had
+  /// already stamped before reaching the one it could not apply.
   Future<ConflictResolutionResult> _resolve(
-    SyncDocument document,
     ConflictAdoption adopt,
-    bool Function(ConflictRecord) where,
-  ) async {
-    final result = await applyConflictResolutions(
-      document,
-      adopt: adopt,
-      where: where,
-      nextClock: deviceClock.next,
-      resolvedBy: deviceClock.deviceId,
-    );
-    if (result.resolved > 0) await data.importDocument(result.document);
+    bool Function(ConflictRecord) where, {
+    String? requireOpen,
+  }) async {
+    late ConflictResolutionResult result;
+    await data.updateDocument((current) async {
+      if (requireOpen != null) {
+        // Checked on the document that is about to be written, not on one read
+        // beforehand: a record another device resolved in between must be
+        // refused rather than decided twice.
+        final record = current.conflicts.where((c) => c.id == requireOpen).firstOrNull;
+        if (record == null) {
+          throw const ConflictResolutionException('この競合は見つかりませんでした。');
+        }
+        if (!record.isOpen) {
+          throw const ConflictResolutionException('この競合はすでに解決済みです。');
+        }
+      }
+      result = await applyConflictResolutions(
+        current,
+        adopt: adopt,
+        where: where,
+        nextClock: deviceClock.next,
+        resolvedBy: deviceClock.deviceId,
+      );
+      // Nothing was open to decide: leave the store alone rather than rewrite
+      // it with a document identical to the one just read.
+      return result.resolved > 0 ? result.document : null;
+    });
     return result;
   }
 

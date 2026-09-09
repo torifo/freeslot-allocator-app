@@ -43,10 +43,11 @@ class _Body extends ConsumerWidget {
     final webId = ref.watch(webIdProvider);
     final open = openConflicts(all);
     final resolved = resolvedConflicts(all);
-    final hubLabel = conflictDeviceLabel('hub-', hubMode: hubMode, webId: webId);
-    final deviceLabel = hubMode
-        ? conflictDeviceLabel('web-${webId ?? ''}', hubMode: true, webId: webId)
-        : 'スマホ版';
+    // Role labels, not labels derived from a made-up device id: the batch
+    // buttons apply to every open record at once, so there is no one device id
+    // to read them from.
+    final hubLabel = conflictPcLabel(hubMode: hubMode);
+    final deviceLabel = conflictPhoneLabel();
 
     if (open.isEmpty && resolved.isEmpty) {
       return const Center(
@@ -133,7 +134,7 @@ class _ConflictTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final winner = conflictSideLabel(record.winner, hubMode: hubMode, webId: webId);
+    final winner = conflictWinnerLabel(record, hubMode: hubMode, webId: webId);
     final detected = DateTime.tryParse(record.detectedAt);
     final when = detected == null
         ? record.detectedAt
@@ -144,7 +145,8 @@ class _ConflictTile extends StatelessWidget {
       subtitle: Text(
         record.isOpen
             ? '$when 検出・いまは$winner'
-            : '$when 検出・${_resolutionLabel(record, hubMode: hubMode, webId: webId)}',
+            : '$when 検出・'
+                  '${conflictResolutionLabel(record, hubMode: hubMode, webId: webId)}',
       ),
       trailing: const Icon(Icons.chevron_right),
       onTap: () => context.push('/sync/conflicts/${record.id}'),
@@ -152,37 +154,27 @@ class _ConflictTile extends StatelessWidget {
   }
 }
 
-String _resolutionLabel(
-  ConflictRecord record, {
-  required bool hubMode,
-  String? webId,
-}) {
-  final side = switch (record.resolution) {
-    // `hub` means the PC, whichever half of it wrote the version.
-    'hub' => conflictPcSide(record),
-    'device' => conflictPhoneSide(record),
-    _ => null,
-  };
-  if (side != null) {
-    return '${conflictSideLabel(side, hubMode: hubMode, webId: webId)}を採用';
-  }
-  // `superseded` is the merge closing a record a later edit already settled.
-  return record.resolution == 'superseded' ? 'あとの編集で解消' : '現状のまま';
-}
-
 /// Runs a resolution and puts any refusal on screen instead of letting it
 /// vanish into an unhandled async error.
-Future<void> _guard(BuildContext context, Future<void> Function() body) async {
+///
+/// Returns true only when the resolution actually went through. A caller that
+/// navigates on success — the detail screen does — has to be able to tell a
+/// refusal apart from a success, or it leaves the screen while the SnackBar it
+/// just raised explains why nothing happened.
+Future<bool> _guard(BuildContext context, Future<void> Function() body) async {
   final messenger = ScaffoldMessenger.of(context);
   try {
     await body();
+    return true;
   } on ConflictResolutionException catch (error) {
     messenger.showSnackBar(SnackBar(content: Text(error.message)));
+    return false;
   } catch (error) {
     messenger.showSnackBar(SnackBar(content: Text('解決できませんでした（$error）')));
+    return false;
   }
 }
 
 /// Shared with the detail screen, which needs the same guard.
-Future<void> runConflictAction(BuildContext context, Future<void> Function() body) =>
+Future<bool> runConflictAction(BuildContext context, Future<void> Function() body) =>
     _guard(context, body);
