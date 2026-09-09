@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/device_clock.dart';
@@ -37,6 +39,7 @@ class AppDataService {
       deviceId: deviceClock.deviceId,
       taskMaster: await taskRepo.load(),
       dailyPlan: await dailyPlanRepo.load(),
+      conflicts: await store.readConflicts(),
     );
   }
 
@@ -50,9 +53,30 @@ class AppDataService {
   /// refers to a task by id — so a half-applied import is not "most of the
   /// sync", it is a broken database. [StateStore.writeAll] is what makes it
   /// all-or-nothing.
-  Future<void> importDocument(SyncDocument document) =>
-      store.writeAll(document.taskMaster, document.dailyPlan);
+  /// [document.conflicts] replaces whatever was stored rather than being
+  /// merged into it: every caller here has already taken the union (the hub's
+  /// answer, or `SyncMerger`), so anything missing from it is missing on
+  /// purpose.
+  Future<void> importDocument(SyncDocument document) => store.writeAll(
+    document.taskMaster,
+    document.dailyPlan,
+    conflicts: document.conflicts,
+  );
 
   Future<void> importAll(Map<String, dynamic> data) =>
       importDocument(SyncDocument.fromJson(data, strict: true));
+
+  /// Read, transform and write as one step (see [StateStore.updateDocument]).
+  ///
+  /// The guarded form of [exportDocument] followed by [importDocument]: use it
+  /// wherever what is written is derived from what was read, so an edit landing
+  /// in between is merged with rather than overwritten. [fn] may return null to
+  /// leave the store untouched.
+  Future<SyncDocument> updateDocument(
+    FutureOr<SyncDocument?> Function(SyncDocument document) fn,
+  ) => store.updateDocument(
+    // The store assembles the document from its own keys and has no device id
+    // of its own to stamp on it; callers read it, so it is filled in here.
+    (document) => fn(document.copyWith(deviceId: deviceClock.deviceId)),
+  );
 }

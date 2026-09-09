@@ -1,0 +1,111 @@
+{
+  "name": "settings conflict under the entity id \"settings\"",
+  "options": {
+    "lastAgreedAt": "2026-09-09T00:00:00.000Z",
+    "detectedBy": "hub-macos",
+    "detectedAt": "2026-09-09T03:00:00.000Z"
+  },
+  "a": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "hub-macos",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "20-0-hub-macos",
+        "updatedAt": "2026-09-09T02:00:00.000Z",
+        "deletedAt": null,
+        "migrated": false
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "b": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "android-1",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": true,
+        "clock": "15-0-android-1",
+        "updatedAt": "2026-09-09T01:00:00.000Z",
+        "deletedAt": null,
+        "migrated": false
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expected": {
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "20-0-hub-macos",
+        "updatedAt": "2026-09-09T02:00:00.000Z",
+        "deletedAt": null,
+        "migrated": false
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expectedConflicts": [
+    {
+      "id": "cf-b9f246bd6d7b5912",
+      "entityType": "settings",
+      "entityId": "settings",
+      "winner": {
+        "side": "hub",
+        "deviceId": "hub-macos",
+        "clock": "20-0-hub-macos"
+      },
+      "loser": {
+        "side": "device",
+        "deviceId": "android-1",
+        "clock": "15-0-android-1"
+      },
+      "resolution": null
+    }
+  ],
+  "expectedSnapshots": {
+    "cf-b9f246bd6d7b5912": {
+      "winner": {
+        "shareCategories": false,
+        "clock": "20-0-hub-macos",
+        "updatedAt": "2026-09-09T02:00:00.000Z",
+        "deletedAt": null,
+        "migrated": false
+      },
+      "loser": {
+        "shareCategories": true,
+        "clock": "15-0-android-1",
+        "updatedAt": "2026-09-09T01:00:00.000Z",
+        "deletedAt": null,
+        "migrated": false
+      }
+    }
+  },
+  "expectedDetectedIds": [
+    "cf-b9f246bd6d7b5912"
+  ],
+  "expectedWarnings": []
+}

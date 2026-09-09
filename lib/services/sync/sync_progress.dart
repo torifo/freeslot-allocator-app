@@ -24,6 +24,7 @@ class SyncSummary {
     required this.deleted,
     required this.warnings,
     this.removed = 0,
+    this.conflicts = 0,
   });
 
   final int added;
@@ -35,12 +36,19 @@ class SyncSummary {
   /// [deleted] ones that are still carried as tombstones.
   final int removed;
 
+  /// Entities this merge found edited on both sides since the last agreement.
+  /// Deliberately not folded into [warnings]: the sync still completed, and
+  /// 「警告 N 件」 would stop meaning what it means today.
+  final int conflicts;
+
   factory SyncSummary.fromJson(Map<String, dynamic> j) => SyncSummary(
     added: j['added'] as int? ?? 0,
     updated: j['updated'] as int? ?? 0,
     deleted: j['deleted'] as int? ?? 0,
     warnings: j['warnings'] as int? ?? 0,
     removed: j['removed'] as int? ?? 0,
+    // A hub that predates Plan 3b sends no `conflicts` key at all.
+    conflicts: j['conflicts'] as int? ?? 0,
   );
 }
 

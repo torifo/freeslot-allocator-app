@@ -1,5 +1,6 @@
 import '../../features/daily_plan/domain/daily_plan_models.dart';
 import '../../features/task_master/domain/task_models.dart';
+import 'conflict_record.dart';
 
 /// Thrown when a payload was written by a newer schema than this build knows.
 ///
@@ -25,6 +26,7 @@ class SyncDocument {
     required this.dailyPlan,
     this.lastSyncAt,
     this.purgedBefore,
+    this.conflicts = const <ConflictRecord>[],
   });
 
   static const int schemaVersion = 2;
@@ -36,6 +38,10 @@ class SyncDocument {
   final TaskMasterStateData taskMaster;
   final DailyPlanStateData dailyPlan;
 
+  /// Conflict records (Plan 3b). Ordinary entities as far as the merge is
+  /// concerned, so they live beside the payload rather than inside it.
+  final List<ConflictRecord> conflicts;
+
   int get version => schemaVersion;
 
   SyncDocument copyWith({
@@ -45,6 +51,7 @@ class SyncDocument {
     DateTime? purgedBefore,
     TaskMasterStateData? taskMaster,
     DailyPlanStateData? dailyPlan,
+    List<ConflictRecord>? conflicts,
   }) {
     return SyncDocument(
       exportedAt: exportedAt ?? this.exportedAt,
@@ -53,6 +60,7 @@ class SyncDocument {
       purgedBefore: purgedBefore ?? this.purgedBefore,
       taskMaster: taskMaster ?? this.taskMaster,
       dailyPlan: dailyPlan ?? this.dailyPlan,
+      conflicts: conflicts ?? this.conflicts,
     );
   }
 
@@ -64,6 +72,10 @@ class SyncDocument {
     'purgedBefore': purgedBefore?.toUtc().toIso8601String(),
     'taskMaster': taskMaster.toJson(),
     'dailyPlan': dailyPlan.toJson(),
+    // Omitted entirely when empty: a document with nothing recorded stays
+    // byte-identical to what a build without conflicts would have written.
+    if (conflicts.isNotEmpty)
+      'conflicts': conflicts.map((c) => c.toJson()).toList(),
   };
 
   /// Reads a v1 or v2 envelope. v1 used snake_case keys and carried no device
@@ -114,7 +126,23 @@ class SyncDocument {
       purgedBefore: _parseUtc(json['purgedBefore']),
       taskMaster: TaskMasterStateData.fromJson(taskJson, strict: strict),
       dailyPlan: DailyPlanStateData.fromJson(planJson, strict: strict),
+      // Never an error, even in strict mode: a v2 document written before
+      // Plan 3b simply has no such key, and that is not corruption.
+      conflicts: _parseConflicts(json['conflicts'], strict: strict),
     );
+  }
+
+  static List<ConflictRecord> _parseConflicts(dynamic raw, {required bool strict}) {
+    if (raw is! List) return const <ConflictRecord>[];
+    final out = <ConflictRecord>[];
+    for (final dynamic entry in raw) {
+      if (entry is! Map<String, dynamic>) {
+        if (strict) throw FormatException('conflicts entry must be an object, got $entry');
+        continue;
+      }
+      out.add(ConflictRecord.fromJson(entry, strict: strict));
+    }
+    return out;
   }
 
   static DateTime? _parseUtc(dynamic value) =>

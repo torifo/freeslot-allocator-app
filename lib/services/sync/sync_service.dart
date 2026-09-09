@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/device_clock.dart';
 import '../app_data_service.dart';
+import 'conflict_record.dart';
+import 'conflict_resolver.dart';
 import 'document_clocks.dart';
 import 'hub_discovery.dart';
 import 'lan_sync_client.dart';
@@ -154,6 +156,9 @@ class SyncService {
         lastSyncAt: settings.lastSyncAt,
         taskMaster: exported.taskMaster,
         dailyPlan: exported.dailyPlan,
+        // Sent, not dropped: a conflict this phone resolved while offline only
+        // reaches the PC — and the other devices — as a conflict record.
+        conflicts: exported.conflicts,
       ).toJson();
 
       SyncResponse response;
@@ -273,7 +278,16 @@ class SyncService {
       progress?.stage(SyncStage.applying);
       final incoming = SyncDocument.fromJson(json, strict: true);
       final local = await data.exportDocument();
-      final merged = SyncMerger.merge(local, incoming);
+      final settings = await settingsStore.load();
+      final merged = SyncMerger.merge(
+        local,
+        incoming,
+        // The agreement point is the last successful sync with the hub. Null
+        // before the first one, which switches detection off entirely.
+        lastAgreedAt: settings.lastSyncAt,
+        detectedBy: deviceClock.deviceId,
+        detectedAt: DateTime.now().toUtc(),
+      );
       await _observeClocks(merged.document);
       progress?.stage(SyncStage.saving);
       await data.importDocument(merged.document);
@@ -283,6 +297,69 @@ class SyncService {
     } catch (error) {
       return _mapFailure(error, progress);
     }
+  }
+
+  /// Resolves one recorded conflict by adopting a side, or by closing the
+  /// record and leaving the current state alone.
+  ///
+  /// Written as an ordinary local edit with this device's own clock, so it
+  /// works offline and propagates on the next sync — and, in hub mode, is
+  /// simply another document write.
+  Future<ConflictResolutionResult> resolveConflict(
+    String id,
+    ConflictAdoption adopt,
+  ) => _resolve(adopt, (c) => c.id == id, requireOpen: id);
+
+  /// The same decision for every open record, optionally of one entity type.
+  Future<ConflictResolutionResult> resolveAll(
+    ConflictAdoption adopt, {
+    String? entityType,
+  }) => _resolve(adopt, (c) => entityType == null || c.entityType == entityType);
+
+  /// Read, decide and write as one step.
+  ///
+  /// The decision is measured against the live entity — adopting the version
+  /// that is already stored writes nothing, and a purged entity is refused — so
+  /// it has to be taken on the document that is about to be written, not on a
+  /// copy read some milliseconds earlier. Going through
+  /// [AppDataService.updateDocument] is what makes that true: on the hub's file
+  /// the whole thing runs under the cross-process lock, and in hub mode it
+  /// folds into the snapshot being pushed.
+  ///
+  /// A throw from [applyConflictResolutions] propagates out of the update, so a
+  /// refused resolution writes nothing at all — including the records it had
+  /// already stamped before reaching the one it could not apply.
+  Future<ConflictResolutionResult> _resolve(
+    ConflictAdoption adopt,
+    bool Function(ConflictRecord) where, {
+    String? requireOpen,
+  }) async {
+    late ConflictResolutionResult result;
+    await data.updateDocument((current) async {
+      if (requireOpen != null) {
+        // Checked on the document that is about to be written, not on one read
+        // beforehand: a record another device resolved in between must be
+        // refused rather than decided twice.
+        final record = current.conflicts.where((c) => c.id == requireOpen).firstOrNull;
+        if (record == null) {
+          throw const ConflictResolutionException('この競合は見つかりませんでした。');
+        }
+        if (!record.isOpen) {
+          throw const ConflictResolutionException('この競合はすでに解決済みです。');
+        }
+      }
+      result = await applyConflictResolutions(
+        current,
+        adopt: adopt,
+        where: where,
+        nextClock: deviceClock.next,
+        resolvedBy: deviceClock.deviceId,
+      );
+      // Nothing was open to decide: leave the store alone rather than rewrite
+      // it with a document identical to the one just read.
+      return result.resolved > 0 ? result.document : null;
+    });
+    return result;
   }
 
   /// mDNS is a fallback, never a gate: a slow or silent network must not hold

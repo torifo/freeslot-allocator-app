@@ -330,7 +330,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('追加 1 / 更新 2 / 削除 3 / 消去 4 / 警告 0'), findsOneWidget);
+    expect(find.text('追加 1 / 更新 2 / 削除 3 / 消去 4 / 警告 0 / 競合 0'), findsOneWidget);
     await tester.tap(find.text('閉じる'));
     await tester.pumpAndSettle();
     expect(tester.widget<ListTile>(find.widgetWithText(ListTile, '今すぐ同期')).enabled, isTrue);
@@ -467,7 +467,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(fake.modes, <SyncMode>[SyncMode.merge, SyncMode.takeHub]);
-    expect(find.text('追加 5 / 更新 0 / 削除 0 / 消去 0 / 警告 0'), findsOneWidget);
+    expect(find.text('追加 5 / 更新 0 / 削除 0 / 消去 0 / 警告 0 / 競合 0'), findsOneWidget);
     expect(container.read(syncInFlightProvider), isFalse);
 
     await tester.tap(find.text('閉じる'));

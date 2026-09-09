@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { merge } from '../src/merge.js';
-import type { SyncDocumentJson } from '../src/model.js';
+import { merge, type MergeOptions } from '../src/merge.js';
+import type { ConflictJson, SyncDocumentJson } from '../src/model.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dir = join(here, '../../../test/fixtures/sync_merge');
@@ -25,22 +25,92 @@ function normalize(value: unknown): unknown {
   return value;
 }
 
+/**
+ * Every id a document holds, live or tombstoned — conflict records included,
+ * because they are ordinary entities as far as the merge is concerned and
+ * losing one loses the user's only record of a version that was overwritten.
+ */
+function idsOf(doc: SyncDocumentJson): Set<string> {
+  const out = new Set<string>();
+  for (const section of [doc.taskMaster, doc.dailyPlan] as unknown as Array<Record<string, unknown>>) {
+    for (const value of Object.values(section)) {
+      if (!Array.isArray(value)) continue;
+      for (const entry of value) {
+        const id = (entry as { id?: unknown }).id;
+        if (typeof id === 'string') out.add(id);
+      }
+    }
+  }
+  for (const c of doc.conflicts ?? []) out.add(c.id);
+  return out;
+}
+
+/** The subset of a conflict record the fixtures pin; snapshots are checked elsewhere. */
+const briefOf = (c: ConflictJson) => ({
+  id: c.id,
+  entityType: c.entityType,
+  entityId: c.entityId,
+  winner: { side: c.winner.side, deviceId: c.winner.deviceId, clock: c.winner.clock },
+  loser: { side: c.loser.side, deviceId: c.loser.deviceId, clock: c.loser.clock },
+  resolution: c.resolution ?? null,
+});
+
 describe('merge fixtures', () => {
   for (const name of manifest) {
     const fx = JSON.parse(readFileSync(join(dir, name), 'utf8'));
     it(fx.name, () => {
       const a = fx.a as SyncDocumentJson;
       const b = fx.b as SyncDocumentJson;
-      const ab = merge(a, b);
-      const ba = merge(b, a);
+      // A fixture with no `options` merges exactly as it did before Plan 3b:
+      // detection is off, and that is what keeps the first eight cases honest.
+      const options = fx.options as MergeOptions | undefined;
+      const ab = merge(a, b, options);
+      const ba = merge(b, a, options);
       expect(normalize(ab.document.taskMaster)).toEqual(normalize(fx.expected.taskMaster));
       expect(normalize(ab.document.dailyPlan)).toEqual(normalize(fx.expected.dailyPlan));
       expect(normalize(ba.document.taskMaster)).toEqual(normalize(ab.document.taskMaster));
       expect(normalize(ba.document.dailyPlan)).toEqual(normalize(ab.document.dailyPlan));
       expect(ab.warnings).toEqual(fx.expectedWarnings ?? []);
-      expect(normalize(merge(ab.document, b).document.taskMaster)).toEqual(
+      expect(normalize(merge(ab.document, b, options).document.taskMaster)).toEqual(
         normalize(ab.document.taskMaster),
       );
+
+      // Nothing is ever dropped: every id either side held survives the merge,
+      // live or as a tombstone (design B-2). Applied to every fixture, old
+      // ones included, so a new case gets the guard for free.
+      const before = new Set([...idsOf(a), ...idsOf(b)]);
+      for (const id of before) expect(idsOf(ab.document).has(id)).toBe(true);
+      for (const id of before) expect(idsOf(ba.document).has(id)).toBe(true);
+
+      // Detection is not commutative in the id — swapping the arguments swaps
+      // which side is `hub` — but the set of entities in conflict is.
+      expect(ab.conflicts.map((c) => c.entityId).sort()).toEqual(
+        ba.conflicts.map((c) => c.entityId).sort(),
+      );
+      if (fx.expectedConflicts) {
+        expect((ab.document.conflicts ?? []).map(briefOf)).toEqual(fx.expectedConflicts);
+      } else {
+        expect(ab.document.conflicts).toBeUndefined();
+      }
+      if (fx.expectedDetectedIds) {
+        expect(ab.conflicts.map((c) => c.id)).toEqual(fx.expectedDetectedIds);
+      }
+
+      // The records themselves are fully commutative: `side` is read off the
+      // HLC device id, so swapping the arguments no longer swaps the labels.
+      expect(normalize(ba.document.conflicts ?? [])).toEqual(normalize(ab.document.conflicts ?? []));
+
+      // Cross-language snapshot parity: the fixture pins the exact map each
+      // side stored, and the Dart runner asserts the very same JSON.
+      if (fx.expectedSnapshots) {
+        const snapshots = Object.fromEntries(
+          (ab.document.conflicts ?? []).map((c) => [
+            c.id,
+            { winner: c.winner.snapshot, loser: c.loser.snapshot },
+          ]),
+        );
+        expect(snapshots).toEqual(fx.expectedSnapshots);
+      }
     });
   }
 });

@@ -3,7 +3,7 @@ import type { HubConfig } from './config.js';
 import { checkInvariants } from './invariants.js';
 import { Hlc, HlcClock } from './hlc.js';
 import { merge } from './merge.js';
-import { isDeleted, SCHEMA_VERSION, toIsoUtc, type Entity, type SyncDocumentJson } from './model.js';
+import { conflictSchema, isDeleted, SCHEMA_VERSION, toIsoUtc, type ConflictJson, type Entity, type SyncDocumentJson } from './model.js';
 import type { FileStore } from './store.js';
 
 export class SyncRejected extends Error {
@@ -11,12 +11,80 @@ export class SyncRejected extends Error {
 }
 
 export type SyncMode = 'merge' | 'take_hub' | 'take_phone';
-export interface SyncSummary { added: number; updated: number; deleted: number; removed: number; warnings: number; }
-export interface SyncResult { document: SyncDocumentJson; summary: SyncSummary; warnings: string[]; }
+export interface SyncSummary { added: number; updated: number; deleted: number; removed: number; warnings: number; conflicts: number; }
+export interface SyncResult { document: SyncDocumentJson; summary: SyncSummary; warnings: string[]; conflicts: ConflictJson[]; }
 export interface SyncProgress { deviceId: string; stage: 'received' | 'merging' | 'saving' | 'done' | 'failed'; startedAt: string; finishedAt?: string; summary?: SyncSummary; error?: string; }
 
 /** Tombstones are kept this much longer than the cutoff demands, to absorb device clock skew. */
 export const PURGE_SKEW_MS = 24 * 60 * 60 * 1000;
+
+/** Ceilings from the design (C-2). Open conflicts are the ones the user still has to answer. */
+export const MAX_OPEN_CONFLICTS = 1000;
+export const MAX_RESOLVED_CONFLICTS = 200;
+export const RESOLVED_CONFLICT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Applies the conflict ceilings and the resolved-record TTL in one place.
+ *
+ * Pure apart from `nextClock`, and exported so the rules can be tested without
+ * a store: records already tombstoned pass through untouched (they belong to
+ * `purge`), open records are trimmed oldest-first, resolved ones are kept
+ * newest-first, and a resolution older than the TTL is tombstoned.
+ *
+ * Nothing is ever hard-deleted. A record dropped from the array would come
+ * straight back on the next sync, because the peer still holds it and the
+ * merge unions by id; only a tombstone travels, and only `purge` removes one
+ * for good once every device has seen it.
+ *
+ * Every tombstone this mints carries a *new* clock from `nextClock`. Keeping
+ * the old one would lose the merge to the peer's live copy: equal clocks fall
+ * through to the content-hash tie-break, where the tombstone hashes to the
+ * empty string and therefore loses. An unresolved record can be capped too —
+ * the ceiling is the owner's standing decision to stop tracking the oldest
+ * ones — and it gets a new clock for exactly the same reason.
+ */
+export function capConflicts(
+  conflicts: ConflictJson[],
+  at: string,
+  nextClock: () => string,
+): { conflicts: ConflictJson[]; dropped: number } {
+  const cutoff = Date.parse(at) - RESOLVED_CONFLICT_TTL_MS;
+  const tomb = (c: ConflictJson): ConflictJson => ({ ...c, clock: nextClock(), updatedAt: at, deletedAt: at });
+  const tombstoned: ConflictJson[] = [];
+  const open: ConflictJson[] = [];
+  const resolved: ConflictJson[] = [];
+  for (const c of conflicts) {
+    if (isDeleted(c as unknown as Record<string, unknown>)) { tombstoned.push(c); continue; }
+    if (c.resolution == null) { open.push(c); continue; }
+    const resolvedAt = instant(c.resolvedAt);
+    if (!Number.isNaN(resolvedAt) && resolvedAt < cutoff) tombstoned.push(tomb(c));
+    else resolved.push(c);
+  }
+  // Oldest first, so slicing from the front sheds the oldest. An unparsable
+  // detectedAt sorts oldest: a record we cannot date is the safest to shed.
+  open.sort((x, y) => (instant(x.detectedAt) || 0) - (instant(y.detectedAt) || 0));
+  const dropped = Math.max(0, open.length - MAX_OPEN_CONFLICTS);
+  const keptOpen = open.slice(dropped);
+  for (const c of open.slice(0, dropped)) tombstoned.push(tomb(c));
+  resolved.sort((x, y) => (instant(y.resolvedAt) || 0) - (instant(x.resolvedAt) || 0));
+  const keptResolved = resolved.slice(0, MAX_RESOLVED_CONFLICTS);
+  for (const c of resolved.slice(MAX_RESOLVED_CONFLICTS)) tombstoned.push(tomb(c));
+  const out = [...tombstoned, ...keptOpen, ...keptResolved].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  return { conflicts: out, dropped };
+}
+
+/** Union of two conflict lists by id; the larger clock — the later resolution — wins. */
+function unionConflicts(a: ConflictJson[], b: ConflictJson[]): ConflictJson[] {
+  const byId = new Map(a.map((c) => [c.id, c]));
+  for (const c of b) {
+    const existing = byId.get(c.id);
+    if (!existing) { byId.set(c.id, c); continue; }
+    const x = Hlc.tryParse(existing.clock);
+    const y = Hlc.tryParse(c.clock);
+    if (x && y && Hlc.compare(y, x) > 0) byId.set(c.id, c);
+  }
+  return [...byId.values()];
+}
 
 const ENTITY_LISTS = (d: SyncDocumentJson): Entity[][] => [
   d.taskMaster.tasks, d.taskMaster.mustDoCategories, d.taskMaster.wantToDoCategories,
@@ -26,7 +94,7 @@ const ENTITY_LISTS = (d: SyncDocumentJson): Entity[][] => [
 const entitySchema = z.object({ id: z.string() }).passthrough();
 const entityList = z.array(entitySchema);
 /** Permissive on unknown fields so a newer client's extra keys survive instead of breaking sync. */
-const documentSchema = z.object({
+export const documentSchema = z.object({
   version: z.number(),
   exportedAt: z.string().optional(),
   deviceId: z.string().optional(),
@@ -41,6 +109,9 @@ const documentSchema = z.object({
     settings: z.object({ shareCategories: z.boolean() }).passthrough(),
   }).passthrough(),
   dailyPlan: z.object({ plans: entityList, slots: entityList, assignments: entityList }).passthrough(),
+  // Optional: a Plan 2b client sends no `conflicts` at all, and a hub with
+  // nothing recorded omits the key rather than sending an empty array.
+  conflicts: z.array(conflictSchema).optional(),
 }).passthrough();
 
 /** Instant of an ISO string, whatever its offset or precision; NaN when unparsable. */
@@ -110,8 +181,14 @@ export class SyncEngine {
       }
 
       const at = this.now().toISOString();
-      let summary: SyncSummary = { added: 0, updated: 0, deleted: 0, removed: 0, warnings: 0 };
+      // A device that has never synced brings no agreement point, so detection
+      // is off and plain LWW decides every collision (design C-1). Nothing is
+      // recorded for the user to undo, so the hub keeps a copy of what it held
+      // before that one merge — cheap, and the only rewind available.
+      if (incomingLastSync === null) await this.backupFirstPairing(at);
+      let summary: SyncSummary = { added: 0, updated: 0, deleted: 0, removed: 0, warnings: 0, conflicts: 0 };
       let warnings: string[] = [];
+      let detected: ConflictJson[] = [];
       this.setProgress(deviceId, { stage: 'merging' });
       // Guard, merge, check and summarize all run inside the one locked read-modify-write,
       // so a concurrent sync cannot merge against a document that is already stale.
@@ -130,13 +207,31 @@ export class SyncEngine {
 
         let merged: SyncDocumentJson;
         let mergeWarnings: string[] = [];
-        if (mode === 'take_phone') merged = { ...incoming, deviceId: current.deviceId, purgedBefore: current.purgedBefore ?? null };
-        else if (mode === 'take_hub') merged = current;
-        else { const r = merge(current, incoming); merged = r.document; mergeWarnings = r.warnings; }
+        if (mode === 'take_phone') {
+          merged = { ...incoming, deviceId: current.deviceId, purgedBefore: current.purgedBefore ?? null };
+          // Replacing the data must not replace the record of what was in conflict.
+          merged.conflicts = unionConflicts(current.conflicts ?? [], incoming.conflicts ?? []);
+        } else if (mode === 'take_hub') {
+          merged = { ...current, conflicts: unionConflicts(current.conflicts ?? [], incoming.conflicts ?? []) };
+        } else {
+          const r = merge(current, incoming, {
+            // The agreement point is what the phone says it last received.
+            lastAgreedAt: incomingLastSync,
+            detectedBy: this.store.deviceId,
+            detectedAt: at,
+          });
+          merged = r.document;
+          mergeWarnings = r.warnings;
+          detected = r.conflicts;
+        }
+        const capped = capConflicts(merged.conflicts ?? [], at, () => this.clock.next().toString());
+        if (capped.dropped > 0) mergeWarnings = [...mergeWarnings, 'conflict_overflow'];
+        if (capped.conflicts.length > 0) merged.conflicts = capped.conflicts;
+        else delete merged.conflicts;
         merged.lastSyncAt = at;
         warnings = [...mergeWarnings, ...checkInvariants(merged).map((v) => `${v.code}: ${v.message}`)];
         if (guardSkipped) warnings.push('purgedBefore unparsable, guard skipped');
-        summary = summarize(current, merged, warnings.length);
+        summary = { ...summarize(current, merged, warnings.length), conflicts: detected.length };
         return merged;
       });
       this.setProgress(deviceId, { stage: 'saving' });
@@ -149,10 +244,28 @@ export class SyncEngine {
         summary = { ...summary, warnings: warnings.length };
       }
       this.setProgress(deviceId, { stage: 'done', finishedAt: at, summary });
-      return { document: saved, summary, warnings };
+      return { document: saved, summary, warnings, conflicts: detected };
     } catch (error) {
       this.setProgress(deviceId, { stage: 'failed', finishedAt: this.now().toISOString(), error: String((error as Error).message ?? error) });
       throw error;
+    }
+  }
+
+  /**
+   * Copies `data.json` aside as `data.json.first-pair-<ts>` before a first
+   * pairing merges into it. Skipped when the hub holds nothing worth keeping,
+   * and best-effort: a failed copy must never turn a working sync into an
+   * error, so it only raises a warning on the store.
+   */
+  private async backupFirstPairing(at: string): Promise<void> {
+    try {
+      const current = await this.store.read();
+      const empty = ENTITY_LISTS(current).every((list) => list.length === 0)
+        && (current.conflicts ?? []).length === 0;
+      if (empty) return;
+      await this.store.snapshot(`first-pair-${at.replace(/[:.]/g, '-')}`);
+    } catch (error) {
+      this.store.lastWarning = `first-pairing backup failed: ${String((error as Error).message ?? error)}`;
     }
   }
 
@@ -176,6 +289,12 @@ export class SyncEngine {
       doc.dailyPlan.plans = keep(doc.dailyPlan.plans);
       doc.dailyPlan.slots = keep(doc.dailyPlan.slots);
       doc.dailyPlan.assignments = keep(doc.dailyPlan.assignments);
+      // Resolved conflicts tombstoned by `capConflicts` ride the very same cutoff.
+      const kept = keep((doc.conflicts ?? []) as unknown as Entity[]) as unknown as ConflictJson[];
+      // Housekeeping runs here too, not only on sync: a hub whose phone has
+      // stopped syncing would otherwise sit over the ceiling indefinitely.
+      const conflicts = capConflicts(kept, this.now().toISOString(), () => this.clock.next().toString()).conflicts;
+      if (conflicts.length > 0) doc.conflicts = conflicts; else delete doc.conflicts;
       // Monotonic: purgedBefore only ever moves forward.
       const previous = instant(doc.purgedBefore);
       effective = !Number.isNaN(previous) && previous > cutoffMs ? toIsoUtc(doc.purgedBefore) ?? cutoff : cutoff;
@@ -197,5 +316,7 @@ function summarize(before: SyncDocumentJson, after: SyncDocumentJson, warnings: 
     else if (!isDeleted(e) && e.clock !== prev.clock) updated += 1;
   }
   for (const id of a.keys()) if (!b.has(id)) removed += 1;
-  return { added, updated, deleted, removed, warnings };
+  // `conflicts` is filled in by the caller, which is the only place that knows
+  // what this particular merge detected.
+  return { added, updated, deleted, removed, warnings, conflicts: 0 };
 }

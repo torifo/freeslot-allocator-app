@@ -18,7 +18,7 @@ FRELOCATOR の macOS 版と同じ `data.json` を編集する MCP サーバー�
 
 ## ツール
 
-全 39 個。オーナー自身のデータしか扱わないので、すべてのエンティティを MCP から作成・取得・更新・削除できる。
+全 43 個。オーナー自身のデータしか扱わないので、すべてのエンティティを MCP から作成・取得・更新・削除できる。
 網羅状況と設計判断は [`docs/tool-coverage.md`](docs/tool-coverage.md) を参照。
 
 タスク:
@@ -52,7 +52,13 @@ FRELOCATOR の macOS 版と同じ `data.json` を編集する MCP サーバー�
 - `export_data` / `undo_last_write` / `sync_status`
 - `import_file` / `import_data` / `purge_tombstones` / `forget_device` / `rotate_token`
 
-最後の 5 個は LAN サーバー（後述）が起動できている場合だけ動く。`hub.json` が壊れていて LAN が無効なときは「LAN sync is not configured in this hub process」を返す。
+競合（後述）:
+
+- `list_conflicts` / `get_conflict` — 記録された競合を一覧する／1 件の差分を見る
+- `resolve_conflict` — PC 版・スマホ版・現状維持のいずれかを選ぶ
+- `resolve_all_conflicts` — 破壊的。未解決を全件まとめて同じ方針で解決する（`dryRun` あり）
+
+`import_file` から `rotate_token` までの 5 個は LAN サーバー（後述）が起動できている場合だけ動く。`hub.json` が壊れていて LAN が無効なときは「LAN sync is not configured in this hub process」を返す。
 
 タスクの完了フラグと墓標の復元はモデル側に情報が無いため提供していない（理由は `docs/tool-coverage.md`）。
 
@@ -186,9 +192,34 @@ connect-src 'self' https://fonts.gstatic.com; worker-src 'self' blob:
 
 唯一の外部許可が `https://fonts.gstatic.com` で、これは Flutter エンジンが日本語の字形を Noto Sans JP のサブセットとして取りに行くため（`fontFallbackBaseUrl` の既定値）。アプリはフォントを同梱していないので、ここを塞ぐと日本語がすべて豆腐になる。実ビルドの `web-dist/` を Chrome で読み込んで確認した結果、外部に出るリクエストはこの Noto のサブセットだけで、`.wasm` を含む他のすべては同一オリジンから配信されている。
 
+## 競合（Plan 3b）
+
+同じエンティティを PC（MCP）とスマホ／ブラウザの両方で編集していると、マージは
+HLC の勝者を暫定採用して**同期そのものは必ず完了させ**、敗者のスナップショットを
+競合レコードとしてドキュメント直下の `conflicts[]` に残す。あとから
+`resolve_conflict` でどちらを採るか選ぶ。
+
+- 検出はマージの中で行い、合意点は受信側が申告する `lastSyncAt`。初回同期
+  （`lastSyncAt` が null）では検出しない。
+- レコードの id は `cf-<sha256(entityId+勝者clock+敗者clock)[0..16]>` で決定的。
+  Dart と TypeScript が別々に検出しても同じ id になるので、再検出は冪等。
+- 採用は**新しい clock の編集として書き戻す**（clock は巻き戻らない）。したがって
+  次の通常マージでスマホにもブラウザにも伝播する。墓標を採用すると再び削除される。
+- 上限は未解決 1000 件・解決済み 200 件。解決済みは 30 日で墓標化し、
+  `purge_tombstones` のカットオフに乗って物理削除される。溢れたときは同期の
+  warnings に `conflict_overflow` が出る。
+- `take_hub` / `take_phone`（`import_data` の `mode=replace` を含む）でデータを
+  置き換えても、`conflicts` だけは常に両者の和集合を保つ。置き換えは
+  「どちらのデータを採るか」であって「何が競合したかの記録を消すこと」ではない。
+- スキーマ版は 2 のまま。`conflicts` を持たない古いアプリとも往復できるが、
+  **古いアプリはこのフィールドを落とす**（受け取った側が保持しない）。ハブは常に
+  和集合を取るのでハブ側の記録は消えない、という非対称がある。
+- ハブのローカルページ（ペアリング／QR）に競合一覧は作っていない。参照と解決は
+  MCP ツールとアプリの「設定 › PC と同期 › 競合」から行う。
+
 ## 開発
 
 - テスト: `npm test`（マージ規則と不変条件は `test/fixtures/sync_merge` を Flutter 側と共有）。
 - 型検査: `npm run typecheck`（`tsconfig.test.json`。テストも含めて検査する）。
 - web 版のビルド: `npm run build:web`（`flutter build web --release` を回して `web-dist.tmp` へ複製してから `web-dist/` に差し替え、`BUILD_INFO.json` に git rev と時刻を書く）。
-- stdio サーバーの疎通確認: `npm run smoke`（ビルドしてから実クライアントでツール一覧を取り、カテゴリ作成から並べ替え・割り当て移動・削除・`undo_last_write`・`purge_tombstones` まで CRUD を一巡させ、各段階で不変条件を検査する）。
+- stdio サーバーの疎通確認: `npm run smoke`（ビルドしてから実クライアントでツール一覧を取り、カテゴリ作成から並べ替え・割り当て移動・削除・`undo_last_write`・競合の作成と解決・`purge_tombstones` まで CRUD を一巡させ、各段階で不変条件を検査する）。

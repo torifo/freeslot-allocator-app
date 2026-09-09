@@ -1,0 +1,273 @@
+{
+  "name": "conflict records union by id, and the later resolution wins",
+  "options": {
+    "lastAgreedAt": "2026-09-09T00:00:00.000Z",
+    "detectedBy": "hub-macos",
+    "detectedAt": "2026-09-09T03:00:00.000Z"
+  },
+  "a": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "hub-macos",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    },
+    "conflicts": [
+      {
+        "id": "cf-8c2813681b927604",
+        "entityType": "task",
+        "entityId": "tsk-9",
+        "detectedAt": "2026-09-08T10:00:00.000Z",
+        "detectedBy": "hub-macos",
+        "winner": {
+          "side": "hub",
+          "deviceId": "hub-macos",
+          "clock": "20-0-hub-macos",
+          "updatedAt": "2026-09-09T02:00:00.000Z",
+          "snapshot": {
+            "id": "tsk-9",
+            "title": "hub edit",
+            "kind": "must_do",
+            "priority": 3,
+            "createdAt": "2026-09-01T00:00:00.000Z",
+            "memo": "",
+            "categoryId": null,
+            "estimatedMinutes": 0,
+            "clock": "20-0-hub-macos",
+            "updatedAt": "2026-09-09T02:00:00.000Z",
+            "deletedAt": null,
+            "migrated": false
+          }
+        },
+        "loser": {
+          "side": "device",
+          "deviceId": "android-1",
+          "clock": "15-0-android-1",
+          "updatedAt": "2026-09-09T01:00:00.000Z",
+          "snapshot": {
+            "id": "tsk-9",
+            "title": "device edit",
+            "kind": "must_do",
+            "priority": 3,
+            "createdAt": "2026-09-01T00:00:00.000Z",
+            "memo": "",
+            "categoryId": null,
+            "estimatedMinutes": 0,
+            "clock": "15-0-android-1",
+            "updatedAt": "2026-09-09T01:00:00.000Z",
+            "deletedAt": null,
+            "migrated": false
+          }
+        },
+        "resolution": null,
+        "resolvedAt": null,
+        "resolvedBy": null,
+        "clock": "20-0-hub-macos",
+        "updatedAt": "2026-09-08T10:00:00.000Z",
+        "deletedAt": null,
+        "migrated": false
+      }
+    ]
+  },
+  "b": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "android-1",
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    },
+    "conflicts": [
+      {
+        "id": "cf-8c2813681b927604",
+        "entityType": "task",
+        "entityId": "tsk-9",
+        "detectedAt": "2026-09-08T10:00:00.000Z",
+        "detectedBy": "hub-macos",
+        "winner": {
+          "side": "hub",
+          "deviceId": "hub-macos",
+          "clock": "20-0-hub-macos",
+          "updatedAt": "2026-09-09T02:00:00.000Z",
+          "snapshot": {
+            "id": "tsk-9",
+            "title": "hub edit",
+            "kind": "must_do",
+            "priority": 3,
+            "createdAt": "2026-09-01T00:00:00.000Z",
+            "memo": "",
+            "categoryId": null,
+            "estimatedMinutes": 0,
+            "clock": "20-0-hub-macos",
+            "updatedAt": "2026-09-09T02:00:00.000Z",
+            "deletedAt": null,
+            "migrated": false
+          }
+        },
+        "loser": {
+          "side": "device",
+          "deviceId": "android-1",
+          "clock": "15-0-android-1",
+          "updatedAt": "2026-09-09T01:00:00.000Z",
+          "snapshot": {
+            "id": "tsk-9",
+            "title": "device edit",
+            "kind": "must_do",
+            "priority": 3,
+            "createdAt": "2026-09-01T00:00:00.000Z",
+            "memo": "",
+            "categoryId": null,
+            "estimatedMinutes": 0,
+            "clock": "15-0-android-1",
+            "updatedAt": "2026-09-09T01:00:00.000Z",
+            "deletedAt": null,
+            "migrated": false
+          }
+        },
+        "resolution": "device",
+        "resolvedAt": "2026-09-08T12:00:00.000Z",
+        "resolvedBy": "android-1",
+        "clock": "99-0-android-1",
+        "updatedAt": "2026-09-08T12:00:00.000Z",
+        "deletedAt": null,
+        "migrated": false
+      },
+      {
+        "id": "cf-499ca94c42b1fd3f",
+        "entityType": "task",
+        "entityId": "tsk-8",
+        "detectedAt": "2026-09-08T11:00:00.000Z",
+        "detectedBy": "android-1",
+        "winner": {
+          "side": "hub",
+          "deviceId": "hub-macos",
+          "clock": "21-0-hub-macos",
+          "updatedAt": "2026-09-09T02:00:00.000Z",
+          "snapshot": {
+            "id": "tsk-8",
+            "title": "hub edit",
+            "kind": "must_do",
+            "priority": 3,
+            "createdAt": "2026-09-01T00:00:00.000Z",
+            "memo": "",
+            "categoryId": null,
+            "estimatedMinutes": 0,
+            "clock": "21-0-hub-macos",
+            "updatedAt": "2026-09-09T02:00:00.000Z",
+            "deletedAt": null,
+            "migrated": false
+          }
+        },
+        "loser": {
+          "side": "device",
+          "deviceId": "android-1",
+          "clock": "16-0-android-1",
+          "updatedAt": "2026-09-09T01:00:00.000Z",
+          "snapshot": {
+            "id": "tsk-8",
+            "title": "device edit",
+            "kind": "must_do",
+            "priority": 3,
+            "createdAt": "2026-09-01T00:00:00.000Z",
+            "memo": "",
+            "categoryId": null,
+            "estimatedMinutes": 0,
+            "clock": "16-0-android-1",
+            "updatedAt": "2026-09-09T01:00:00.000Z",
+            "deletedAt": null,
+            "migrated": false
+          }
+        },
+        "resolution": null,
+        "resolvedAt": null,
+        "resolvedBy": null,
+        "clock": "21-0-hub-macos",
+        "updatedAt": "2026-09-08T11:00:00.000Z",
+        "deletedAt": null,
+        "migrated": false
+      }
+    ]
+  },
+  "expected": {
+    "taskMaster": {
+      "tasks": [],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expectedConflicts": [
+    {
+      "id": "cf-499ca94c42b1fd3f",
+      "entityType": "task",
+      "entityId": "tsk-8",
+      "winner": {
+        "side": "hub",
+        "deviceId": "hub-macos",
+        "clock": "21-0-hub-macos"
+      },
+      "loser": {
+        "side": "device",
+        "deviceId": "android-1",
+        "clock": "16-0-android-1"
+      },
+      "resolution": null
+    },
+    {
+      "id": "cf-8c2813681b927604",
+      "entityType": "task",
+      "entityId": "tsk-9",
+      "winner": {
+        "side": "hub",
+        "deviceId": "hub-macos",
+        "clock": "20-0-hub-macos"
+      },
+      "loser": {
+        "side": "device",
+        "deviceId": "android-1",
+        "clock": "15-0-android-1"
+      },
+      "resolution": "device"
+    }
+  ],
+  "expectedDetectedIds": [],
+  "expectedWarnings": []
+}

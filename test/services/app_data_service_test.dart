@@ -7,8 +7,11 @@ import 'package:frelocator/features/task_master/domain/task_models.dart';
 import 'package:frelocator/services/app_data_service.dart';
 import 'package:frelocator/services/storage/prefs_state_store.dart';
 import 'package:frelocator/services/storage/state_store.dart';
+import 'package:frelocator/services/sync/conflict_record.dart';
 import 'package:frelocator/services/sync/sync_document.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../helpers/conflict_fixtures.dart';
 
 /// A store that lets the daily-plan half of a write fail on demand, which is
 /// the failure an import must survive without leaving half of itself behind.
@@ -32,6 +35,16 @@ class _FlakyStore extends StateStore {
     if (failPlans) throw StateError('disk full');
     return inner.writeDailyPlan(state);
   }
+
+  // Delegated rather than left to the base class: `StateStore.writeConflicts`
+  // refuses by default, so a store that swallowed the records would be caught
+  // here instead of silently dropping them.
+  @override
+  Future<List<ConflictRecord>> readConflicts() => inner.readConflicts();
+
+  @override
+  Future<void> writeConflicts(List<ConflictRecord> conflicts) =>
+      inner.writeConflicts(conflicts);
 }
 
 void main() {
@@ -104,6 +117,50 @@ void main() {
       'original',
       reason: 'a half-applied import would leave plans pointing at tasks that '
           'were never written',
+    );
+  });
+
+  test('a document round-trips with its conflict records', () async {
+    final made = await make();
+    final base = await made.data.exportDocument();
+    final open = conflictFixture(entityId: 'tsk-1');
+    final closed = conflictFixture(entityId: 'tsk-2', resolution: 'device');
+    await made.data.importDocument(
+      base.copyWith(
+        taskMaster: base.taskMaster.copyWith(tasks: [TaskMaster.fromJson(task('tsk-1'))]),
+        conflicts: <ConflictRecord>[open, closed],
+      ),
+    );
+
+    final read = await made.data.exportDocument();
+    expect(read.conflicts.map((c) => c.id).toList(), <String>[open.id, closed.id]);
+    expect(read.conflicts.first.winner.snapshot['title'], 'PC の版');
+    expect(read.conflicts.last.resolution, 'device');
+    // And through JSON, which is what actually crosses the wire.
+    expect(
+      SyncDocument.fromJson(await made.data.exportAll(), strict: true)
+          .conflicts
+          .map((c) => c.id)
+          .toList(),
+      <String>[open.id, closed.id],
+    );
+  });
+
+  test('an import replaces the records rather than merging into them', () async {
+    final made = await make();
+    final base = await made.data.exportDocument();
+    await made.data.importDocument(
+      base.copyWith(conflicts: <ConflictRecord>[conflictFixture(entityId: 'tsk-1')]),
+    );
+    // Every caller has already taken the union — the hub's answer, or the
+    // merger — so anything missing from the incoming document is missing on
+    // purpose, and a record dropped by a purge must not come back.
+    await made.data.importDocument(
+      base.copyWith(conflicts: <ConflictRecord>[conflictFixture(entityId: 'tsk-9')]),
+    );
+    expect(
+      (await made.data.exportDocument()).conflicts.map((c) => c.entityId).toList(),
+      <String>['tsk-9'],
     );
   });
 

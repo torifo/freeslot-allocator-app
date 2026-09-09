@@ -12,6 +12,7 @@ import '../../../services/app_data_service.dart';
 import '../../../services/hub_mode/hub_mode.dart';
 import '../../../services/storage/hub_backed_store.dart';
 import '../../../services/sync/file_exporter.dart';
+import '../../../services/sync/conflict_record.dart';
 import '../../../services/sync/lan_sync_types.dart';
 import '../../../services/sync/sync_progress.dart';
 import '../../../services/sync/sync_service.dart';
@@ -19,6 +20,7 @@ import '../../../services/sync/sync_settings.dart';
 import '../../daily_plan/application/daily_plan_controller.dart';
 import '../../task_master/application/task_master_controller.dart';
 import '../../task_master/data/task_master_repository.dart' show stateStoreProvider;
+import '../application/conflict_controller.dart';
 import '../application/sync_in_flight.dart';
 import 'mcp_guide_section.dart';
 import 'sync_progress_panel.dart';
@@ -131,6 +133,10 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
               controller: _progress,
               onCancel: _progress.cancel,
               onClose: _closeSheet,
+              onOpenConflicts: () {
+                _closeSheet();
+                context.push('/sync/conflicts');
+              },
             ),
           ),
         );
@@ -265,7 +271,7 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
         appBar: AppBar(title: const Text('PC と同期')),
         body: ListView(
           padding: const EdgeInsets.all(16),
-          children: <Widget>[_hubCard(hub)],
+          children: <Widget>[_hubCard(hub), const SizedBox(height: 16), _conflictCard()],
         ),
       );
     }
@@ -284,6 +290,8 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
                 const SizedBox(height: 16),
                 _lanCard(settings),
                 const SizedBox(height: 16),
+                _conflictCard(),
+                const SizedBox(height: 16),
                 _offlineCard(),
                 if (_hasBackup) ...<Widget>[
                   const SizedBox(height: 16),
@@ -298,6 +306,38 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
     );
   }
 
+
+  /// The way into the conflict list, with the open count as a badge.
+  ///
+  /// Always shown — in hub mode too, where the LAN cards are hidden: a browser
+  /// editing the hub's document can be on either side of a conflict.
+  Widget _conflictCard() {
+    final records = ref.watch(conflictControllerProvider);
+    // Still loading, or failed to load: the row is still the way in, it just
+    // carries no badge yet.
+    final count = records is AsyncData<List<ConflictRecord>>
+        ? openConflicts(records.value).length
+        : null;
+    return Card(
+      child: ListTile(
+        title: const Text('競合'),
+        subtitle: Text(
+          // Nothing is known yet, so the row says nothing: claiming
+          // 「未解決の競合はありません」 before the records have been read would
+          // be a statement the screen cannot back up.
+          count == null
+              ? '未解決の競合を確認できます'
+              : count == 0
+              ? '未解決の競合はありません'
+              : '未解決 $count 件。どちらの版を採用するか選べます。',
+        ),
+        trailing: count == null || count == 0
+            ? const Icon(Icons.chevron_right)
+            : Badge(label: Text('$count'), child: const Icon(Icons.chevron_right)),
+        onTap: () => context.push('/sync/conflicts'),
+      ),
+    );
+  }
 
   /// What the hub-served browser shows instead of the LAN / QR / file cards.
   Widget _hubCard(HubMode hub) {

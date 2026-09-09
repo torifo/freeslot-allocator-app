@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { z } from 'zod';
 import { Hlc } from './hlc.js';
 
 export const SCHEMA_VERSION = 2;
@@ -37,7 +39,102 @@ export interface SyncDocumentJson {
   purgedBefore?: string | null;
   taskMaster: TaskMasterJson;
   dailyPlan: DailyPlanJson;
+  /**
+   * Conflict records (Plan 3b). Optional and omitted when empty, so a document
+   * written by a Plan 2b client — and one this hub writes with nothing to
+   * record — stay byte-identical to what they were before this field existed.
+   */
+  conflicts?: ConflictJson[];
 }
+
+/**
+ * Which half of the pair a version came from, derived from the HLC device id
+ * and never from which merge argument carried it: on the phone the hub's
+ * document is argument B, so an argument-position label would come out
+ * inverted there. `hub-…` is the MCP hub, `web-…` a browser the hub serves —
+ * both of them 「PC 版」 to the user — and everything else, an unparsable clock
+ * included, is the phone.
+ */
+export function sideOfDevice(deviceId: string): 'hub' | 'web' | 'device' {
+  if (deviceId.startsWith('hub-')) return 'hub';
+  if (deviceId.startsWith('web-')) return 'web';
+  return 'device';
+}
+
+/** True for the sides a user reads as 「PC 版」: the hub itself and the browser it serves. */
+export function isPcSide(side: string): boolean {
+  return side === 'hub' || side === 'web';
+}
+
+export interface ConflictSideJson {
+  /**
+   * `hub` / `web` / `device`, per [sideOfDevice]. A string, not a union of
+   * those three: a newer build may write a label this one cannot name, and
+   * dropping it would erase the other side's record on the round trip.
+   */
+  side: string;
+  deviceId: string;
+  clock: string;
+  updatedAt: string;
+  /** The whole record as it stood on that side; a tombstone is `{id, clock, updatedAt, deletedAt}`. */
+  snapshot: { id: string } & Record<string, unknown>;
+}
+
+export type ConflictResolution = 'hub' | 'device' | 'current' | 'superseded';
+
+export interface ConflictJson extends SyncMetaJson {
+  id: string;
+  entityType: string;
+  entityId: string;
+  detectedAt: string;
+  detectedBy: string;
+  winner: ConflictSideJson;
+  loser: ConflictSideJson;
+  resolution: ConflictResolution | string | null;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+}
+
+/**
+ * `cf-<sha256(entityId \n winnerClock \n loserClock)[0..16]>`.
+ *
+ * Derived from content and never from time, so Dart and TypeScript detecting
+ * the same conflict independently produce the same id, re-detection is
+ * idempotent, and the shared fixtures can pin an exact expected id.
+ */
+export function conflictId(entityId: string, winnerClock: string, loserClock: string): string {
+  return `cf-${createHash('sha256')
+    .update(`${entityId}\n${winnerClock}\n${loserClock}`, 'utf8')
+    .digest('hex')
+    .slice(0, 16)}`;
+}
+
+const conflictSideSchema = z.object({
+  side: z.string(),
+  deviceId: z.string(),
+  clock: z.string(),
+  updatedAt: z.string(),
+  snapshot: z.object({ id: z.string() }).passthrough(),
+}).passthrough();
+
+export const conflictSchema = z.object({
+  id: z.string(),
+  // A string, not an enum: a newer app may record a type this build cannot draw,
+  // and dropping it would delete the other side's record on the round trip.
+  entityType: z.string(),
+  entityId: z.string(),
+  detectedAt: z.string(),
+  detectedBy: z.string().optional(),
+  winner: conflictSideSchema,
+  loser: conflictSideSchema,
+  resolution: z.string().nullish(),
+  resolvedAt: z.string().nullish(),
+  resolvedBy: z.string().nullish(),
+  clock: z.string(),
+  updatedAt: z.string(),
+  deletedAt: z.string().nullish(),
+  migrated: z.boolean().optional(),
+}).passthrough();
 
 export const TASK_KINDS = ['must_do', 'want_to_do'] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
@@ -53,6 +150,13 @@ export const ENTITY_KEYS = {
     'startAt', 'endAt', 'sortOrder', 'categoryId', 'categoryName', 'memo',
   ],
   settings: ['shareCategories'],
+  // Must stay identical to `ConflictRecord.jsonKeys` in
+  // lib/services/sync/conflict_record.dart: the set decides what `contentHash`
+  // sees, and a mismatch would split the hash between the two languages.
+  conflict: [
+    'id', 'entityType', 'entityId', 'detectedAt', 'detectedBy',
+    'winner', 'loser', 'resolution', 'resolvedAt', 'resolvedBy',
+  ],
   tombstone: ['id'],
 } as const satisfies Record<string, readonly string[]>;
 

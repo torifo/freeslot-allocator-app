@@ -3,6 +3,8 @@ import 'package:go_router/go_router.dart';
 
 import '../features/daily_plan/presentation/daily_plan_screen.dart';
 import '../features/home/presentation/home_screen.dart';
+import '../features/sync/presentation/conflict_detail_screen.dart';
+import '../features/sync/presentation/conflict_list_screen.dart';
 import '../features/sync/presentation/pairing_scan_screen.dart';
 import '../features/sync/presentation/qr_receive_screen.dart';
 import '../features/sync/presentation/sync_settings_screen.dart';
@@ -88,6 +90,17 @@ GoRouter buildAppRouter({String initialLocation = '/'}) => GoRouter(
         GoRoute(
           path: 'qr',
           builder: (context, state) => const QrReceiveScreen(),
+        ),
+        GoRoute(
+          path: 'conflicts',
+          builder: (context, state) => const ConflictListScreen(),
+          routes: <RouteBase>[
+            GoRoute(
+              path: ':id',
+              builder: (context, state) =>
+                  ConflictDetailScreen(id: state.pathParameters['id'] ?? ''),
+            ),
+          ],
         ),
       ],
     ),

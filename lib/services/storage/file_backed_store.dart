@@ -9,6 +9,7 @@ import 'package:meta/meta.dart';
 
 import '../../features/daily_plan/domain/daily_plan_models.dart';
 import '../../features/task_master/domain/task_models.dart';
+import '../sync/conflict_record.dart';
 import '../sync/sync_document.dart';
 import 'state_store.dart';
 
@@ -298,6 +299,9 @@ class FileBackedStore extends StateStore {
         purgedBefore: current.purgedBefore,
         taskMaster: state,
         dailyPlan: current.dailyPlan,
+        // Carried forward explicitly: dropping them here would let an ordinary
+        // local edit erase records the hub is still waiting on an answer for.
+        conflicts: current.conflicts,
       ),
     );
   });
@@ -313,6 +317,7 @@ class FileBackedStore extends StateStore {
         purgedBefore: current.purgedBefore,
         taskMaster: current.taskMaster,
         dailyPlan: state,
+        conflicts: current.conflicts,
       ),
     );
   });
@@ -320,20 +325,68 @@ class FileBackedStore extends StateStore {
   /// One lock, one document, one rename: tasks and plans land together or not
   /// at all.
   @override
-  Future<void> writeAll(TaskMasterStateData tasks, DailyPlanStateData plans) =>
-      _withLock(() async {
-        final current = await _readLocked();
-        await _writeLocked(
-          SyncDocument(
-            exportedAt: DateTime.now().toUtc(),
-            deviceId: deviceId,
-            lastSyncAt: current.lastSyncAt,
-            purgedBefore: current.purgedBefore,
-            taskMaster: tasks,
-            dailyPlan: plans,
-          ),
-        );
-      });
+  Future<void> writeAll(
+    TaskMasterStateData tasks,
+    DailyPlanStateData plans, {
+    List<ConflictRecord>? conflicts,
+  }) => _withLock(() async {
+    final current = await _readLocked();
+    await _writeLocked(
+      SyncDocument(
+        exportedAt: DateTime.now().toUtc(),
+        deviceId: deviceId,
+        lastSyncAt: current.lastSyncAt,
+        purgedBefore: current.purgedBefore,
+        taskMaster: tasks,
+        dailyPlan: plans,
+        conflicts: conflicts ?? current.conflicts,
+      ),
+    );
+  });
+
+  /// Read, transform and write inside the *same* lock, so the hub cannot slip a
+  /// write in between the two halves of a resolution.
+  @override
+  Future<SyncDocument> updateDocument(
+    FutureOr<SyncDocument?> Function(SyncDocument document) fn,
+  ) => _withLock(() async {
+    final current = await _readLocked();
+    final next = await fn(current);
+    if (next == null) return current;
+    final document = SyncDocument(
+      exportedAt: DateTime.now().toUtc(),
+      deviceId: deviceId,
+      // Carried from what was just read: `fn` is handed a document assembled
+      // here, so these are the store's own bookkeeping, not the caller's.
+      lastSyncAt: current.lastSyncAt,
+      purgedBefore: current.purgedBefore,
+      taskMaster: next.taskMaster,
+      dailyPlan: next.dailyPlan,
+      conflicts: next.conflicts,
+    );
+    await _writeLocked(document);
+    return document;
+  });
+
+  @override
+  Future<List<ConflictRecord>> readConflicts() =>
+      _withLock(() async => (await _readLocked()).conflicts);
+
+  @override
+  Future<void> writeConflicts(List<ConflictRecord> conflicts) => _withLock(() async {
+    final current = await _readLocked();
+    await _writeLocked(
+      SyncDocument(
+        exportedAt: DateTime.now().toUtc(),
+        deviceId: deviceId,
+        lastSyncAt: current.lastSyncAt,
+        purgedBefore: current.purgedBefore,
+        taskMaster: current.taskMaster,
+        dailyPlan: current.dailyPlan,
+        conflicts: conflicts,
+      ),
+    );
+  });
 
   @override
   Future<bool> changedSinceLastRead() async {

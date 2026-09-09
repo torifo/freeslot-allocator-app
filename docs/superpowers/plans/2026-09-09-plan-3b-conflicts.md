@@ -949,6 +949,31 @@ git commit -m "chore(release): bump to 1.0.0+6 with conflict resolution release 
 - 型の整合（実コードで確認済み）: TS `merge(a, b) → { document, warnings }`（→ `conflicts` 追加）、`pick(x, y, kind)` / `contentOf` / `mergeList` / `ENTITY_KEYS` / `readMeta` / `metaKey`、`Hlc.compare` / `Hlc.tryParse` / `Hlc.parse`、`contentHash`、`SyncEngine.sync(deviceId, incoming, mode)` と `SyncSummary { added, updated, deleted, removed, warnings }`、`SyncRejected`、`PURGE_SKEW_MS`、`FileStore.update`、`HubTools.mutate` / `stamp()` / `tomb()` / `pushLive` / `ToolError`、`schemas`。Dart `SyncMerger.merge(a, b)`（→ 名前付き引数追加）、`MergeResult.summaryAgainst`、`_pick` / `_mergeLists` / `_Record` / `_metaKey`、`SyncMeta`（`clock` / `updatedAt` / `deletedAt` / `migrated` / `extra`）、`Tombstone`、`SyncDocument.fromJson(json, {strict})` / `toJson()`、`SyncSummary.fromJson`、`SyncService.applyReceived` / `syncNow` / `_observeClocks`、`confirmAction`、`stateStoreProvider`。
 - 未決・注意: 競合レコードは `mergeList` に `'conflict'` という `EntityKind` を足して既存の勝敗規則に乗せるが、`ENTITY_KEYS.conflict` の並びは `contentHash` の入力に効くので Dart 側の `ConflictRecord.toJson()` のキー集合と **必ず一致させる**こと（ずれると同じレコードのハッシュが両言語で割れ、clock が同値のときだけ勝者が食い違う）。`conflicts` の和集合は id ベースなので、`entityId` が同じでも clock の組が違えば別レコードとして両方残る — 意図どおり（解決後の再編集は新しい id の競合になる）。
 
+### 実装後の追記（Task 4–6）
+
+- **Batch 1 からの持ち越しを Task 5 で吸収した。** `SyncService.resolveConflict` と、スマホ側で
+  `conflicts` を保存する経路（`StateStore.readConflicts` / `writeConflicts`、
+  `writeAll(..., conflicts:)`、`AppDataService.exportDocument` / `importDocument`）は
+  Task 1–3 では未実装だったので Task 5 でまとめて入れた。
+- **道中で見つかった取りこぼし（いずれも修正済み）。** 競合レコードは
+  (1) `SyncService._syncNow` が組み立てる送信ペイロード、(2) `FileBackedStore` の 3 つの
+  書き込み経路、(3) `HubBackedStore._payload` のいずれからも落ちていた。落としたままだと
+  端末側で解決しても PC に伝わらず、macOS ではローカル編集のたびにハブの記録が消える。
+  `HubBackedStore._bodyOf`（画面が遅れているかの判定）にも `conflicts` を含めた。
+- **UI のラベル。** ペアリング名は `FRELOCATOR (<deviceId>)` という自動生成の文字列で、
+  画面に出すと「スマホ版」より分かりにくいため使っていない。ハブ側は hub モードでのみ
+  「PC（MCP）版」、通常は「PC 版」と出し分ける（hub モードではブラウザ自身が PC なので
+  区別が要る）。一括ボタンは `すべて<ラベル>を採用`（計画本文の「すべて PC 版を採用」に
+  対して、ラベル側の空白の有無だけが違う）。
+- **`get_conflict` の差分。** `deletedAt` は差分から除外せず、片側が墓標なら差として出す。
+  アプリ側の詳細画面だけは、墓標側を項目の羅列ではなく「削除済み」1 語で描く。
+- **purge で消えたエンティティ。** 書き込みを伴う採用は TS / Dart とも拒否し、
+  `adopt: 'current'`（「現状のまま」）でだけ記録を閉じられる。カテゴリはスナップショットに
+  kind が無く、どちらのリストに戻すべきか決められないため。
+- **検証結果:** ハブ `npm test` 320 件（+10）／`typecheck`・`build`・`smoke`（`tools listed: 43`）
+  すべて緑。アプリ `flutter analyze` 0 件、`flutter test` 389 件（+20）。
+  リリース成果物（AAB / macOS / web）は main のチェックアウトで作る。
+
 ---
 
 ## 実装者への注意

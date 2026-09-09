@@ -66,7 +66,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('完了'), findsOneWidget);
-    expect(find.text('追加 2 / 更新 3 / 削除 4 / 消去 5 / 警告 1'), findsOneWidget);
+    expect(find.text('追加 2 / 更新 3 / 削除 4 / 消去 5 / 警告 1 / 競合 0'), findsOneWidget);
     // Nothing left to wait for, so the panel offers a way out and no cancel.
     expect(find.text('閉じる'), findsOneWidget);
     expect(find.text('キャンセル'), findsNothing);

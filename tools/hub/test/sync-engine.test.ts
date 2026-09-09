@@ -26,7 +26,7 @@ describe('SyncEngine.sync', () => {
     await store.update((d) => { d.taskMaster.tasks.push(task('hub-task', '10-0-hub')); return d; });
     const result = await engine.sync('android-1', phoneDoc([task('phone-task', '11-0-android-1')]));
     expect(result.document.taskMaster.tasks.map((t) => t.id).sort()).toEqual(['hub-task', 'phone-task']);
-    expect(result.summary).toEqual({ added: 1, updated: 0, deleted: 0, removed: 0, warnings: 0 });
+    expect(result.summary).toEqual({ added: 1, updated: 0, deleted: 0, removed: 0, warnings: 0, conflicts: 0 });
     expect(result.document.lastSyncAt).toBe(new Date(now).toISOString());
     expect((await store.read()).lastSyncAt).toBe(new Date(now).toISOString());
     expect(cfg.device('android-1')?.lastSyncAt).toBe(new Date(now).toISOString());
