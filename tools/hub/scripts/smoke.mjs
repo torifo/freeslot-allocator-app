@@ -227,6 +227,80 @@ try {
   check('rebound Host refused', rebound.status === 403, rebound.status);
   const unprefixed = await page(`${localOrigin}/pair`);
   check('pages are not served without the secret prefix', unprefixed.status === 404, unprefixed.status);
+
+  // The hub-served browser app (Plan 3a). `web-dist/` is git-ignored, so a
+  // fresh clone or CI legitimately has nothing to serve; those runs skip.
+  const call2 = async (name, args = {}) => json(await client.callTool({ name, arguments: args }));
+  const http = (url, { method = 'GET', headers = {}, body } = {}) => new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = httpRequest(
+      { host: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, method, headers: { host: u.host, ...headers } },
+      (res) => {
+        let text = '';
+        res.on('data', (c) => (text += c));
+        res.on('end', () => resolve({ status: res.statusCode, body: text }));
+      },
+    );
+    req.on('error', reject);
+    req.end(body);
+  });
+
+  const webApp = status.lan.webApp;
+  check('web app info is reported', typeof webApp === 'object' && webApp !== null);
+  if (webApp && webApp.built) {
+    const base = webApp.url;                       // http://127.0.0.1:<port>/<secret>/app/
+    const api = base.replace(/\/app\/$/, '/api/');
+    const webId = '00112233445566aa';
+    const origin = new URL(base).origin;
+    const headers = { 'x-frelocator-web-id': webId, origin };
+
+    const index = await http(base, { headers });
+    check('the hub serves index.html', index.status === 200 && index.body.includes('window.__FRELOCATOR_HUB__'), index.status);
+    check('index.html carries the rewritten base href', index.body.includes(`<base href="${new URL(base).pathname}">`));
+    const bootstrap = await http(`${base}flutter_bootstrap.js`, { headers });
+    check('the flutter bundle entry point is served', bootstrap.status === 200 && bootstrap.body.length > 0, bootstrap.status);
+
+    // MCP -> browser
+    const task = await call2('add_task', { title: 'web smoke', kind: 'must_do' });
+    const fetched = await http(`${api}document`, { headers });
+    const doc = JSON.parse(fetched.body);
+    check('an MCP edit shows up in GET /api/document', doc.document.taskMaster.tasks.some((t) => t.id === task.id));
+    check('revision is a 16 hex digest', /^[0-9a-f]{16}$/.test(doc.revision));
+    check('the document names the hub device', doc.hubDeviceId === 'hub-smoke', doc.hubDeviceId);
+
+    // browser -> MCP
+    doc.document.deviceId = `web-${webId}`;
+    doc.document.taskMaster.tasks.push({
+      ...doc.document.taskMaster.tasks[0],
+      id: 'web-smoke-1',
+      title: 'from the browser',
+      clock: `${Date.now()}-0-web-${webId}`,
+      updatedAt: new Date().toISOString(),
+    });
+    const synced = await http(`${api}sync?mode=merge`, {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify(doc.document),
+    });
+    check('POST /api/sync answers 200 with a summary', synced.status === 200 && JSON.parse(synced.body).summary !== undefined, synced.status);
+    const after = await call2('list_tasks');
+    check('a browser edit shows up in list_tasks', after.some((t) => t.id === 'web-smoke-1'));
+
+    const status3 = await call2('sync_status');
+    check('the browser is listed as a display-only web client', status3.webClients.some((c) => c.id === `web-${webId}`), JSON.stringify(status3.webClients));
+    check('the browser never becomes a paired device', status3.devices.length === 0, status3.devices.length);
+
+    const forbidden = await http(`${api}sync`, {
+      method: 'POST',
+      headers: { ...headers, origin: 'http://evil.example', 'content-type': 'application/json' },
+      body: '{}',
+    });
+    check('a cross-origin POST is refused', forbidden.status === 403, forbidden.status);
+    const headerless = await http(`${api}document`, { headers: { origin } });
+    check('an API call without the web id header is refused', headerless.status === 403, headerless.status);
+  } else {
+    console.log('SKIP web app checks: run `npm run build:web` first');
+  }
 } finally {
   await client.close().catch(() => {});
   rmSync(dir2, { recursive: true, force: true });

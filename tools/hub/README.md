@@ -144,6 +144,18 @@ FRELOCATOR の macOS 版と同じ `data.json` を編集する MCP サーバー�
 - `web-dist/` が無い場合は `built: false` で URL も出ない。ハブ自体は通常どおり起動する。
 - `sync_status.webClients` は画面を開いたブラウザの一覧（表示専用）。墓標の掃除（`purge_tombstones`）のカットオフ計算には **入らない**。不要になったら `forget_device` に `web-<16 桁 hex>` を渡して消せる。
 
+### 動作確認
+
+`npm run smoke` は `web-dist/` があるときだけブラウザ往復も検査する（無ければその節をスキップして緑のまま）。見ているのは、index.html が `window.__FRELOCATOR_HUB__` と書き換え済みの `<base href>` を含むこと・`flutter_bootstrap.js` が配信されること・MCP の `add_task` が `GET /api/document` に出ること・`POST /api/sync` で足したタスクが `list_tasks` に出ること・そのブラウザが `webClients` にだけ載って `devices` には載らないこと・別オリジンからの `POST` と web id ヘッダ無しの呼び出しが 403 になること。
+
+ブラウザでの手動確認（Chrome / Safari）:
+
+1. `sync_status` の `lan.webApp.url` を開く。
+2. MCP から `add_task` → 数秒で画面に出る。
+3. ブラウザで編集 → スマホの「PC と同期」に出る。
+4. タブを隠す → `/api/revision` のリクエストが止まる（Network タブ）。
+5. 保存前にリロード → 未送信バナーと離脱警告が出る。
+
 ### API とガード
 
 - `GET /<秘密のパス>/api/document` — 文書全体と `hubDeviceId` / `revision` / `serverTime`。

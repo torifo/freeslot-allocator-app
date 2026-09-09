@@ -74,4 +74,20 @@ describe('StaticSite', () => {
     expect(r.status).toBe(503);
     expect(String(r.body)).toContain('npm run build:web');
   });
+
+  it('replaces the base tag a real build already resolved, leaving exactly one', async () => {
+    // `flutter build web` substitutes the placeholder at build time, so a real
+    // web-dist arrives with `<base href="/">`. Leaving it in place would put
+    // two base tags in the document and make the app depend on the browser
+    // taking the first one.
+    const built = mkdtempSync(join(tmpdir(), 'hub-static-built-'));
+    writeFileSync(join(built, 'index.html'), '<!doctype html><html><head>\n  <base href="/">\n  <title>FRELOCATOR</title></head><body></body></html>');
+    const real = new StaticSite(built);
+    await real.load();
+    const body = String((await real.serve('', inject)).body);
+    expect(body.match(/<base /g)).toHaveLength(1);
+    expect(body).toContain('<base href="/abc/app/">');
+    expect(body).toContain('window.__FRELOCATOR_HUB__');
+    rmSync(built, { recursive: true, force: true });
+  });
 });

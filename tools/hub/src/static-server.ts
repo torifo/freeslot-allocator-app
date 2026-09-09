@@ -117,11 +117,18 @@ export class StaticSite {
       schema: 2,
       dataFile: inject.dataFile,
     }, null, 2)};</script>`;
+    // `flutter build web` resolves the placeholder at build time, so a real
+    // dist arrives with `<base href="/">`. Whichever spelling is there is
+    // replaced rather than merely preceded: two base tags would leave the app
+    // depending on the browser honouring the first one.
+    const existing = /<base\s[^>]*>/i;
     const body = template.includes('<base href="$FLUTTER_BASE_HREF">')
       ? template.replace('<base href="$FLUTTER_BASE_HREF">', script)
-      // A build whose index.html has no placeholder still needs the base tag first
-      // in <head>, before any relative URL is resolved.
-      : template.replace(/<head([^>]*)>/i, `<head$1>\n${script}`);
+      : existing.test(template)
+        ? template.replace(existing, script)
+        // A build whose index.html has no base tag at all still needs one first
+        // in <head>, before any relative URL is resolved.
+        : template.replace(/<head([^>]*)>/i, `<head$1>\n${script}`);
     return { status: 200, type: 'text/html; charset=utf-8', body, headers: { 'cache-control': 'no-cache' } };
   }
 
