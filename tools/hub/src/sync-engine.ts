@@ -77,7 +77,19 @@ export class SyncEngine {
     this.progress.set(deviceId, next);
   }
 
-  async sync(deviceId: string, incoming: SyncDocumentJson, mode: SyncMode = 'merge'): Promise<SyncResult> {
+  /**
+   * `bookkeep: false` skips the `lastSyncAt` write on the device record. The web
+   * pseudo-device (`web-…`) has no record on purpose — a browser holds no local
+   * store, so it must never hold back tombstone purge — and recording it would
+   * otherwise throw and turn every clean browser sync into a
+   * `record_sync_failed` warning.
+   */
+  async sync(
+    deviceId: string,
+    incoming: SyncDocumentJson,
+    mode: SyncMode = 'merge',
+    options: { bookkeep?: boolean } = {},
+  ): Promise<SyncResult> {
     const startedAt = this.now().toISOString();
     this.progress.delete(deviceId);
     this.setProgress(deviceId, { stage: 'received', startedAt, finishedAt: undefined, summary: undefined, error: undefined });
@@ -130,7 +142,7 @@ export class SyncEngine {
       this.setProgress(deviceId, { stage: 'saving' });
 
       try {
-        await this.config.recordSync(deviceId, at);
+        if (options.bookkeep !== false) await this.config.recordSync(deviceId, at);
       } catch (error) {
         // The document is already durable; a failed bookkeeping write must not undo it.
         warnings = [...warnings, `record_sync_failed: ${String((error as Error).message ?? error)}`];

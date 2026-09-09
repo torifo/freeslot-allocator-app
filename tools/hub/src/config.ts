@@ -22,6 +22,10 @@ const PAIRING_TTL_MS = 5 * 60 * 1000;
 /** Wrong-code attempts allowed per issued pairing code before it is burned. */
 export const MAX_PAIR_FAILURES = 10;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+/** How stale a stored `lastSeenAt` may get before a browser's next request rewrites hub.json. */
+export const WEB_CLIENT_REFRESH_MS = 5 * 60 * 1000;
+/** Ceiling on the display-only browser list; the least recently seen entry is evicted. */
+export const MAX_WEB_CLIENTS = 16;
 
 /** Constant-time secret comparison over sha256 digests (fixed length, leaks no length). */
 function secretEquals(a: string, b: string): boolean {
@@ -67,11 +71,34 @@ export class HubConfig {
   /** Display-only. Deliberately not part of `devices()`: a browser has no local store, so it must never hold back tombstone purge. */
   webClients(): WebClientRecord[] { return (this.json.webClients ?? []).map((c) => ({ ...c })); }
 
+  /**
+   * The browser calls this on every document read and every sync, so writing
+   * hub.json each time would rewrite the file several times a minute for as long
+   * as a tab is open. The in-memory record always moves forward; the file is only
+   * rewritten when the id is new or the stored timestamp is already
+   * `WEB_CLIENT_REFRESH_MS` old, which is all `sync_status` needs to be useful.
+   * The list is capped so a browser that reloads with a fresh id (private
+   * windows, cleared storage) cannot grow hub.json without bound.
+   */
   async recordWebClient(id: string, atIso: string): Promise<void> {
     const list = this.json.webClients ?? (this.json.webClients = []);
     const existing = list.find((c) => c.id === id);
-    if (existing) existing.lastSeenAt = atIso;
-    else list.push({ id, lastSeenAt: atIso });
+    if (existing) {
+      const previous = Date.parse(existing.lastSeenAt);
+      const next = Date.parse(atIso);
+      existing.lastSeenAt = atIso;
+      // An unparsable or future stored value falls through to a save: better one
+      // extra write than a record that can never be refreshed.
+      if (Number.isFinite(previous) && Number.isFinite(next) && next - previous < WEB_CLIENT_REFRESH_MS) return;
+      await this.save();
+      return;
+    }
+    list.push({ id, lastSeenAt: atIso });
+    if (list.length > MAX_WEB_CLIENTS) {
+      // Oldest lastSeenAt first, then keep the newest MAX_WEB_CLIENTS.
+      list.sort((a, b) => (Date.parse(a.lastSeenAt) || 0) - (Date.parse(b.lastSeenAt) || 0));
+      list.splice(0, list.length - MAX_WEB_CLIENTS);
+    }
     await this.save();
   }
 

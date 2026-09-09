@@ -36,6 +36,18 @@ const jsonError = (status: number, code: string, message: string): Reply => ({
   body: JSON.stringify({ error: { code, message } }),
 });
 
+/**
+ * Sent on every reply. `no-referrer` keeps the secret prefix out of any
+ * `Referer` the page might otherwise leak, `nosniff` stops a served asset being
+ * re-interpreted as script, and `same-origin` COOP severs the window reference
+ * a page opened from here would otherwise keep.
+ */
+const HARDENING: Record<string, string> = {
+  'referrer-policy': 'no-referrer',
+  'x-content-type-options': 'nosniff',
+  'cross-origin-opener-policy': 'same-origin',
+};
+
 interface FrameCache { hash: string; body: string }
 
 /** Loopback-only pages: `/pair` prints the pairing code in clear text, so never bind this to a LAN interface. Routes live under a random secret prefix and `guard()` rejects non-loopback navigations. */
@@ -83,14 +95,14 @@ export class LocalPages {
     const server = createServer((req, res) => {
       void this.handle(req)
         .then(({ status, type, body, headers }) => {
-          res.writeHead(status, { 'content-type': type, ...(headers ?? {}) });
+          res.writeHead(status, { 'content-type': type, ...HARDENING, ...(headers ?? {}) });
           // A 304 carries no body, and a HEAD answer must repeat the headers without one.
           res.end(status === 304 || (req.method ?? 'GET') === 'HEAD' ? undefined : body);
         })
         .catch((error: unknown) => {
           // Diagnostics go to stderr: stdout carries the MCP stdio protocol.
           process.stderr.write(`[local-pages] request failed: ${String((error as Error).stack ?? error)}\n`);
-          res.writeHead(500, { 'content-type': 'application/json' });
+          res.writeHead(500, { 'content-type': 'application/json', ...HARDENING });
           res.end(JSON.stringify({ error: { code: 'internal', message: 'internal error' } }));
         });
     });
@@ -133,7 +145,7 @@ export class LocalPages {
     const method = req.method ?? 'GET';
     // POST は /<secret>/api/ 配下だけ。ページは今までどおり GET/HEAD のみ。
     if (method !== 'GET' && method !== 'HEAD' && !(isApi && method === 'POST')) {
-      return jsonError(405, 'method_not_allowed', 'only GET and HEAD are accepted');
+      return jsonError(405, 'method_not_allowed', `${method} is not accepted here; pages take GET and HEAD, and only /<secret>/api/ takes POST`);
     }
     const host = String(req.headers.host ?? '');
     if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) {
@@ -185,6 +197,12 @@ export class LocalPages {
     if (route === `${prefix}/qr/frames.json`) return this.framesJson();
     if (route === `${prefix}/qr`) return this.qrPageHtml();
     if (route === `${prefix}/app`) {
+      // 配信するものが無いのに 301 を返すと、ブラウザがその恒久リダイレクトを
+      // 覚えたまま行き止まりに着地し続ける（301 はキャッシュされる）。
+      const target = this.options.site;
+      if (!target) return jsonError(404, 'not_found', 'the web app is not served by this hub');
+      // ビルドがまだ無いときは「まだビルドされていません」の 503 をそのまま返す。
+      if (!target.available) return target.serve('', this.injection());
       // 末尾スラッシュが無いと <base href> 配下の相対 URL が 1 段上を指す。
       return { status: 301, type: 'text/plain', body: '', headers: { location: `${prefix}/app/` } };
     }
