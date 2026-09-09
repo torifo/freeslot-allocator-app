@@ -46,11 +46,15 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
   bool get _isMac => !kIsWeb && Platform.isMacOS;
 
   /// Non-null only in the browser the hub itself serves.
-  HubMode? get _hub => readHubMode();
+  ///
+  /// Read once: `readHubMode()` reaches into `window.__FRELOCATOR_HUB__` on
+  /// every call, and the answer cannot change while the screen is mounted.
+  HubMode? _hub;
 
   @override
   void initState() {
     super.initState();
+    _hub = readHubMode();
     _reload();
   }
 
@@ -340,6 +344,7 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
                   );
                 },
               ),
+              _hubTrouble(hubStore),
             ],
             const SizedBox(height: 12),
             const Text(
@@ -351,6 +356,91 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
         ),
       ),
     );
+  }
+
+  /// The last push failure, or the hub's last warning when there was none.
+  ///
+  /// A terminal refusal (`purged_before`, `upgrade_required`, …) never clears
+  /// itself, so it comes with the only two ways out: one side wins and the
+  /// other side's work is thrown away.
+  Widget _hubTrouble(HubBackedStore store) {
+    final theme = Theme.of(context);
+    return ValueListenableBuilder<HubError?>(
+      valueListenable: store.lastError,
+      builder: (context, error, _) {
+        if (error == null) {
+          final warning = store.lastWarning;
+          if (warning == null) return const SizedBox.shrink();
+          return Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              warning,
+              style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
+            ),
+          );
+        }
+        return Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                error.message,
+                style: TextStyle(fontSize: 12, color: theme.colorScheme.error),
+              ),
+              if (error.terminal) ...<Widget>[
+                const SizedBox(height: 4),
+                const Text(
+                  'このままでは保存できません。どちらのデータを残すか選んでください。',
+                  style: TextStyle(fontSize: 12),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  children: <Widget>[
+                    OutlinedButton(
+                      onPressed: () => _replaceHubData(store, HubReplace.takeHub),
+                      child: const Text('PC のデータで置き換える'),
+                    ),
+                    OutlinedButton(
+                      onPressed: () => _replaceHubData(store, HubReplace.takeWeb),
+                      child: const Text('ブラウザのデータで置き換える'),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// Both directions lose something, so both spell out what.
+  Future<void> _replaceHubData(HubBackedStore store, HubReplace choice) async {
+    final takeHub = choice == HubReplace.takeHub;
+    final ok = await confirmAction(
+      context,
+      title: 'どちらのデータを残しますか？',
+      message: takeHub
+          ? 'PC のデータでこの画面を置き換えます。'
+                'ブラウザで編集してまだ保存できていない内容は失われます。'
+          : 'ブラウザのデータで PC のデータを置き換えます。'
+                'PC 側の変更（他の端末から届いた分も含む）は失われます。',
+      confirmLabel: takeHub ? 'PC のデータで置き換える' : 'ブラウザのデータで置き換える',
+    );
+    if (!ok) return;
+    try {
+      await store.replaceWith(choice);
+    } catch (_) {
+      // `replaceWith` already put the reason on `lastError`; the card redraws
+      // itself from the notifier.
+    }
+    if (!mounted) return;
+    ref.invalidate(taskMasterControllerProvider);
+    ref.invalidate(dailyPlanControllerProvider);
+    setState(() {});
   }
 
   Widget _statusCard(SyncSettings s) => Card(

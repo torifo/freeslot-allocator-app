@@ -80,28 +80,37 @@ bool documentVisible() => _string(_object('document'), 'visibilityState') != 'hi
 
 /// Polling stops while the tab is hidden: a background tab holding a 2 s poll
 /// open is pure noise on the hub and in the network log.
-void addVisibilityListener(void Function(bool visible) listener) {
+///
+/// Returns the remover: the store owns the listener and has to be able to let
+/// go of it, or a disposed store stays alive behind `document`.
+void Function() addVisibilityListener(void Function(bool visible) listener) {
   final document = _object('document');
-  if (document == null) return;
-  document.callMethod<JSAny?>(
-    'addEventListener'.toJS,
+  if (document == null) return () {};
+  final callback = ((JSAny? _) => listener(documentVisible())).toJS;
+  document.callMethod<JSAny?>('addEventListener'.toJS, 'visibilitychange'.toJS, callback);
+  return () => document.callMethod<JSAny?>(
+    'removeEventListener'.toJS,
     'visibilitychange'.toJS,
-    ((JSAny? _) => listener(documentVisible())).toJS,
+    callback,
   );
 }
 
 /// Hub mode keeps no copy of the document in the browser, so a reload with an
 /// unsent edit loses it. The guard is the only thing standing between the user
 /// and that loss.
-void setUnloadGuard(bool Function() hasUnsentEdits) {
-  globalContext.callMethod<JSAny?>(
-    'addEventListener'.toJS,
+///
+/// Returns the remover, for the same reason [addVisibilityListener] does.
+void Function() setUnloadGuard(bool Function() hasUnsentEdits) {
+  final callback = ((JSObject event) {
+    if (!hasUnsentEdits()) return;
+    event.callMethod<JSAny?>('preventDefault'.toJS);
+    // Legacy spelling; some browsers still need a non-empty returnValue.
+    event.setProperty('returnValue'.toJS, ''.toJS);
+  }).toJS;
+  globalContext.callMethod<JSAny?>('addEventListener'.toJS, 'beforeunload'.toJS, callback);
+  return () => globalContext.callMethod<JSAny?>(
+    'removeEventListener'.toJS,
     'beforeunload'.toJS,
-    ((JSObject event) {
-      if (!hasUnsentEdits()) return;
-      event.callMethod<JSAny?>('preventDefault'.toJS);
-      // Legacy spelling; some browsers still need a non-empty returnValue.
-      event.setProperty('returnValue'.toJS, ''.toJS);
-    }).toJS,
+    callback,
   );
 }

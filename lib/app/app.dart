@@ -41,6 +41,10 @@ class _FrelocatorAppState extends ConsumerState<FrelocatorApp>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    // Stops the poll and hands back the `visibilitychange` / `beforeunload`
+    // listeners the store registered on this browser's document and window.
+    _hubStore?.dispose();
+    _hubStore = null;
     super.dispose();
   }
 
