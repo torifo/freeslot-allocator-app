@@ -1,10 +1,11 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { Agent, get, request, type OutgoingHttpHeaders } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { HubConfig } from '../src/config.js';
 import { LocalPages } from '../src/local-pages.js';
+import { StaticSite } from '../src/static-server.js';
 import { FileStore } from '../src/store.js';
 
 let dir: string;
@@ -13,7 +14,7 @@ let cfg: HubConfig;
 /** The random path prefix `LocalPages.start()` minted, recovered from the advertised URL. */
 let secret: string;
 
-interface Res { status: number; body: string; type: string }
+interface Res { status: number; body: string; type: string; etag?: string }
 
 const fetchRaw = (
   path: string,
@@ -32,7 +33,12 @@ const fetchRaw = (
       (res) => {
         let b = '';
         res.on('data', (c) => (b += c));
-        res.on('end', () => resolve({ status: res.statusCode!, body: b, type: String(res.headers['content-type']) }));
+        res.on('end', () => resolve({
+          status: res.statusCode!,
+          body: b,
+          type: String(res.headers['content-type']),
+          etag: res.headers.etag,
+        }));
       },
     );
     req.on('error', reject);
@@ -228,5 +234,64 @@ describe('LocalPages', () => {
 
   it('is not reachable on 0.0.0.0 semantics: binds 127.0.0.1 only', () => {
     expect(pages.host).toBe('127.0.0.1');
+  });
+
+  describe('the web app under /app', () => {
+    let served: LocalPages;
+    let prefix: string;
+
+    beforeEach(async () => {
+      const dist = join(dir, 'web-dist');
+      mkdirSync(join(dist, 'assets'), { recursive: true });
+      writeFileSync(join(dist, 'index.html'), '<!doctype html><html><head><base href="$FLUTTER_BASE_HREF"></head><body></body></html>');
+      writeFileSync(join(dist, 'main.dart.js'), 'console.log(1)');
+      const site = new StaticSite(dist);
+      await site.load();
+      served = new LocalPages(cfg, new FileStore(dir, 'hub-0000'), {
+        port: 0,
+        lanUrl: () => 'https://192.168.1.10:47820',
+        site,
+      });
+      await served.start();
+      prefix = prefixOf(served);
+    });
+    afterEach(async () => { await served.stop(); });
+
+    it('advertises the app URL only while a build is loaded', async () => {
+      expect(served.webAppUrl).toBe(`http://127.0.0.1:${served.port}/${prefix}/app/`);
+      expect(pages.webAppUrl).toBeNull();
+    });
+
+    it('redirects /app to /app/ so relative URLs resolve under <base>', async () => {
+      const r = await fetchRaw(`/${prefix}/app`, { port: served.port });
+      expect(r.status).toBe(301);
+    });
+
+    it('serves index.html with the base tag and the hub injection', async () => {
+      const r = await fetchRaw(`/${prefix}/app/`, { port: served.port });
+      expect(r.status).toBe(200);
+      expect(r.type).toContain('text/html');
+      expect(r.body).toContain(`<base href="/${prefix}/app/">`);
+      expect(r.body).toContain('window.__FRELOCATOR_HUB__');
+      expect(r.body).toContain(`"api": "/${prefix}/api/"`);
+    });
+
+    it('serves an asset and answers 304 for the ETag it just handed out', async () => {
+      const first = await fetchRaw(`/${prefix}/app/main.dart.js`, { port: served.port });
+      expect(first.status).toBe(200);
+      expect(first.etag).toMatch(/^"[0-9a-f]{16}"$/);
+      const again = await fetchRaw(`/${prefix}/app/main.dart.js`, { port: served.port, headers: { 'if-none-match': first.etag! } });
+      expect(again.status).toBe(304);
+      expect(again.body).toBe('');
+    });
+
+    it('refuses an encoded traversal and 404s a missing asset', async () => {
+      expect((await fetchRaw(`/${prefix}/app/%2e%2e/secret.txt`, { port: served.port })).status).toBe(403);
+      expect((await fetchRaw(`/${prefix}/app/assets/missing.png`, { port: served.port })).status).toBe(404);
+    });
+
+    it('404s /app on a hub started without a web build', async () => {
+      expect((await fetchRaw(`/${secret}/app/`)).status).toBe(404);
+    });
   });
 });
