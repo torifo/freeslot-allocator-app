@@ -51,6 +51,7 @@ class MergeResult {
       deleted: deleted,
       removed: removed,
       warnings: warnings.length,
+      conflicts: conflicts.length,
     );
   }
 }

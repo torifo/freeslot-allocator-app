@@ -273,7 +273,16 @@ class SyncService {
       progress?.stage(SyncStage.applying);
       final incoming = SyncDocument.fromJson(json, strict: true);
       final local = await data.exportDocument();
-      final merged = SyncMerger.merge(local, incoming);
+      final settings = await settingsStore.load();
+      final merged = SyncMerger.merge(
+        local,
+        incoming,
+        // The agreement point is the last successful sync with the hub. Null
+        // before the first one, which switches detection off entirely.
+        lastAgreedAt: settings.lastSyncAt,
+        detectedBy: deviceClock.deviceId,
+        detectedAt: DateTime.now().toUtc(),
+      );
       await _observeClocks(merged.document);
       progress?.stage(SyncStage.saving);
       await data.importDocument(merged.document);
