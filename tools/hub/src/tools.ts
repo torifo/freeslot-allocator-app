@@ -8,7 +8,7 @@ import { copyId, generateId } from './ids.js';
 import { checkInvariants } from './invariants.js';
 import { MAX_BODY } from './limits.js';
 import { contentHash } from './hash.js';
-import { isDeleted, TASK_KINDS, type ConflictJson, type ConflictSideJson, type Entity, type SyncDocumentJson } from './model.js';
+import { isDeleted, isPcSide, TASK_KINDS, type ConflictJson, type ConflictSideJson, type Entity, type SyncDocumentJson } from './model.js';
 import { FileStore } from './store.js';
 import { SyncRejected, type SyncEngine, type SyncProgress, type SyncSummary } from './sync-engine.js';
 
@@ -1381,10 +1381,21 @@ export class HubTools {
     return name === null ? `${noun}（${conflict.entityId}）` : `${noun}「${name}」`;
   }
 
+  /**
+   * The recorded side `adopt` names. `hub` means the PC — the MCP hub itself
+   * and the browser it serves alike — and `device` the phone; the labels come
+   * from the HLC device id, never from which merge argument carried the
+   * version, so the same record reads the same way on both ends.
+   */
+  private static sideFor(conflict: ConflictJson, adopt: 'hub' | 'device'): ConflictSideJson {
+    const wanted = (side: string) => (adopt === 'hub' ? isPcSide(side) : !isPcSide(side));
+    return wanted(conflict.winner.side) ? conflict.winner : conflict.loser;
+  }
+
   /** Only the fields whose values differ; sync meta is excluded, `deletedAt` deliberately is not. */
   private static differences(conflict: ConflictJson): Array<{ field: string; hub: unknown; device: unknown }> {
     const snapshotOf = (want: 'hub' | 'device'): Record<string, unknown> =>
-      (conflict.winner.side === want ? conflict.winner : conflict.loser).snapshot as Record<string, unknown>;
+      HubTools.sideFor(conflict, want).snapshot as Record<string, unknown>;
     const hub = snapshotOf('hub');
     const device = snapshotOf('device');
     const fields = [...new Set([...Object.keys(hub), ...Object.keys(device)])]
@@ -1454,7 +1465,7 @@ export class HubTools {
     };
     if (adopt === 'current') return { record: stamped, wrote: false, effect: 'none' };
 
-    const side = record.winner.side === adopt ? record.winner : record.loser;
+    const side = HubTools.sideFor(record, adopt);
     const snapshot = side.snapshot as Record<string, unknown>;
 
     if (record.entityType === 'settings') {

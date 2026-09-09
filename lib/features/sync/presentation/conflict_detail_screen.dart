@@ -53,8 +53,8 @@ class _Body extends ConsumerWidget {
 
   final ConflictRecord record;
 
-  ConflictSide get _hubSide => record.winner.side == 'hub' ? record.winner : record.loser;
-  ConflictSide get _deviceSide => record.winner.side == 'device' ? record.winner : record.loser;
+  ConflictSide get _hubSide => conflictPcSide(record);
+  ConflictSide get _deviceSide => conflictPhoneSide(record);
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {

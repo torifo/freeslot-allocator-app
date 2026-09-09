@@ -183,6 +183,32 @@ describe('conflict tools', () => {
     expect(task1.updatedAt).toBe(iso(now));
   });
 
+  it('adopt=hub means the PC, so it also names a version the browser wrote', async () => {
+    const WEB_CLOCK = '30-0-web-abcd';
+    const WEB_TITLE = 'ブラウザで直した版';
+    await store.update((doc) => {
+      // The browser's version is the winner and is labelled `web`, not `hub`.
+      // Reading `side === 'hub'` literally would hand `adopt: 'hub'` the
+      // phone's snapshot — the exact opposite of what the user asked for.
+      doc.conflicts = [
+        record('tsk-2', task('tsk-2', WEB_TITLE, WEB_CLOCK), task('tsk-2', '端末の版', DEVICE_CLOCK), {
+          winner: {
+            side: 'web', deviceId: 'web-abcd', clock: WEB_CLOCK, updatedAt: iso(now - 10_000),
+            snapshot: task('tsk-2', WEB_TITLE, WEB_CLOCK) as ConflictJson['winner']['snapshot'],
+          },
+        }),
+      ];
+      return doc;
+    });
+    const webId = (await store.read()).conflicts![0].id;
+    expect((await tools.getConflict({ id: webId })).differences).toEqual([
+      { field: 'title', hub: WEB_TITLE, device: '端末の版' },
+    ]);
+    const r = await tools.resolveConflict({ id: webId, adopt: 'hub' });
+    expect(r.wrote).toBe(true);
+    expect((await tools.getTask({ id: 'tsk-2' })).title).toBe(WEB_TITLE);
+  });
+
   it('adopting a tombstone deletes the entity again', async () => {
     await store.update((doc) => {
       doc.conflicts = [

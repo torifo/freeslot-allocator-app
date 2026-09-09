@@ -158,8 +158,9 @@ String _resolutionLabel(
   String? webId,
 }) {
   final side = switch (record.resolution) {
-    'hub' => record.winner.side == 'hub' ? record.winner : record.loser,
-    'device' => record.winner.side == 'device' ? record.winner : record.loser,
+    // `hub` means the PC, whichever half of it wrote the version.
+    'hub' => conflictPcSide(record),
+    'device' => conflictPhoneSide(record),
     _ => null,
   };
   if (side != null) {

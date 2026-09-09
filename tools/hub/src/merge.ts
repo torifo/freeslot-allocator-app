@@ -1,5 +1,5 @@
-import { contentHash } from "./hash.js";
-import { compareStrings, Hlc } from "./hlc.js";
+import { contentHash } from './hash.js';
+import { compareStrings, Hlc } from './hlc.js';
 import {
   conflictId,
   ENTITY_KEYS,
@@ -7,6 +7,7 @@ import {
   metaKey,
   readMeta,
   SCHEMA_VERSION,
+  sideOfDevice,
   toIsoUtc,
   type ConflictJson,
   type ConflictSideJson,
@@ -14,7 +15,7 @@ import {
   type EntityKind,
   type SyncDocumentJson,
   type SyncMetaJson,
-} from "./model.js";
+} from './model.js';
 
 export interface MergeOptions {
   /**
@@ -45,16 +46,14 @@ type Settings = { shareCategories: boolean } & SyncMetaJson;
  */
 function pick(x: Raw, y: Raw, kind: EntityKind): Raw {
   const keysOf = (e: Raw): readonly string[] =>
-    isDeleted(e) && kind !== "settings"
-      ? ENTITY_KEYS.tombstone
-      : ENTITY_KEYS[kind];
+    isDeleted(e) && kind !== 'settings' ? ENTITY_KEYS.tombstone : ENTITY_KEYS[kind];
   const mx = readMeta(x, keysOf(x));
   const my = readMeta(y, keysOf(y));
   const cmp = Hlc.compare(mx.clock, my.clock);
   if (cmp > 0) return x;
   if (cmp < 0) return y;
-  const hx = isDeleted(x) ? "" : contentHash(contentOf(x, kind));
-  const hy = isDeleted(y) ? "" : contentHash(contentOf(y, kind));
+  const hx = isDeleted(x) ? '' : contentHash(contentOf(x, kind));
+  const hy = isDeleted(y) ? '' : contentHash(contentOf(y, kind));
   const byHash = compareStrings(hx, hy);
   if (byHash !== 0) return byHash > 0 ? x : y;
   return compareStrings(metaKey(mx), metaKey(my)) <= 0 ? x : y;
@@ -66,7 +65,7 @@ function pick(x: Raw, y: Raw, kind: EntityKind): Raw {
  * `shareCategories` flag, because settings has no id in the Dart merger.
  */
 function contentOf(e: Raw, kind: EntityKind): Raw {
-  if (kind === "settings") return { shareCategories: e.shareCategories };
+  if (kind === 'settings') return { shareCategories: e.shareCategories };
   return e;
 }
 
@@ -100,8 +99,7 @@ function mergeList(
  * 「現状のまま」, which is the cheap failure.
  */
 function changedAt(e: Raw): number {
-  const updated =
-    typeof e.updatedAt === "string" ? Date.parse(e.updatedAt) : Number.NaN;
+  const updated = typeof e.updatedAt === 'string' ? Date.parse(e.updatedAt) : Number.NaN;
   const clock = Hlc.tryParse(e.clock);
   const physical = clock ? clock.physical : Number.NaN;
   const values = [updated, physical].filter((v) => !Number.isNaN(v));
@@ -110,13 +108,25 @@ function changedAt(e: Raw): number {
   return values.length === 0 ? Number.POSITIVE_INFINITY : Math.max(...values);
 }
 
-const sideOf = (raw: Raw, side: "hub" | "device"): ConflictSideJson => ({
-  side,
-  deviceId: Hlc.tryParse(raw.clock)?.deviceId ?? "unknown",
-  clock: String(raw.clock),
-  updatedAt: String(raw.updatedAt),
-  snapshot: { ...raw } as ConflictSideJson["snapshot"],
-});
+/**
+ * A recorded side, labelled by *whose* version it is and never by which merge
+ * argument carried it: `merge(a, b)` and `merge(b, a)` must agree, and on the
+ * phone the hub document is argument B. The label comes from the HLC's device
+ * id, so an unparsable clock lands on `device` — the conservative reading, as
+ * the PC ids are the ones this codebase mints with a known prefix.
+ */
+const sideOf = (raw: Raw): ConflictSideJson => {
+  const deviceId = Hlc.tryParse(raw.clock)?.deviceId ?? 'unknown';
+  return {
+    side: sideOfDevice(deviceId),
+    deviceId,
+    clock: String(raw.clock),
+    updatedAt: String(raw.updatedAt),
+    // Cloned: the record must keep what the entity looked like at detection,
+    // whatever a later resolution writes over the live entity.
+    snapshot: structuredClone(raw) as ConflictSideJson['snapshot'],
+  };
+};
 
 function detect(
   x: Raw,
@@ -124,20 +134,22 @@ function detect(
   kind: EntityKind,
   entityId: string,
   agreed: number,
-  options: Required<Pick<MergeOptions, "detectedBy" | "detectedAt">>,
+  options: Required<Pick<MergeOptions, 'detectedBy' | 'detectedAt'>>,
 ): ConflictJson | null {
-  const hx = isDeleted(x) ? "" : contentHash(contentOf(x, kind));
-  const hy = isDeleted(y) ? "" : contentHash(contentOf(y, kind));
-  // A tombstone on one side and a live record on the other differ by definition
-  // (the empty hash), which is exactly the conflict worth surfacing.
-  if (hx === hy && isDeleted(x) === isDeleted(y)) return null;
+  // The cheap guard first: hashing every pair of entities on every merge is the
+  // one part of detection that scales with document size, and an entity neither
+  // side touched since the agreement point can never be in conflict.
   // `>=`, not `>`: a change landing exactly on the agreement instant is
   // recorded rather than lost (design C-1).
   if (!(changedAt(x) >= agreed && changedAt(y) >= agreed)) return null;
+  const hx = isDeleted(x) ? '' : contentHash(contentOf(x, kind));
+  const hy = isDeleted(y) ? '' : contentHash(contentOf(y, kind));
+  // A tombstone on one side and a live record on the other differ by definition
+  // (the empty hash), which is exactly the conflict worth surfacing.
+  if (hx === hy && isDeleted(x) === isDeleted(y)) return null;
   const winnerIsX = pick(x, y, kind) === x;
-  const [w, l] = winnerIsX ? [x, y] : [y, x];
-  const winner = sideOf(w, winnerIsX ? "hub" : "device");
-  const loser = sideOf(l, winnerIsX ? "device" : "hub");
+  const winner = sideOf(winnerIsX ? x : y);
+  const loser = sideOf(winnerIsX ? y : x);
   return {
     id: conflictId(entityId, winner.clock, loser.clock),
     entityType: kind,
@@ -163,13 +175,10 @@ export function merge(
   b: SyncDocumentJson,
   options: MergeOptions = {},
 ): MergeResult {
-  const agreed =
-    options.lastAgreedAt == null
-      ? Number.NaN
-      : Date.parse(options.lastAgreedAt);
+  const agreed = options.lastAgreedAt == null ? Number.NaN : Date.parse(options.lastAgreedAt);
   const detecting = !Number.isNaN(agreed);
   const detectOptions = {
-    detectedBy: options.detectedBy ?? "unknown",
+    detectedBy: options.detectedBy ?? 'unknown',
     detectedAt: options.detectedAt ?? new Date().toISOString(),
   };
   const detected: ConflictJson[] = [];
@@ -181,60 +190,34 @@ export function merge(
         }
       : undefined;
 
-  const tasks = mergeList(
-    a.taskMaster.tasks,
-    b.taskMaster.tasks,
-    "task",
-    detector("task"),
-  );
+  const tasks = mergeList(a.taskMaster.tasks, b.taskMaster.tasks, 'task', detector('task'));
   const mustDo = mergeList(
     a.taskMaster.mustDoCategories,
     b.taskMaster.mustDoCategories,
-    "category",
-    detector("category"),
+    'category',
+    detector('category'),
   );
   const wantToDo = mergeList(
     a.taskMaster.wantToDoCategories,
     b.taskMaster.wantToDoCategories,
-    "category",
-    detector("category"),
+    'category',
+    detector('category'),
   );
   const aSettings = a.taskMaster.settings as unknown as Raw;
   const bSettings = b.taskMaster.settings as unknown as Raw;
   // Settings has no id of its own, so the conflict is filed under "settings".
   if (detecting) {
-    const found = detect(
-      aSettings,
-      bSettings,
-      "settings",
-      "settings",
-      agreed,
-      detectOptions,
-    );
+    const found = detect(aSettings, bSettings, 'settings', 'settings', agreed, detectOptions);
     if (found) detected.push(found);
   }
-  const settings = pick(
-    aSettings,
-    bSettings,
-    "settings",
-  ) as unknown as Settings;
-  const plans = mergeList(
-    a.dailyPlan.plans,
-    b.dailyPlan.plans,
-    "plan",
-    detector("plan"),
-  );
-  const slots = mergeList(
-    a.dailyPlan.slots,
-    b.dailyPlan.slots,
-    "slot",
-    detector("slot"),
-  );
+  const settings = pick(aSettings, bSettings, 'settings') as unknown as Settings;
+  const plans = mergeList(a.dailyPlan.plans, b.dailyPlan.plans, 'plan', detector('plan'));
+  const slots = mergeList(a.dailyPlan.slots, b.dailyPlan.slots, 'slot', detector('slot'));
   const assignments = mergeList(
     a.dailyPlan.assignments,
     b.dailyPlan.assignments,
-    "assignment",
-    detector("assignment"),
+    'assignment',
+    detector('assignment'),
   );
 
   // Referential warnings (non-destructive: data is kept as-is).
@@ -249,9 +232,7 @@ export function merge(
       warnings.push(`task ${t.id} references missing category ${categoryId}`);
     }
   }
-  const liveSlots = new Set(
-    slots.filter((s) => !isDeleted(s)).map((s) => s.id),
-  );
+  const liveSlots = new Set(slots.filter((s) => !isDeleted(s)).map((s) => s.id));
   for (const x of assignments) {
     if (isDeleted(x)) continue;
     const slotId = x.slotId;
@@ -264,10 +245,7 @@ export function merge(
   // Envelope timestamps are compared as instants, never lexicographically: a
   // phone sending `+09:00` would otherwise sort ahead of an earlier UTC value.
   // When one side is null or unparsable the other one is kept as-is.
-  const laterInstant = <T extends string | null | undefined>(
-    x: T,
-    y: T,
-  ): T | null => {
+  const laterInstant = <T extends string | null | undefined>(x: T, y: T): T | null => {
     const ix = x == null ? Number.NaN : Date.parse(x);
     const iy = y == null ? Number.NaN : Date.parse(y);
     if (Number.isNaN(ix)) return Number.isNaN(iy) ? (x ?? y ?? null) : y;
@@ -283,13 +261,11 @@ export function merge(
   // Existing records union by id and follow the ordinary rules: both sides
   // holding one means the larger clock — the later resolution — wins.
   const byId = new Map(
-    (
-      mergeList(
-        (a.conflicts ?? []) as unknown as Entity[],
-        (b.conflicts ?? []) as unknown as Entity[],
-        "conflict",
-      ) as unknown as ConflictJson[]
-    ).map((c) => [c.id, c]),
+    (mergeList(
+      (a.conflicts ?? []) as unknown as Entity[],
+      (b.conflicts ?? []) as unknown as Entity[],
+      'conflict',
+    ) as unknown as ConflictJson[]).map((c) => [c.id, c]),
   );
   // Re-detection is idempotent: an id already on file is left exactly as it is,
   // and is not reported as newly found either — a sync that changed nothing
@@ -304,16 +280,17 @@ export function merge(
   // Stale conflicts close themselves: when the surviving entity's clock is past
   // both recorded versions, a later edit already overwrote them and there is
   // nothing left for the user to choose.
+  //
+  // The map is keyed by entity id across every kind at once, plus the literal
+  // `settings`. That is safe only because entity ids are unique document-wide
+  // (they are uuids, and the two category lists share one id space), and
+  // because no entity may be called `settings`. A future kind with its own id
+  // space would have to key this by `entityType` as well.
   const liveClock = new Map<string, string>([
-    ...[
-      ...tasks,
-      ...mustDo,
-      ...wantToDo,
-      ...plans,
-      ...slots,
-      ...assignments,
-    ].map((e) => [e.id, String(e.clock)] as const),
-    ["settings", String((settings as unknown as Raw).clock)],
+    ...[...tasks, ...mustDo, ...wantToDo, ...plans, ...slots, ...assignments].map(
+      (e) => [e.id, String(e.clock)] as const,
+    ),
+    ['settings', String((settings as unknown as Raw).clock)],
   ]);
   for (const [id, c] of byId) {
     if (c.resolution != null || isDeleted(c as unknown as Raw)) continue;
@@ -323,15 +300,13 @@ export function merge(
     if (now && w && l && Hlc.compare(now, w) > 0 && Hlc.compare(now, l) > 0) {
       byId.set(id, {
         ...c,
-        resolution: "superseded",
+        resolution: 'superseded',
         resolvedAt: detectOptions.detectedAt,
         resolvedBy: detectOptions.detectedBy,
       });
     }
   }
-  const conflicts = [...byId.values()].sort((x, y) =>
-    compareStrings(x.id, y.id),
-  );
+  const conflicts = [...byId.values()].sort((x, y) => compareStrings(x.id, y.id));
 
   const document: SyncDocumentJson = {
     version: SCHEMA_VERSION,

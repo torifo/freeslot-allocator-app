@@ -82,7 +82,7 @@ Future<ConflictResolutionResult> applyConflictResolutions(
       continue;
     }
     if (adopt != ConflictAdoption.current) {
-      final side = record.winner.side == adopt.wire ? record.winner : record.loser;
+      final side = conflictSideFor(record, adopt);
       final applied = await _adopt(
         record: record,
         side: side,
@@ -117,6 +117,16 @@ Future<ConflictResolutionResult> applyConflictResolutions(
     resolved: resolved,
     wrote: wrote,
   );
+}
+
+/// The recorded side [adopt] names. [ConflictAdoption.hub] means the PC — the
+/// MCP hub itself and the browser it serves alike — and [ConflictAdoption.device]
+/// the phone. The labels come from the HLC device id, never from which merge
+/// argument carried the version, so the same record reads the same way whether
+/// it was written here or on the hub.
+ConflictSide conflictSideFor(ConflictRecord record, ConflictAdoption adopt) {
+  final wantsPc = adopt == ConflictAdoption.hub;
+  return isPcSide(record.winner.side) == wantsPc ? record.winner : record.loser;
 }
 
 typedef _Applied = ({TaskMasterStateData taskMaster, DailyPlanStateData dailyPlan, bool wrote});

@@ -128,6 +128,49 @@ void main() {
     expect(json['version'], 2);
   });
 
+  test('a side keeps keys a newer build wrote, and puts them back where it found them', () {
+    final json = _recordJson();
+    (json['winner'] as Map<String, dynamic>)['confidence'] = 0.8;
+    (json['winner'] as Map<String, dynamic>)['note'] = 'from a newer build';
+    final record = ConflictRecord.fromJson(json, strict: true);
+    expect(record.winner.extra, {'confidence': 0.8, 'note': 'from a newer build'});
+    // Round trip: an unknown key must survive the phone, or syncing through an
+    // older build would silently delete what a newer one recorded.
+    expect(record.toJson()['winner'], json['winner']);
+    expect(record.loser.extra, isEmpty);
+  });
+
+  test('detectedBy is omitted rather than written empty, matching the optional TS field', () {
+    final json = _recordJson()..remove('detectedBy');
+    final record = ConflictRecord.fromJson(json, strict: true);
+    expect(record.detectedBy, '');
+    expect(record.toJson().containsKey('detectedBy'), isFalse);
+    // With a value it is written as usual.
+    expect(ConflictRecord.fromJson(_recordJson(), strict: true).toJson()['detectedBy'], 'hub-macos');
+  });
+
+  test('copyWith reopens a record only when asked to clear the resolution', () {
+    final resolved = ConflictRecord.fromJson(_recordJson(), strict: true)
+        .copyWith(resolution: 'hub', resolvedAt: 'x', resolvedBy: 'y');
+    // A null argument cannot say "clear this": it reads as "leave it alone".
+    expect(resolved.copyWith(resolution: null).resolution, 'hub');
+    final reopened = resolved.copyWith(clearResolution: true);
+    expect(reopened.resolution, isNull);
+    expect(reopened.resolvedAt, isNull);
+    expect(reopened.resolvedBy, isNull);
+    expect(reopened.isOpen, isTrue);
+  });
+
+  test('sideOfDevice labels by device id prefix, and the browser counts as PC', () {
+    expect(sideOfDevice('hub-macos'), 'hub');
+    expect(sideOfDevice('web-abcd'), 'web');
+    expect(sideOfDevice('android-1'), 'device');
+    expect(sideOfDevice('unknown'), 'device');
+    expect(isPcSide('hub'), isTrue);
+    expect(isPcSide('web'), isTrue);
+    expect(isPcSide('device'), isFalse);
+  });
+
   test('a document with conflicts round-trips them', () {
     final json = _emptyDocument(
       conflicts: [ConflictRecord.fromJson(_recordJson(), strict: true)],

@@ -133,6 +133,32 @@ void main() {
     expect(record.meta.clock.compareTo(Hlc.parse(hubClock)) > 0, isTrue);
   });
 
+  test('「PC 版」 covers a version the hub-served browser wrote', () async {
+    // The browser is labelled `web`, not `hub`. Reading the label literally
+    // would hand ConflictAdoption.hub the phone's snapshot — the exact
+    // opposite of what the user asked for.
+    const webClock = '3000-0-web-abcd';
+    final service = await make();
+    final local = await service.data.exportDocument();
+    final localJson = local.toJson();
+    (localJson['taskMaster'] as Map<String, dynamic>)['tasks'] = <Map<String, dynamic>>[
+      _task('ブラウザで直した', webClock, '2026-02-01T00:00:00.000Z'),
+    ];
+    await service.data.importAll(localJson);
+    final incoming = local.toJson();
+    (incoming['taskMaster'] as Map<String, dynamic>)['tasks'] = <Map<String, dynamic>>[
+      _task('スマホで直した', deviceClockValue, '2026-02-02T00:00:00.000Z'),
+    ];
+    await service.applyReceived(incoming);
+
+    final record = (await service.data.exportDocument()).conflicts.single;
+    expect(record.winner.side, 'web');
+    expect(conflictSideFor(record, ConflictAdoption.hub).snapshot['title'], 'ブラウザで直した');
+    expect(conflictSideFor(record, ConflictAdoption.device).snapshot['title'], 'スマホで直した');
+    await service.resolveConflict(record.id, ConflictAdoption.hub);
+    expect((await service.data.taskRepo.load()).tasks.single.title, 'ブラウザで直した');
+  });
+
   test('現状のまま marks the record and writes nothing', () async {
     final service = await withConflict();
     final before = (await service.data.taskRepo.load()).tasks.single;

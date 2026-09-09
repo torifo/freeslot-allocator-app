@@ -47,8 +47,32 @@ export interface SyncDocumentJson {
   conflicts?: ConflictJson[];
 }
 
+/**
+ * Which half of the pair a version came from, derived from the HLC device id
+ * and never from which merge argument carried it: on the phone the hub's
+ * document is argument B, so an argument-position label would come out
+ * inverted there. `hub-…` is the MCP hub, `web-…` a browser the hub serves —
+ * both of them 「PC 版」 to the user — and everything else, an unparsable clock
+ * included, is the phone.
+ */
+export function sideOfDevice(deviceId: string): 'hub' | 'web' | 'device' {
+  if (deviceId.startsWith('hub-')) return 'hub';
+  if (deviceId.startsWith('web-')) return 'web';
+  return 'device';
+}
+
+/** True for the sides a user reads as 「PC 版」: the hub itself and the browser it serves. */
+export function isPcSide(side: string): boolean {
+  return side === 'hub' || side === 'web';
+}
+
 export interface ConflictSideJson {
-  side: 'hub' | 'device';
+  /**
+   * `hub` / `web` / `device`, per [sideOfDevice]. A string, not a union of
+   * those three: a newer build may write a label this one cannot name, and
+   * dropping it would erase the other side's record on the round trip.
+   */
+  side: string;
   deviceId: string;
   clock: string;
   updatedAt: string;

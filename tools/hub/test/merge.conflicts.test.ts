@@ -56,6 +56,28 @@ describe('conflict detection', () => {
     expect(conflict.entityType).toBe('task');
     expect(conflict.winner).toMatchObject({ side: 'hub', deviceId: 'hub-macos', clock: '20-0-hub-macos' });
     expect(conflict.loser).toMatchObject({ side: 'device', deviceId: 'android-1', clock: '15-0-android-1' });
+  });
+
+  it('labels each side by its device id, not by which argument carried it', () => {
+    // The phone calls `merge(mine, theirs)`, so the hub's version is argument
+    // B there. An argument-position label would read inverted on the phone.
+    const swapped = merge(doc('b', [device]), doc('a', [hub]), OPTIONS).conflicts[0];
+    expect(swapped.winner).toMatchObject({ side: 'hub', deviceId: 'hub-macos' });
+    expect(swapped.loser).toMatchObject({ side: 'device', deviceId: 'android-1' });
+  });
+
+  it('calls the browser the hub serves a `web` side, which the UI reads as PC too', () => {
+    const web = task('browser edit', '25-0-web-abcd', '2026-09-09T02:30:00.000Z');
+    const conflict = merge(doc('a', [web]), doc('b', [device]), OPTIONS).conflicts[0];
+    expect(conflict.winner).toMatchObject({ side: 'web', deviceId: 'web-abcd' });
+    expect(conflict.loser).toMatchObject({ side: 'device', deviceId: 'android-1' });
+  });
+
+  it('keeps the snapshot as it stood at detection, whatever happens to the entity later', () => {
+    const a = doc('a', [hub]);
+    const conflict = merge(a, doc('b', [device]), OPTIONS).conflicts[0];
+    a.taskMaster.tasks[0].title = 'edited afterwards';
+    expect(conflict.winner.snapshot.title).toBe('hub edit');
     expect(conflict.loser.snapshot).toEqual(device);
     expect(conflict.detectedBy).toBe('hub-macos');
     expect(conflict.detectedAt).toBe(OPTIONS.detectedAt);

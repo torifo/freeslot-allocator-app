@@ -13,6 +13,21 @@ import '../../core/sync_meta.dart';
 String conflictId(String entityId, String winnerClock, String loserClock) =>
     'cf-${sha256.convert(utf8.encode('$entityId\n$winnerClock\n$loserClock')).toString().substring(0, 16)}';
 
+/// Which half of the pair a version came from, derived from the HLC device id
+/// and never from which merge argument carried it — byte for byte the same rule
+/// as `sideOfDevice` in tools/hub/src/model.ts. `hub-…` is the MCP hub, `web-…`
+/// a browser the hub serves, and everything else — an unparsable clock
+/// included — is a phone.
+String sideOfDevice(String deviceId) {
+  if (deviceId.startsWith('hub-')) return 'hub';
+  if (deviceId.startsWith('web-')) return 'web';
+  return 'device';
+}
+
+/// True for the sides the user reads as 「PC 版」: the hub itself and the
+/// browser it serves.
+bool isPcSide(String side) => side == 'hub' || side == 'web';
+
 /// One of the two versions that were in conflict, kept whole.
 class ConflictSide {
   const ConflictSide({
@@ -21,11 +36,12 @@ class ConflictSide {
     required this.clock,
     required this.updatedAt,
     required this.snapshot,
+    this.extra = const <String, dynamic>{},
   });
 
-  /// `'hub'` = the version merge argument A held, `'device'` = argument B's.
-  /// Kept as a String, not an enum: an unknown value from a newer build must
-  /// survive the round trip rather than be erased.
+  /// `'hub'` / `'web'` / `'device'`, per [sideOfDevice]. Kept as a String, not
+  /// an enum: an unknown value from a newer build must survive the round trip
+  /// rather than be erased.
   final String side;
   final String deviceId;
 
@@ -40,9 +56,19 @@ class ConflictSide {
   /// tombstone shape (`{id, clock, updatedAt, deletedAt}`).
   final Map<String, dynamic> snapshot;
 
+  /// Keys a newer build wrote that this one does not know, kept verbatim so the
+  /// round trip does not quietly delete them — the same reason [side] and
+  /// `entityType` are Strings rather than enums.
+  final Map<String, dynamic> extra;
+
+  static const Set<String> _knownKeys = <String>{
+    'side', 'deviceId', 'clock', 'updatedAt', 'snapshot',
+  };
+
   bool get isDeleted => snapshot['deletedAt'] is String;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
+    ...extra,
     'side': side,
     'deviceId': deviceId,
     'clock': clock,
@@ -70,6 +96,10 @@ class ConflictSide {
       snapshot: rawSnapshot is Map<String, dynamic>
           ? Map<String, dynamic>.from(rawSnapshot)
           : <String, dynamic>{},
+      extra: <String, dynamic>{
+        for (final entry in json.entries)
+          if (!_knownKeys.contains(entry.key)) entry.key: entry.value,
+      },
     );
   }
 }
@@ -130,7 +160,11 @@ class ConflictRecord {
     'entityType': entityType,
     'entityId': entityId,
     'detectedAt': detectedAt,
-    'detectedBy': detectedBy,
+    // Optional on the wire (`detectedBy: z.string().optional()` on the hub), so
+    // a record that arrived without it goes back out without it: writing `''`
+    // instead would change the content hash and split the two languages'
+    // tie-break on the very same record.
+    if (detectedBy.isNotEmpty) 'detectedBy': detectedBy,
     'winner': winner.toJson(),
     'loser': loser.toJson(),
     'resolution': resolution,
@@ -171,7 +205,9 @@ class ConflictRecord {
       entityType: text('entityType'),
       entityId: text('entityId'),
       detectedAt: text('detectedAt'),
-      detectedBy: text('detectedBy'),
+      // Optional even in strict mode: the hub's zod schema marks it optional,
+      // so a record that legitimately omits it must not be rejected here.
+      detectedBy: maybe('detectedBy') ?? '',
       winner: side('winner'),
       loser: side('loser'),
       resolution: maybe('resolution'),
@@ -181,11 +217,14 @@ class ConflictRecord {
     );
   }
 
+  /// [clearResolution] reopens a record: `resolution: null` alone cannot, since
+  /// a null argument is indistinguishable from an omitted one.
   ConflictRecord copyWith({
     String? resolution,
     String? resolvedAt,
     String? resolvedBy,
     SyncMeta? meta,
+    bool clearResolution = false,
   }) => ConflictRecord(
     id: id,
     entityType: entityType,
@@ -194,9 +233,9 @@ class ConflictRecord {
     detectedBy: detectedBy,
     winner: winner,
     loser: loser,
-    resolution: resolution ?? this.resolution,
-    resolvedAt: resolvedAt ?? this.resolvedAt,
-    resolvedBy: resolvedBy ?? this.resolvedBy,
+    resolution: clearResolution ? null : (resolution ?? this.resolution),
+    resolvedAt: clearResolution ? null : (resolvedAt ?? this.resolvedAt),
+    resolvedBy: clearResolution ? null : (resolvedBy ?? this.resolvedBy),
     meta: meta ?? this.meta,
   );
 }

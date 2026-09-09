@@ -96,6 +96,16 @@ String conflictLabel(ConflictRecord record) {
   return name == null ? '$noun（${record.entityId}）' : '$noun「$name」';
 }
 
+/// The two versions a record holds, named the way the user reads them: 「PC 版」
+/// covers both the MCP hub and the browser it serves, 「スマホ版」 is the phone.
+/// Derived from the recorded `side`, which itself comes from the HLC device id,
+/// so it does not matter which side ran the merge.
+ConflictSide conflictPcSide(ConflictRecord record) =>
+    isPcSide(record.winner.side) ? record.winner : record.loser;
+
+ConflictSide conflictPhoneSide(ConflictRecord record) =>
+    isPcSide(record.winner.side) ? record.loser : record.winner;
+
 /// What to call one side on screen.
 ///
 /// In hub mode this browser *is* the PC, so the hub side has to say which half

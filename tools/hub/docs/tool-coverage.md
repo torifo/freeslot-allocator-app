@@ -97,7 +97,7 @@ Flutter アプリ（`lib/`）が実行できる変更操作を洗い出し、既
 | `rotate_token` | `deviceId` |
 | `list_conflicts` | `status?`(`open`/`resolved`/`all`), `entityType?`, `limit?` |
 | `get_conflict` | `id` |
-| `resolve_conflict` | `id`, `adopt`(`hub`/`device`/`current`) |
+| `resolve_conflict` | `id`, `adopt`(`hub`＝PC 版／`device`＝スマホ版／`current`) |
 | `resolve_all_conflicts` | `adopt`, `entityType?`, `dryRun?` |
 
 ## 4. エンティティ × 操作マトリクス

@@ -194,7 +194,11 @@ class SyncMerger {
       <String, dynamic>{'shareCategories': d.shareCategories},
       d.settingsMeta,
       // Settings has no id and no record of its own in the document, so the
-      // raw view is rebuilt from the flag plus its meta.
+      // raw view is rebuilt from the flag plus its meta. `SyncMeta.toJson`
+      // spreads `extra` first, so this is the *whole* stored settings map —
+      // passthrough keys from a newer build included — and therefore matches
+      // the `{...raw}` the TypeScript merger snapshots. Fixture 15 pins the
+      // resulting snapshot in both languages.
       raw: <String, dynamic>{
         'shareCategories': d.shareCategories,
         ...d.settingsMeta.toJson(),
@@ -265,6 +269,11 @@ class SyncMerger {
       a: a.conflicts,
       b: b.conflicts,
       detected: detected,
+      // Keyed by entity id across every kind at once, plus the literal
+      // `settings`. Safe only because entity ids are unique document-wide
+      // (they are uuids, and the two category lists share one id space) and
+      // no entity may be called `settings`. A future kind with its own id
+      // space would have to key this by `entityType` as well.
       liveClocks: <String, Hlc>{
         for (final t in tasks.live) t.id: t.meta.clock,
         for (final c in mustDo.live) c.id: c.meta.clock,
@@ -334,19 +343,29 @@ class SyncMerger {
     return values.reduce((x, y) => x > y ? x : y).toDouble();
   }
 
-  static ConflictSide _side(_Record r, String which) {
+  /// A recorded side, labelled by *whose* version it is and never by which
+  /// merge argument carried it — the same rule as `sideOfDevice` in
+  /// tools/hub/src/model.ts. On the phone the PC's document is argument B, so
+  /// an argument-position label would come out inverted exactly where the user
+  /// reads it. `hub-…` is the MCP hub and `web-…` a browser it serves — both
+  /// 「PC 版」 on screen — and everything else, an unparsable clock included, is
+  /// a phone.
+  static ConflictSide _side(_Record r) {
     final raw = r.raw;
     final clock = raw['clock'];
     final clockText = clock is String ? clock : r.meta.clock.toString();
+    final deviceId = Hlc.tryParse(clockText)?.deviceId ?? 'unknown';
     final updatedAt = raw['updatedAt'];
     return ConflictSide(
-      side: which,
-      deviceId: Hlc.tryParse(clockText)?.deviceId ?? 'unknown',
+      side: sideOfDevice(deviceId),
+      deviceId: deviceId,
       clock: clockText,
       updatedAt: updatedAt is String
           ? updatedAt
           : r.meta.updatedAt.toUtc().toIso8601String(),
-      snapshot: raw,
+      // Copied: the record must keep what the entity looked like at detection,
+      // whatever a later resolution writes over the live entity.
+      snapshot: Map<String, dynamic>.from(raw),
     );
   }
 
@@ -359,18 +378,21 @@ class SyncMerger {
     String detectedAt,
     String detectedBy,
   ) {
+    // The cheap guard first: hashing every pair of entities on every merge is
+    // the one part of detection that scales with document size, and an entity
+    // neither side touched since the agreement point can never be in conflict.
+    // `>=`, not `>`: a change landing exactly on the agreement instant is
+    // recorded rather than lost.
+    if (!(_changedAt(x.raw) >= agreed && _changedAt(y.raw) >= agreed)) return null;
     final hx = x.isDead ? '' : contentHash(x.json!);
     final hy = y.isDead ? '' : contentHash(y.json!);
     // A tombstone on one side and a live record on the other differ by
     // definition (the empty hash), which is exactly the conflict worth
     // surfacing.
     if (hx == hy && x.isDead == y.isDead) return null;
-    // `>=`, not `>`: a change landing exactly on the agreement instant is
-    // recorded rather than lost.
-    if (!(_changedAt(x.raw) >= agreed && _changedAt(y.raw) >= agreed)) return null;
     final winnerIsX = identical(_pick(x, y), x);
-    final winner = _side(winnerIsX ? x : y, winnerIsX ? 'hub' : 'device');
-    final loser = _side(winnerIsX ? y : x, winnerIsX ? 'device' : 'hub');
+    final winner = _side(winnerIsX ? x : y);
+    final loser = _side(winnerIsX ? y : x);
     return ConflictRecord(
       id: conflictId(entityId, winner.clock, loser.clock),
       entityType: kind,

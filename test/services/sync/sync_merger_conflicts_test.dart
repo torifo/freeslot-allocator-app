@@ -107,6 +107,32 @@ void main() {
     expect(conflict.meta.clock.toString(), '20-0-hub-macos');
   });
 
+  test('labels each side by its device id, not by which argument carried it', () {
+    // The phone calls `merge(mine, theirs)`, so the PC's version is argument B
+    // here. An argument-position label would read inverted on the phone — the
+    // one screen where the user actually chooses between the two.
+    final swapped = mergeWith(doc('b', [device]), doc('a', [hub])).conflicts.single;
+    expect(swapped.winner.side, 'hub');
+    expect(swapped.winner.deviceId, 'hub-macos');
+    expect(swapped.loser.side, 'device');
+    expect(swapped.loser.deviceId, 'android-1');
+  });
+
+  test('calls a version the hub-served browser wrote a `web` side', () {
+    final web = task('browser edit', '25-0-web-abcd', '2026-09-09T02:30:00.000Z');
+    final conflict = mergeWith(doc('a', [web]), doc('b', [device])).conflicts.single;
+    expect(conflict.winner.side, 'web');
+    expect(isPcSide(conflict.winner.side), isTrue, reason: 'the browser is 「PC 版」 too');
+    expect(conflict.loser.side, 'device');
+  });
+
+  test('the snapshot is a copy, so a later edit cannot rewrite the record', () {
+    final live = Map<String, dynamic>.from(hub);
+    final conflict = mergeWith(doc('a', [live]), doc('b', [device])).conflicts.single;
+    live['title'] = 'edited afterwards';
+    expect(conflict.winner.snapshot['title'], 'hub edit');
+  });
+
   test('records a delete against an edit, keeping the tombstone shape', () {
     final tomb = <String, dynamic>{
       'id': 'tsk-1', 'clock': '18-0-android-1',
