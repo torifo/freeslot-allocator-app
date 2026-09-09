@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/device_clock.dart';
 import '../app_data_service.dart';
+import 'conflict_record.dart';
+import 'conflict_resolver.dart';
 import 'document_clocks.dart';
 import 'hub_discovery.dart';
 import 'lan_sync_client.dart';
@@ -154,6 +156,9 @@ class SyncService {
         lastSyncAt: settings.lastSyncAt,
         taskMaster: exported.taskMaster,
         dailyPlan: exported.dailyPlan,
+        // Sent, not dropped: a conflict this phone resolved while offline only
+        // reaches the PC — and the other devices — as a conflict record.
+        conflicts: exported.conflicts,
       ).toJson();
 
       SyncResponse response;
@@ -292,6 +297,53 @@ class SyncService {
     } catch (error) {
       return _mapFailure(error, progress);
     }
+  }
+
+  /// Resolves one recorded conflict by adopting a side, or by closing the
+  /// record and leaving the current state alone.
+  ///
+  /// Written as an ordinary local edit with this device's own clock, so it
+  /// works offline and propagates on the next sync — and, in hub mode, is
+  /// simply another document write.
+  Future<ConflictResolutionResult> resolveConflict(
+    String id,
+    ConflictAdoption adopt,
+  ) async {
+    final document = await data.exportDocument();
+    final record = document.conflicts.where((c) => c.id == id).firstOrNull;
+    if (record == null) {
+      throw const ConflictResolutionException('この競合は見つかりませんでした。');
+    }
+    if (!record.isOpen) {
+      throw const ConflictResolutionException('この競合はすでに解決済みです。');
+    }
+    return _resolve(document, adopt, (c) => c.id == id);
+  }
+
+  /// The same decision for every open record, optionally of one entity type.
+  Future<ConflictResolutionResult> resolveAll(
+    ConflictAdoption adopt, {
+    String? entityType,
+  }) async => _resolve(
+    await data.exportDocument(),
+    adopt,
+    (c) => entityType == null || c.entityType == entityType,
+  );
+
+  Future<ConflictResolutionResult> _resolve(
+    SyncDocument document,
+    ConflictAdoption adopt,
+    bool Function(ConflictRecord) where,
+  ) async {
+    final result = await applyConflictResolutions(
+      document,
+      adopt: adopt,
+      where: where,
+      nextClock: deviceClock.next,
+      resolvedBy: deviceClock.deviceId,
+    );
+    if (result.resolved > 0) await data.importDocument(result.document);
+    return result;
   }
 
   /// mDNS is a fallback, never a gate: a slow or silent network must not hold

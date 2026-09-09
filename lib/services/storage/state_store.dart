@@ -1,5 +1,6 @@
 import '../../features/daily_plan/domain/daily_plan_models.dart';
 import '../../features/task_master/domain/task_models.dart';
+import '../sync/conflict_record.dart';
 
 /// Where app state lives. Two implementations: shared_preferences (Android,
 /// web) and a JSON file shared with the hub (macOS).
@@ -19,7 +20,11 @@ abstract class StateStore {
   /// leaving the store exactly as it was found. Stores that can do better
   /// (see `FileBackedStore`, which holds one file under one lock) override
   /// this with a genuine single write.
-  Future<void> writeAll(TaskMasterStateData tasks, DailyPlanStateData plans) async {
+  Future<void> writeAll(
+    TaskMasterStateData tasks,
+    DailyPlanStateData plans, {
+    List<ConflictRecord>? conflicts,
+  }) async {
     final previous = await readTaskMaster();
     await writeTaskMaster(tasks);
     try {
@@ -28,7 +33,18 @@ abstract class StateStore {
       await writeTaskMaster(previous);
       rethrow;
     }
+    // Null means "leave the records alone", which is what every caller that
+    // only knows about tasks and plans wants.
+    if (conflicts != null) await writeConflicts(conflicts);
   }
+
+  /// Conflict records (Plan 3b) kept beside the payload.
+  ///
+  /// The default is empty rather than abstract: a store that has nowhere to put
+  /// them simply never shows any, and every caller still compiles.
+  Future<List<ConflictRecord>> readConflicts() async => const <ConflictRecord>[];
+
+  Future<void> writeConflicts(List<ConflictRecord> conflicts) async {}
 
   /// True when something other than this store changed the backing data.
   Future<bool> changedSinceLastRead() async => false;

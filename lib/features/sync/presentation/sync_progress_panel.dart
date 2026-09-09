@@ -37,8 +37,11 @@ String missingFramesLine(List<int> missing) {
   return rest > 0 ? '未受信: $shown 他 $rest コマ' : '未受信: $shown';
 }
 
+/// `競合` is deliberately part of the same line and not a warning: the sync
+/// completed, and the count is only how many records are waiting for a choice.
 String summaryLine(SyncSummary s) =>
-    '追加 ${s.added} / 更新 ${s.updated} / 削除 ${s.deleted} / 消去 ${s.removed} / 警告 ${s.warnings}';
+    '追加 ${s.added} / 更新 ${s.updated} / 削除 ${s.deleted} / 消去 ${s.removed} '
+    '/ 警告 ${s.warnings} / 競合 ${s.conflicts}';
 
 /// The panel bound to a [SyncProgressController]. It shows only numbers that
 /// can actually be measured; the hub-side stage is an indeterminate bar.
@@ -51,12 +54,17 @@ class SyncProgressPanel extends StatefulWidget {
     required this.controller,
     required this.onCancel,
     required this.onClose,
+    this.onOpenConflicts,
     this.scrollable = true,
   });
 
   final SyncProgressController controller;
   final VoidCallback onCancel;
   final VoidCallback onClose;
+
+  /// Opens the conflict list. Null where there is nowhere to go (a panel with
+  /// no router above it), in which case the button is simply not drawn.
+  final VoidCallback? onOpenConflicts;
 
   /// Whether the panel scrolls its own body.
   ///
@@ -146,6 +154,15 @@ class _SyncProgressPanelState extends State<SyncProgressPanel> {
               if (p.stage == SyncStage.done && p.summary != null) ...<Widget>[
                 const SizedBox(height: 8),
                 Text(summaryLine(p.summary!)),
+                // The sync still succeeded; this is an invitation, not an error.
+                if (p.summary!.conflicts > 0 && widget.onOpenConflicts != null)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton(
+                      onPressed: widget.onOpenConflicts,
+                      child: const Text('確認する'),
+                    ),
+                  ),
               ],
               if (p.stage == SyncStage.failed)
                 Padding(

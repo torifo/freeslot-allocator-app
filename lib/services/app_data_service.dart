@@ -37,6 +37,7 @@ class AppDataService {
       deviceId: deviceClock.deviceId,
       taskMaster: await taskRepo.load(),
       dailyPlan: await dailyPlanRepo.load(),
+      conflicts: await store.readConflicts(),
     );
   }
 
@@ -50,8 +51,15 @@ class AppDataService {
   /// refers to a task by id — so a half-applied import is not "most of the
   /// sync", it is a broken database. [StateStore.writeAll] is what makes it
   /// all-or-nothing.
-  Future<void> importDocument(SyncDocument document) =>
-      store.writeAll(document.taskMaster, document.dailyPlan);
+  /// [document.conflicts] replaces whatever was stored rather than being
+  /// merged into it: every caller here has already taken the union (the hub's
+  /// answer, or `SyncMerger`), so anything missing from it is missing on
+  /// purpose.
+  Future<void> importDocument(SyncDocument document) => store.writeAll(
+    document.taskMaster,
+    document.dailyPlan,
+    conflicts: document.conflicts,
+  );
 
   Future<void> importAll(Map<String, dynamic> data) =>
       importDocument(SyncDocument.fromJson(data, strict: true));

@@ -9,6 +9,7 @@ import '../../core/device_clock.dart';
 import '../../features/daily_plan/domain/daily_plan_models.dart';
 import '../../features/task_master/domain/task_models.dart';
 import '../hub_mode/hub_mode.dart';
+import '../sync/conflict_record.dart';
 import '../sync/document_clocks.dart';
 import '../sync/lan_sync_types.dart' show syncErrorMessage;
 import '../sync/sync_document.dart';
@@ -215,11 +216,16 @@ class HubBackedStore extends StateStore {
   /// a caller that fires two edits and then [flush]es must find both of them
   /// already folded into the pending document, not still in a microtask queue.
   @override
-  Future<void> writeAll(TaskMasterStateData tasks, DailyPlanStateData plans) async {
+  Future<void> writeAll(
+    TaskMasterStateData tasks,
+    DailyPlanStateData plans, {
+    List<ConflictRecord>? conflicts,
+  }) async {
     final snapshot = _snapshot ?? await _fetch();
     _snapshot = snapshot.copyWith(
       taskMaster: tasks,
       dailyPlan: plans,
+      conflicts: conflicts,
       exportedAt: _now().toUtc(),
     );
     _gen += 1;
@@ -230,6 +236,17 @@ class HubBackedStore extends StateStore {
       _debounceTimer = null;
       unawaited(_send());
     });
+  }
+
+  /// Live from the hub's document: in this mode there is no local copy, so a
+  /// record resolved here is an ordinary document write like any other.
+  @override
+  Future<List<ConflictRecord>> readConflicts() async => (await _document()).conflicts;
+
+  @override
+  Future<void> writeConflicts(List<ConflictRecord> conflicts) async {
+    final snapshot = await _document();
+    await writeAll(snapshot.taskMaster, snapshot.dailyPlan, conflicts: conflicts);
   }
 
   /// Sends any pending edit now (tests and the unload path use it).
@@ -277,6 +294,9 @@ class HubBackedStore extends StateStore {
     purgedBefore: snapshot.purgedBefore,
     taskMaster: snapshot.taskMaster,
     dailyPlan: snapshot.dailyPlan,
+    // Sent, not dropped: a resolution made in this browser only reaches the
+    // hub — and from there the phone — as a conflict record.
+    conflicts: snapshot.conflicts,
   );
 
   Future<Map<String, dynamic>> _post(String mode, SyncDocument payload) async {
@@ -294,6 +314,9 @@ class HubBackedStore extends StateStore {
   String _bodyOf(SyncDocument document) => jsonEncode(<String, dynamic>{
     'taskMaster': document.taskMaster.toJson(),
     'dailyPlan': document.dailyPlan.toJson(),
+    // Conflict records count as content: a merge that recorded one, or closed
+    // one as superseded, changed something the conflict screen is showing.
+    'conflicts': document.conflicts.map((c) => c.toJson()).toList(),
   });
 
   Future<void> _push() async {

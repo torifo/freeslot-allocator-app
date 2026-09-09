@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../services/sync/lan_sync_types.dart';
 import '../../../services/sync/qr_chunk_codec.dart';
@@ -286,6 +287,9 @@ class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen>
             // not a way out of the screen — the back arrow is.
             onCancel: _progress.cancel,
             onClose: () => Navigator.of(context).pop(),
+            // A QR import merges the same way a LAN sync does, so it can record
+            // conflicts too; the panel needs somewhere to send the user.
+            onOpenConflicts: () => context.push('/sync/conflicts'),
             scrollable: false,
           ),
           if (_note != null)
