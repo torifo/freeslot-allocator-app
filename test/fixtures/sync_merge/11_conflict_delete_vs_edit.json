@@ -1,0 +1,131 @@
+{
+  "name": "a delete on one side and an edit on the other is recorded, tombstone and all",
+  "options": {
+    "lastAgreedAt": "2026-09-09T00:00:00.000Z",
+    "detectedBy": "hub-macos",
+    "detectedAt": "2026-09-09T03:00:00.000Z"
+  },
+  "a": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "hub-macos",
+    "taskMaster": {
+      "tasks": [
+        {
+          "id": "tsk-1",
+          "title": "hub edit",
+          "kind": "must_do",
+          "priority": 3,
+          "createdAt": "2026-09-01T00:00:00.000Z",
+          "memo": "",
+          "categoryId": null,
+          "estimatedMinutes": 0,
+          "clock": "25-0-hub-macos",
+          "updatedAt": "2026-09-09T02:00:00.000Z",
+          "deletedAt": null,
+          "migrated": false
+        }
+      ],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "b": {
+    "version": 2,
+    "exportedAt": "2026-09-08T00:00:00.000Z",
+    "deviceId": "android-1",
+    "taskMaster": {
+      "tasks": [
+        {
+          "id": "tsk-1",
+          "clock": "20-0-android-1",
+          "updatedAt": "2026-09-09T01:30:00.000Z",
+          "deletedAt": "2026-09-09T01:30:00.000Z",
+          "migrated": false
+        }
+      ],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expected": {
+    "taskMaster": {
+      "tasks": [
+        {
+          "id": "tsk-1",
+          "title": "hub edit",
+          "kind": "must_do",
+          "priority": 3,
+          "createdAt": "2026-09-01T00:00:00.000Z",
+          "memo": "",
+          "categoryId": null,
+          "estimatedMinutes": 0,
+          "clock": "25-0-hub-macos",
+          "updatedAt": "2026-09-09T02:00:00.000Z",
+          "deletedAt": null,
+          "migrated": false
+        }
+      ],
+      "mustDoCategories": [],
+      "wantToDoCategories": [],
+      "settings": {
+        "shareCategories": false,
+        "clock": "0-0-migrated",
+        "updatedAt": "1970-01-01T00:00:00.000Z",
+        "deletedAt": null,
+        "migrated": true
+      }
+    },
+    "dailyPlan": {
+      "plans": [],
+      "slots": [],
+      "assignments": []
+    }
+  },
+  "expectedConflicts": [
+    {
+      "id": "cf-a57437bc0abfeb33",
+      "entityType": "task",
+      "entityId": "tsk-1",
+      "winner": {
+        "side": "hub",
+        "deviceId": "hub-macos",
+        "clock": "25-0-hub-macos"
+      },
+      "loser": {
+        "side": "device",
+        "deviceId": "android-1",
+        "clock": "20-0-android-1"
+      },
+      "resolution": null
+    }
+  ],
+  "expectedDetectedIds": [
+    "cf-a57437bc0abfeb33"
+  ],
+  "expectedWarnings": []
+}

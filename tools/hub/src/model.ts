@@ -126,6 +126,13 @@ export const ENTITY_KEYS = {
     'startAt', 'endAt', 'sortOrder', 'categoryId', 'categoryName', 'memo',
   ],
   settings: ['shareCategories'],
+  // Must stay identical to `ConflictRecord.jsonKeys` in
+  // lib/services/sync/conflict_record.dart: the set decides what `contentHash`
+  // sees, and a mismatch would split the hash between the two languages.
+  conflict: [
+    'id', 'entityType', 'entityId', 'detectedAt', 'detectedBy',
+    'winner', 'loser', 'resolution', 'resolvedAt', 'resolvedBy',
+  ],
   tombstone: ['id'],
 } as const satisfies Record<string, readonly string[]>;
 
