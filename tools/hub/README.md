@@ -166,6 +166,12 @@ FRELOCATOR の macOS 版と同じ `data.json` を編集する MCP サーバー�
 - エラーは LAN 側と同じ `{ "error": { "code": ..., "message": ... } }`。
 - `GET /api/revision` は `data.json` の `{mtime, サイズ}` をキーに結果を持ち回す。値が動いていなければデータロックも取らず再ハッシュもしないので、2 秒ごとのポーリングがスマホの同期とロックを奪い合わない。
 
+### ブラウザに残るもの・保存できないとき
+
+- ブラウザ（hub モード）が localStorage に持つのは web id（`frelocator.webId`）と HLC クロックだけです。タスクや計画などの業務データはブラウザに保存されず、常にハブの `data.json` が正です。記録に刻まれる端末 id は保存せず `web-<webId>` として導出します。
+- 保存に失敗したとき: 5xx や接続断などの一時的な失敗は 2→4→8 秒（上限 30 秒）のバックオフで自動再送します。ハブが同じ理由で拒否し続けるもの（`409 purged_before`、`426 upgrade_required`、`400 invalid_document` / `bad_timestamp`、`403`）は再送を止めて編集を手元に保持し、「PC と同期」カードに理由と「PC のデータで置き換える」「ブラウザのデータで置き換える」を出します（それぞれ `POST /<秘密のパス>/api/sync?mode=take_hub` / `?mode=take_web`）。
+
+
 ### レスポンスヘッダ
 
 ローカルページのすべての応答に `Referrer-Policy: no-referrer`（秘密プレフィックスを `Referer` に漏らさない）・`X-Content-Type-Options: nosniff`・`Cross-Origin-Opener-Policy: same-origin` を付ける。アプリの HTML にはさらに CSP を付ける:
