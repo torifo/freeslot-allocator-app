@@ -3,7 +3,7 @@ import type { HubConfig } from './config.js';
 import { checkInvariants } from './invariants.js';
 import { Hlc, HlcClock } from './hlc.js';
 import { merge } from './merge.js';
-import { isDeleted, SCHEMA_VERSION, toIsoUtc, type Entity, type SyncDocumentJson } from './model.js';
+import { conflictSchema, isDeleted, SCHEMA_VERSION, toIsoUtc, type Entity, type SyncDocumentJson } from './model.js';
 import type { FileStore } from './store.js';
 
 export class SyncRejected extends Error {
@@ -26,7 +26,7 @@ const ENTITY_LISTS = (d: SyncDocumentJson): Entity[][] => [
 const entitySchema = z.object({ id: z.string() }).passthrough();
 const entityList = z.array(entitySchema);
 /** Permissive on unknown fields so a newer client's extra keys survive instead of breaking sync. */
-const documentSchema = z.object({
+export const documentSchema = z.object({
   version: z.number(),
   exportedAt: z.string().optional(),
   deviceId: z.string().optional(),
@@ -41,6 +41,9 @@ const documentSchema = z.object({
     settings: z.object({ shareCategories: z.boolean() }).passthrough(),
   }).passthrough(),
   dailyPlan: z.object({ plans: entityList, slots: entityList, assignments: entityList }).passthrough(),
+  // Optional: a Plan 2b client sends no `conflicts` at all, and a hub with
+  // nothing recorded omits the key rather than sending an empty array.
+  conflicts: z.array(conflictSchema).optional(),
 }).passthrough();
 
 /** Instant of an ISO string, whatever its offset or precision; NaN when unparsable. */
