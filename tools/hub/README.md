@@ -18,9 +18,43 @@ FRELOCATOR の macOS 版と同じ `data.json` を編集する MCP サーバー�
 
 ## ツール
 
-タスク・カテゴリ・日次計画の CRUD、`copy_daily_plan`、`weekly_report`、`export_data`、`undo_last_write`、`sync_status`、
-`import_file` / `purge_tombstones` / `forget_device` / `rotate_token` の 26 個。
-後半 4 個は LAN サーバー（後述）が起動できている場合だけ動く。`hub.json` が壊れていて LAN が無効なときは「LAN sync is not configured in this hub process」を返す。
+全 39 個。オーナー自身のデータしか扱わないので、すべてのエンティティを MCP から作成・取得・更新・削除できる。
+網羅状況と設計判断は [`docs/tool-coverage.md`](docs/tool-coverage.md) を参照。
+
+タスク:
+
+- `list_tasks` — 種別・カテゴリ・キーワードで生きているタスクを一覧する
+- `get_task` — id で 1 件取得する（`includeDeleted` で墓標も見る）
+- `add_task` / `bulk_add_tasks` — 1 件／最大 100 件まとめて追加する
+- `update_task` — 指定した項目だけ更新する（kind を変えたら新しい種別に無いカテゴリは外れる）
+- `bulk_update_tasks` — 複数件の部分更新を 1 回の書き込みで適用する（1 件でも失敗したら何も書かない）
+- `delete_task` / `bulk_delete_tasks` — 墓標化する（物理削除ではない）
+- `reorder_tasks` — 種別内の並び順を id 配列で指定する（順序は `priority` に書き戻す）
+
+カテゴリと設定:
+
+- `list_categories` / `add_category` / `update_category`（改名）/ `delete_category`（参照タスクの分類を外す）
+- `merge_categories` — 破壊的。タスクを移し替えてから元のカテゴリを墓標化する
+- `get_settings` / `set_share_categories` — カテゴリ共有の参照と ON/OFF（ON 時は 4 つのマージ戦略を選べる）
+
+日次計画:
+
+- `list_daily_plans` / `get_daily_plan` / `create_daily_plan`（冪等）
+- `delete_daily_plan` — 破壊的。計画と枠・割り当てをまとめて墓標化する
+- `copy_daily_plan` / `move_daily_plan` — 別日へ複製する／移して元日を空にする
+- `add_free_slot` / `update_free_slot` / `delete_free_slot`（枠の割り当てごと消える）
+- `assign_task` / `update_assignment` / `unassign`
+- `move_assignment` — 別の枠・別の日・同じ枠の別位置へ移す（移動先の枠は先頭から詰め直される）
+- `weekly_report` — 1 週間の自由時間と割り当てを種別・カテゴリで集計する
+
+データ:
+
+- `export_data` / `undo_last_write` / `sync_status`
+- `import_file` / `import_data` / `purge_tombstones` / `forget_device` / `rotate_token`
+
+最後の 5 個は LAN サーバー（後述）が起動できている場合だけ動く。`hub.json` が壊れていて LAN が無効なときは「LAN sync is not configured in this hub process」を返す。
+
+タスクの完了フラグと墓標の復元はモデル側に情報が無いため提供していない（理由は `docs/tool-coverage.md`）。
 
 日付引数（`date` / `from` / `to` / `weekStart` / `fromDate` / `toDate`）は `YYYY-MM-DD` で、ハブを動かしているマシンのローカルなカレンダー日を指す。`startAt` / `endAt` はオフセット付き ISO を受け取り、UTC ISO 文字列として保存する。
 
@@ -102,4 +136,4 @@ FRELOCATOR の macOS 版と同じ `data.json` を編集する MCP サーバー�
 
 - テスト: `npm test`（マージ規則と不変条件は `test/fixtures/sync_merge` を Flutter 側と共有）。
 - 型検査: `npm run typecheck`（`tsconfig.test.json`。テストも含めて検査する）。
-- stdio サーバーの疎通確認: `npm run smoke`（ビルドしてから実クライアントでツール一覧と `add_task` → `list_tasks` を往復する）。
+- stdio サーバーの疎通確認: `npm run smoke`（ビルドしてから実クライアントでツール一覧を取り、カテゴリ作成から並べ替え・割り当て移動・削除・`undo_last_write`・`purge_tombstones` まで CRUD を一巡させ、各段階で不変条件を検査する）。

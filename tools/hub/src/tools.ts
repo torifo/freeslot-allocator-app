@@ -77,6 +77,17 @@ const taskFields = {
   estimatedMinutes: z.number().int().min(0).optional(),
   memo: z.string().optional(),
 };
+const taskPatchFields = {
+  id: z.string(),
+  title: z.string().optional(),
+  kind: kindSchema.optional(),
+  priority: z.number().int().min(1).max(5).optional(),
+  categoryId: z.string().nullable().optional(),
+  estimatedMinutes: z.number().int().min(0).optional(),
+  memo: z.string().optional(),
+};
+/** Same four choices as Dart's `CategoryMergeStrategy`. */
+const mergeStrategySchema = z.enum(['keepShorter', 'keepLonger', 'keepMustDo', 'keepWantToDo']);
 
 export const schemas = {
   listTasks: z.object({
@@ -86,22 +97,29 @@ export const schemas = {
   }),
   addTask: z.object(taskFields),
   bulkAddTasks: z.object({ tasks: z.array(z.object(taskFields)).min(1).max(100) }),
-  updateTask: z.object({
-    id: z.string(),
-    title: z.string().optional(),
-    kind: kindSchema.optional(),
-    priority: z.number().int().min(1).max(5).optional(),
-    categoryId: z.string().nullable().optional(),
-    estimatedMinutes: z.number().int().min(0).optional(),
-    memo: z.string().optional(),
-  }),
+  updateTask: z.object(taskPatchFields),
   deleteTask: z.object({ id: z.string() }),
+  getTask: z.object({ id: z.string(), includeDeleted: z.boolean().optional() }),
+  getEntity: z.object({ id: z.string(), includeDeleted: z.boolean().optional() }),
+  reorderTasks: z.object({ kind: kindSchema, orderedIds: z.array(z.string()).min(1).max(500) }),
+  bulkUpdateTasks: z.object({ updates: z.array(z.object(taskPatchFields)).min(1).max(100) }),
+  bulkDeleteTasks: z.object({ ids: z.array(z.string()).min(1).max(100) }),
   listCategories: z.object({ kind: kindSchema.optional() }),
   addCategory: z.object({ kind: kindSchema, name: z.string() }),
   updateCategory: z.object({ kind: kindSchema, id: z.string(), name: z.string() }),
   deleteCategory: z.object({ kind: kindSchema, id: z.string() }),
+  mergeCategories: z.object({ kind: kindSchema, sourceId: z.string(), targetId: z.string() }),
+  getSettings: z.object({}),
+  setShareCategories: z.object({ enabled: z.boolean(), strategy: mergeStrategySchema.optional() }),
   listDailyPlans: z.object({ from: dateSchema, to: dateSchema }),
   getDailyPlan: z.object({ date: dateSchema }),
+  createDailyPlan: z.object({ date: dateSchema }),
+  deleteDailyPlan: z.object({ date: dateSchema }),
+  moveDailyPlan: z.object({
+    fromDate: dateSchema,
+    toDate: dateSchema,
+    replaceExisting: z.boolean().optional(),
+  }),
   addFreeSlot: z.object({
     date: dateSchema,
     startAt: z.string(),
@@ -130,6 +148,11 @@ export const schemas = {
     memo: z.string().optional(),
   }),
   unassign: z.object({ id: z.string() }),
+  moveAssignment: z.object({
+    id: z.string(),
+    targetSlotId: z.string(),
+    beforeAssignmentId: z.string().optional(),
+  }),
   copyDailyPlan: z.object({
     fromDate: dateSchema,
     toDate: dateSchema,
@@ -137,6 +160,10 @@ export const schemas = {
   }),
   weeklyReport: z.object({ weekStart: dateSchema }),
   importFile: z.object({ path: z.string() }),
+  importData: z.object({
+    document: z.record(z.string(), z.unknown()),
+    mode: z.enum(['merge', 'replace']).optional(),
+  }),
   purgeTombstones: z.object({}),
   forgetDevice: z.object({ deviceId: z.string() }),
   rotateToken: z.object({ deviceId: z.string() }),
@@ -303,37 +330,139 @@ export class HubTools {
   async updateTask(input: z.infer<typeof schemas.updateTask>): Promise<Entity> {
     let updated!: Entity;
     await this.mutate((doc) => {
-      const index = doc.taskMaster.tasks.findIndex((t) => t.id === input.id && !isDeleted(t));
-      if (index < 0) throw new ToolError(`task ${input.id} not found`);
-      const previous = doc.taskMaster.tasks[index];
-      const kind = input.kind ?? String(previous.kind);
-      if (input.title !== undefined && !input.title.trim()) {
-        throw new ToolError('title must not be empty');
-      }
-      if (input.categoryId && !live(this.cats(doc, kind)).some((c) => c.id === input.categoryId)) {
-        throw new ToolError(`unknown category ${input.categoryId} for ${kind}`);
-      }
-      const patch = Object.fromEntries(
-        Object.entries(input).filter(([key, value]) => key !== 'id' && value !== undefined),
-      );
-      updated = {
-        ...previous,
-        ...patch,
-        title: input.title === undefined ? previous.title : input.title.trim(),
-        ...this.stamp(previous),
-      };
-      doc.taskMaster.tasks[index] = updated;
+      updated = this.applyTaskPatch(doc, input);
+    });
+    return updated;
+  }
+
+  /** One task patch inside an open mutation, so bulk callers share the semantics. */
+  private applyTaskPatch(doc: SyncDocumentJson, input: z.infer<typeof schemas.updateTask>): Entity {
+    const index = doc.taskMaster.tasks.findIndex((t) => t.id === input.id && !isDeleted(t));
+    if (index < 0) throw new ToolError(`task ${input.id} not found`);
+    const previous = doc.taskMaster.tasks[index];
+    const kind = input.kind ?? String(previous.kind);
+    if (input.title !== undefined && !input.title.trim()) {
+      throw new ToolError('title must not be empty');
+    }
+    if (input.categoryId && !live(this.cats(doc, kind)).some((c) => c.id === input.categoryId)) {
+      throw new ToolError(`unknown category ${input.categoryId} for ${kind}`);
+    }
+    const patch = Object.fromEntries(
+      Object.entries(input).filter(([key, value]) => key !== 'id' && value !== undefined),
+    );
+    const updated: Entity = {
+      ...previous,
+      ...patch,
+      title: input.title === undefined ? previous.title : input.title.trim(),
+      ...this.stamp(previous),
+    };
+    // Mirrors `sanitizeTaskAgainstCategories`: a kind change must not keep a category the new kind lacks.
+    if (
+      updated.categoryId != null &&
+      !live(this.cats(doc, String(updated.kind))).some((c) => c.id === updated.categoryId)
+    ) {
+      updated.categoryId = null;
+    }
+    doc.taskMaster.tasks[index] = updated;
+    return updated;
+  }
+
+  async bulkUpdateTasks(input: z.infer<typeof schemas.bulkUpdateTasks>): Promise<Entity[]> {
+    const updated: Entity[] = [];
+    await this.mutate((doc) => {
+      updated.length = 0;
+      for (const patch of input.updates) updated.push(this.applyTaskPatch(doc, patch));
     });
     return updated;
   }
 
   async deleteTask(input: z.infer<typeof schemas.deleteTask>): Promise<{ id: string; deleted: true }> {
-    await this.mutate((doc) => {
-      const index = doc.taskMaster.tasks.findIndex((t) => t.id === input.id && !isDeleted(t));
-      if (index < 0) throw new ToolError(`task ${input.id} not found`);
-      doc.taskMaster.tasks[index] = this.tomb(doc.taskMaster.tasks[index]);
-    });
+    await this.mutate((doc) => this.applyTaskDelete(doc, input.id));
     return { id: input.id, deleted: true };
+  }
+
+  private applyTaskDelete(doc: SyncDocumentJson, id: string): void {
+    const index = doc.taskMaster.tasks.findIndex((t) => t.id === id && !isDeleted(t));
+    if (index < 0) throw new ToolError(`task ${id} not found`);
+    doc.taskMaster.tasks[index] = this.tomb(doc.taskMaster.tasks[index]);
+  }
+
+  async bulkDeleteTasks(
+    input: z.infer<typeof schemas.bulkDeleteTasks>,
+  ): Promise<{ ids: string[]; deleted: number }> {
+    await this.mutate((doc) => {
+      for (const id of input.ids) this.applyTaskDelete(doc, id);
+    });
+    return { ids: input.ids, deleted: input.ids.length };
+  }
+
+  async getTask(input: z.infer<typeof schemas.getTask>): Promise<Entity> {
+    const doc = await this.store.read();
+    const found = doc.taskMaster.tasks.find((t) => t.id === input.id);
+    if (!found) throw new ToolError(`task ${input.id} not found`);
+    if (isDeleted(found) && !input.includeDeleted) {
+      throw new ToolError(`task ${input.id} was deleted at ${String(found.deletedAt)}`);
+    }
+    return found;
+  }
+
+  /** Finds any record by id, whichever list holds it. */
+  async getEntity(
+    input: z.infer<typeof schemas.getEntity>,
+  ): Promise<{ kind: string; list: string; entity: Entity }> {
+    const doc = await this.store.read();
+    const lists: Array<[string, string, Entity[]]> = [
+      ['task', 'tasks', doc.taskMaster.tasks],
+      ['category', 'mustDoCategories', doc.taskMaster.mustDoCategories],
+      ['category', 'wantToDoCategories', doc.taskMaster.wantToDoCategories],
+      ['plan', 'plans', doc.dailyPlan.plans],
+      ['slot', 'slots', doc.dailyPlan.slots],
+      ['assignment', 'assignments', doc.dailyPlan.assignments],
+    ];
+    for (const [kind, list, entities] of lists) {
+      const found = (entities ?? []).find((e) => e.id === input.id);
+      if (!found) continue;
+      if (isDeleted(found) && !input.includeDeleted) {
+        throw new ToolError(`${kind} ${input.id} was deleted at ${String(found.deletedAt)}`);
+      }
+      return { kind, list, entity: found };
+    }
+    throw new ToolError(`record ${input.id} not found`);
+  }
+
+  /** Mirrors `reorderTasks`: no sort field exists, so order is written as `priority` (count - index). */
+  async reorderTasks(input: z.infer<typeof schemas.reorderTasks>): Promise<Entity[]> {
+    let ordered: Entity[] = [];
+    await this.mutate((doc) => {
+      const ofKind = live(doc.taskMaster.tasks)
+        .filter((t) => t.kind === input.kind)
+        // The app's display order: priority descending, then title.
+        .sort(
+          (a, b) =>
+            Number(b.priority) - Number(a.priority) ||
+            String(a.title).localeCompare(String(b.title)),
+        );
+      const byId = new Map(ofKind.map((t) => [String(t.id), t]));
+      const seen = new Set<string>();
+      const sequence: Entity[] = [];
+      for (const id of input.orderedIds) {
+        const task = byId.get(id);
+        if (!task) throw new ToolError(`task ${id} not found among live ${input.kind} tasks`);
+        if (seen.has(id)) throw new ToolError(`task ${id} listed twice`);
+        seen.add(id);
+        sequence.push(task);
+      }
+      for (const task of ofKind) if (!seen.has(String(task.id))) sequence.push(task);
+      ordered = sequence.map((task, index) => {
+        const priority = sequence.length - index;
+        if (Number(task.priority) === priority) return task;
+        const updated: Entity = { ...task, priority, ...this.stamp(task) };
+        const at = doc.taskMaster.tasks.findIndex((t) => t.id === task.id);
+        doc.taskMaster.tasks[at] = updated;
+        return updated;
+      });
+    });
+    return ordered;
   }
 
   // ---- categories ----
@@ -406,6 +535,104 @@ export class HubTools {
       );
     });
     return { id: input.id, deleted: true };
+  }
+
+  async mergeCategories(
+    input: z.infer<typeof schemas.mergeCategories>,
+  ): Promise<{ sourceId: string; targetId: string; movedTasks: number }> {
+    let movedTasks = 0;
+    await this.mutate((doc) => {
+      movedTasks = 0;
+      if (input.sourceId === input.targetId) {
+        throw new ToolError('sourceId and targetId must differ');
+      }
+      const lists = this.catLists(doc, input.kind);
+      const holds = (id: string) => lists.some((l) => l.some((c) => c.id === id && !isDeleted(c)));
+      if (!holds(input.sourceId)) throw new ToolError(`category ${input.sourceId} not found`);
+      if (!holds(input.targetId)) throw new ToolError(`category ${input.targetId} not found`);
+      doc.taskMaster.tasks = doc.taskMaster.tasks.map((t) => {
+        if (isDeleted(t) || t.categoryId !== input.sourceId) return t;
+        movedTasks += 1;
+        return { ...t, categoryId: input.targetId, ...this.stamp(t) };
+      });
+      for (const list of lists) {
+        const index = list.findIndex((c) => c.id === input.sourceId && !isDeleted(c));
+        if (index >= 0) list[index] = this.tomb(list[index]);
+      }
+    });
+    return { sourceId: input.sourceId, targetId: input.targetId, movedTasks };
+  }
+
+  // ---- settings ----
+
+  async getSettings(): Promise<Entity> {
+    const doc = await this.store.read();
+    return { id: 'settings', ...doc.taskMaster.settings } as Entity;
+  }
+
+  /** Mirrors `setShareCategories`: turning sharing on merges both lists, off mirrors must-do into both. */
+  async setShareCategories(input: z.infer<typeof schemas.setShareCategories>): Promise<Entity> {
+    let settings!: Entity;
+    await this.mutate((doc) => {
+      const current = doc.taskMaster.settings?.shareCategories === true;
+      if (current === input.enabled) {
+        settings = { id: 'settings', ...doc.taskMaster.settings } as Entity;
+        return;
+      }
+      const mustDo = live(doc.taskMaster.mustDoCategories);
+      const wantToDo = live(doc.taskMaster.wantToDoCategories);
+      const next = input.enabled
+        ? this.mergedCategories(mustDo, wantToDo, input.strategy ?? 'keepLonger')
+        : mustDo;
+      const keptIds = new Set(next.map((c) => String(c.id)));
+      if (input.enabled) this.retargetTasksByName(doc, keptIds, next);
+      this.rebuildCategoryList(doc.taskMaster.mustDoCategories, next);
+      this.rebuildCategoryList(doc.taskMaster.wantToDoCategories, next);
+      doc.taskMaster.settings = {
+        ...doc.taskMaster.settings,
+        shareCategories: input.enabled,
+        ...this.stamp(doc.taskMaster.settings as unknown as Entity),
+      };
+      settings = { id: 'settings', ...doc.taskMaster.settings } as Entity;
+    });
+    return settings;
+  }
+
+  private mergedCategories(mustDo: Entity[], wantToDo: Entity[], strategy: string): Entity[] {
+    switch (strategy) {
+      case 'keepMustDo':
+        return mustDo;
+      case 'keepWantToDo':
+        return wantToDo;
+      case 'keepShorter':
+        return mustDo.length <= wantToDo.length ? mustDo : wantToDo;
+      default:
+        return mustDo.length >= wantToDo.length ? mustDo : wantToDo;
+    }
+  }
+
+  /** A task whose category the merge dropped follows the same name, or loses its category. */
+  private retargetTasksByName(doc: SyncDocumentJson, keptIds: Set<string>, kept: Entity[]): void {
+    doc.taskMaster.tasks = doc.taskMaster.tasks.map((task) => {
+      if (isDeleted(task) || task.categoryId == null || keptIds.has(String(task.categoryId))) {
+        return task;
+      }
+      const previous = live(this.cats(doc, String(task.kind))).find((c) => c.id === task.categoryId);
+      const matched = previous ? kept.find((c) => c.name === previous.name) : undefined;
+      return { ...task, categoryId: matched ? matched.id : null, ...this.stamp(task) };
+    });
+  }
+
+  /** Makes `list` hold exactly `next`: entries it already has keep their clock, the rest are stamped or tombstoned. */
+  private rebuildCategoryList(list: Entity[], next: Entity[]): void {
+    const keptIds = new Set(next.map((c) => String(c.id)));
+    for (let i = 0; i < list.length; i += 1) {
+      if (!isDeleted(list[i]) && !keptIds.has(String(list[i].id))) list[i] = this.tomb(list[i]);
+    }
+    for (const category of next) {
+      if (list.some((c) => c.id === category.id && !isDeleted(c))) continue;
+      pushLive(list, { id: category.id, name: category.name, ...this.stamp() } as Entity);
+    }
   }
 
   /** Mirrors `validateCategoryNameUniqueness`; shared categories are one namespace. */
@@ -665,6 +892,17 @@ export class HubTools {
   }> {
     let result!: { plan: Entity; slots: Entity[]; assignments: Entity[] };
     await this.mutate((doc) => {
+      result = this.copyPlanWithin(doc, input);
+    });
+    return result;
+  }
+
+  /** The copy half of `copy_daily_plan`, shared with `move_daily_plan`. */
+  private copyPlanWithin(
+    doc: SyncDocumentJson,
+    input: z.infer<typeof schemas.copyDailyPlan>,
+  ): { plan: Entity; slots: Entity[]; assignments: Entity[] } {
+    {
       if (input.fromDate === input.toDate) throw new ToolError('fromDate and toDate must differ');
       const source = this.planFor(doc, input.fromDate);
       if (!source) throw new ToolError(`no plan on ${input.fromDate}`);
@@ -740,13 +978,127 @@ export class HubTools {
       }
       for (const slotId of slotMap.values()) this.normalizeSlot(doc, slotId);
       this.touchPlan(doc, String(target.id));
-      result = {
+      return {
         plan: doc.dailyPlan.plans.find((p) => p.id === target.id)!,
         slots: slots.map((s) => doc.dailyPlan.slots.find((x) => x.id === s.id)!),
         assignments: assignments.map((a) => doc.dailyPlan.assignments.find((x) => x.id === a.id)!),
       };
+    }
+  }
+
+  async createDailyPlan(input: z.infer<typeof schemas.createDailyPlan>): Promise<Entity> {
+    let plan!: Entity;
+    await this.mutate((doc) => {
+      plan = this.ensurePlan(doc, input.date);
+    });
+    return plan;
+  }
+
+  async deleteDailyPlan(input: z.infer<typeof schemas.deleteDailyPlan>): Promise<{
+    date: string; deleted: true; slots: number; assignments: number;
+  }> {
+    let counts = { slots: 0, assignments: 0 };
+    await this.mutate((doc) => {
+      counts = this.deletePlanWithin(doc, input.date);
+    });
+    return { date: input.date, deleted: true, ...counts };
+  }
+
+  /** Tombstones a plan with everything hanging off it; shared with `move_daily_plan`. */
+  private deletePlanWithin(
+    doc: SyncDocumentJson,
+    date: string,
+  ): { slots: number; assignments: number } {
+    const plan = this.planFor(doc, date);
+    if (!plan) throw new ToolError(`no plan on ${date}`);
+    const slotIds = new Set(
+      live(doc.dailyPlan.slots).filter((s) => s.dailyPlanId === plan.id).map((s) => String(s.id)),
+    );
+    let slots = 0;
+    let assignments = 0;
+    doc.dailyPlan.assignments = doc.dailyPlan.assignments.map((a) => {
+      if (isDeleted(a) || (a.dailyPlanId !== plan.id && !slotIds.has(String(a.slotId)))) return a;
+      assignments += 1;
+      return this.tomb(a);
+    });
+    doc.dailyPlan.slots = doc.dailyPlan.slots.map((s) => {
+      if (isDeleted(s) || s.dailyPlanId !== plan.id) return s;
+      slots += 1;
+      return this.tomb(s);
+    });
+    const index = doc.dailyPlan.plans.findIndex((p) => p.id === plan.id && !isDeleted(p));
+    doc.dailyPlan.plans[index] = this.tomb(doc.dailyPlan.plans[index]);
+    return { slots, assignments };
+  }
+
+  async moveDailyPlan(input: z.infer<typeof schemas.moveDailyPlan>): Promise<{
+    plan: Entity; slots: Entity[]; assignments: Entity[];
+  }> {
+    let result!: { plan: Entity; slots: Entity[]; assignments: Entity[] };
+    await this.mutate((doc) => {
+      result = this.copyPlanWithin(doc, input);
+      this.deletePlanWithin(doc, input.fromDate);
     });
     return result;
+  }
+
+  /** Mirrors `moveAssignmentToSlot`: the target slot is repacked from its start, both slots renumbered. */
+  async moveAssignment(input: z.infer<typeof schemas.moveAssignment>): Promise<Entity> {
+    let moved!: Entity;
+    await this.mutate((doc) => {
+      const index = doc.dailyPlan.assignments.findIndex((a) => a.id === input.id && !isDeleted(a));
+      if (index < 0) throw new ToolError(`assignment ${input.id} not found`);
+      const assignment = doc.dailyPlan.assignments[index];
+      const target = live(doc.dailyPlan.slots).find((s) => s.id === input.targetSlotId);
+      if (!target) throw new ToolError(`slot ${input.targetSlotId} not found`);
+      const sourceSlotId = String(assignment.slotId);
+      const sourcePlanId = String(assignment.dailyPlanId);
+      const others = live(doc.dailyPlan.assignments)
+        .filter((a) => a.slotId === target.id && a.id !== assignment.id)
+        .sort(
+          (x, y) =>
+            String(x.startAt).localeCompare(String(y.startAt)) ||
+            Number(x.sortOrder) - Number(y.sortOrder),
+        );
+      const insertAt = input.beforeAssignmentId === undefined
+        ? others.length
+        : others.findIndex((a) => a.id === input.beforeAssignmentId);
+      if (insertAt < 0) {
+        throw new ToolError(
+          `assignment ${input.beforeAssignmentId} is not in slot ${input.targetSlotId}`,
+        );
+      }
+      const ordered = [...others.slice(0, insertAt), assignment, ...others.slice(insertAt)];
+      let cursor = Date.parse(String(target.startAt));
+      for (const item of ordered) {
+        const span = Math.max(
+          0,
+          Math.floor((Date.parse(String(item.endAt)) - Date.parse(String(item.startAt))) / 60000),
+        ) * 60000;
+        const startAt = new Date(cursor).toISOString();
+        const endAt = new Date(cursor + span).toISOString();
+        cursor += span;
+        if (item.startAt === startAt && item.endAt === endAt && item.slotId === target.id) continue;
+        const at = doc.dailyPlan.assignments.findIndex((a) => a.id === item.id);
+        doc.dailyPlan.assignments[at] = {
+          ...item,
+          dailyPlanId: target.dailyPlanId,
+          slotId: target.id,
+          startAt,
+          endAt,
+          ...this.stamp(item),
+        };
+      }
+      for (const item of ordered) {
+        this.assertAssignmentFits(doc, doc.dailyPlan.assignments.find((a) => a.id === item.id)!);
+      }
+      if (sourceSlotId !== target.id) this.normalizeSlot(doc, sourceSlotId);
+      this.normalizeSlot(doc, String(target.id));
+      this.touchPlan(doc, sourcePlanId);
+      this.touchPlan(doc, String(target.dailyPlanId));
+      moved = doc.dailyPlan.assignments.find((a) => a.id === input.id)!;
+    });
+    return moved;
   }
 
   async weeklyReport(input: z.infer<typeof schemas.weeklyReport>): Promise<{
@@ -815,7 +1167,7 @@ export class HubTools {
   async importFile(input: z.infer<typeof schemas.importFile>): Promise<{
     summary: SyncSummary; warnings: string[]; deviceId: string;
   }> {
-    const { config, engine } = this.requireDeps();
+    this.requireDeps();
     const path = resolveUserPath(input.path);
     if (!this.importDirs().some((dir) => isInside(path, dir))) {
       // Deliberately terse: a probe must not learn whether the file exists.
@@ -844,15 +1196,35 @@ export class HubTools {
       // The parser message quotes the offending bytes, which would echo file content.
       throw new ToolError('not valid JSON');
     }
+    return this.mergeIncoming(json, 'merge', 'file-import');
+  }
+
+  async importData(input: z.infer<typeof schemas.importData>): Promise<{
+    summary: SyncSummary; warnings: string[]; deviceId: string;
+  }> {
+    return this.mergeIncoming(
+      input.document,
+      input.mode === 'replace' ? 'take_phone' : 'merge',
+      'inline-import',
+    );
+  }
+
+  /** Runs one incoming v2 document through the sync engine, as `import_file` and `import_data` both do. */
+  private async mergeIncoming(
+    json: unknown,
+    mode: 'merge' | 'take_phone',
+    fallbackDeviceId: string,
+  ): Promise<{ summary: SyncSummary; warnings: string[]; deviceId: string }> {
+    const { config, engine } = this.requireDeps();
     const doc = json as SyncDocumentJson;
-    if (typeof doc.version !== 'number' || doc.version < 2) {
-      throw new ToolError(`unsupported schema version ${String(doc.version)}: export the file from an app with schema v2`);
+    if (typeof doc?.version !== 'number' || doc.version < 2) {
+      throw new ToolError(`unsupported schema version ${String(doc?.version)}: export the file from an app with schema v2`);
     }
-    const deviceId = typeof doc.deviceId === 'string' && doc.deviceId ? doc.deviceId : 'file-import';
+    const deviceId = typeof doc.deviceId === 'string' && doc.deviceId ? doc.deviceId : fallbackDeviceId;
     const known = config.device(deviceId) !== undefined;
     let result;
     try {
-      result = await engine.sync(deviceId, doc, 'merge');
+      result = await engine.sync(deviceId, doc, mode);
     } catch (error) {
       if (error instanceof SyncRejected) throw new ToolError(`${error.code}: ${error.message}`);
       throw error;

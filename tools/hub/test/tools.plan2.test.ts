@@ -60,6 +60,28 @@ describe('plan 2 tools', () => {
     await expect(tools.importFile({ path })).rejects.toThrow(/version/);
   });
 
+  it('import_data merges an inline document without touching the filesystem', async () => {
+    const document = importable('android-inline') as unknown as Record<string, unknown>;
+    const r = await tools.importData({ document });
+    expect(r.summary.added).toBe(1);
+    expect(r.deviceId).toBe('android-inline');
+    expect((await tools.listTasks({})).map((t) => t.id)).toEqual(['imported']);
+    expect(cfg.device('android-inline')).toBeDefined();
+  });
+
+  it('import_data replace mode overwrites the document, and undo_last_write puts it back', async () => {
+    const mine = await tools.addTask({ title: 'mine', kind: 'must_do' });
+    const document = importable('android-replace') as unknown as Record<string, unknown>;
+    await tools.importData({ document, mode: 'replace' });
+    expect((await tools.listTasks({})).map((t) => t.id)).toEqual(['imported']);
+    expect(await tools.undoLastWrite()).toBe(true);
+    expect((await tools.listTasks({})).map((t) => t.id)).toEqual([String(mine.id)]);
+  });
+
+  it('import_data refuses anything that is not a v2 document', async () => {
+    await expect(tools.importData({ document: { version: 1 } })).rejects.toThrow(/version/);
+  });
+
   it('import_file registers the file\'s device so purge accounting sees it', async () => {
     const path = join(dir, 'phone.json');
     writeFileSync(path, JSON.stringify(importable('android-2')));
