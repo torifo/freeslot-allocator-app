@@ -9,6 +9,8 @@ import 'package:intl/intl.dart';
 import '../../../core/confirm_dialog.dart';
 import '../../../core/device_clock.dart';
 import '../../../services/app_data_service.dart';
+import '../../../services/hub_mode/hub_mode.dart';
+import '../../../services/storage/hub_backed_store.dart';
 import '../../../services/sync/file_exporter.dart';
 import '../../../services/sync/lan_sync_types.dart';
 import '../../../services/sync/sync_progress.dart';
@@ -16,6 +18,7 @@ import '../../../services/sync/sync_service.dart';
 import '../../../services/sync/sync_settings.dart';
 import '../../daily_plan/application/daily_plan_controller.dart';
 import '../../task_master/application/task_master_controller.dart';
+import '../../task_master/data/task_master_repository.dart' show stateStoreProvider;
 import '../application/sync_in_flight.dart';
 import 'mcp_guide_section.dart';
 import 'sync_progress_panel.dart';
@@ -41,6 +44,9 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
   bool _running = false;
 
   bool get _isMac => !kIsWeb && Platform.isMacOS;
+
+  /// Non-null only in the browser the hub itself serves.
+  HubMode? get _hub => readHubMode();
 
   @override
   void initState() {
@@ -246,6 +252,19 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final settings = _settings;
+    final hub = _hub;
+    if (hub != null) {
+      // In hub mode there is nothing to pair, export or import: this browser
+      // *is* the PC's data file. Showing the LAN cards would offer to sync the
+      // hub with itself.
+      return Scaffold(
+        appBar: AppBar(title: const Text('PC と同期')),
+        body: ListView(
+          padding: const EdgeInsets.all(16),
+          children: <Widget>[_hubCard(hub)],
+        ),
+      );
+    }
     return Scaffold(
       appBar: AppBar(title: const Text('PC と同期')),
       body: settings == null
@@ -272,6 +291,65 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
                 ],
               ],
             ),
+    );
+  }
+
+
+  /// What the hub-served browser shows instead of the LAN / QR / file cards.
+  Widget _hubCard(HubMode hub) {
+    final store = ref.read(stateStoreProvider);
+    final hubStore = store is HubBackedStore ? store : null;
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('この PC のデータを直接編集しています', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 8),
+            const Text(
+              'この画面は PC 側のハブが配信しているブラウザ版です。'
+              '編集は PC のデータファイルにそのまま書き込まれ、ブラウザ側には控えを残しません。'
+              '保存前にタブを閉じたりリロードしたりすると、その編集は失われます。',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            Text('保存先', style: theme.textTheme.labelLarge),
+            SelectableText(
+              hub.dataFile.isEmpty ? '（不明）' : hub.dataFile,
+              style: const TextStyle(fontFamily: 'Menlo', fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            Text('PC 側の識別子', style: theme.textTheme.labelLarge),
+            SelectableText(hub.hubDeviceId, style: const TextStyle(fontFamily: 'Menlo', fontSize: 12)),
+            if (hubStore != null) ...<Widget>[
+              const SizedBox(height: 12),
+              Text('最終保存', style: theme.textTheme.labelLarge),
+              ValueListenableBuilder<bool>(
+                valueListenable: hubStore.hasUnsentEdits,
+                builder: (context, unsent, _) {
+                  final savedAt = hubStore.lastSavedAt;
+                  return Text(
+                    unsent
+                        ? '未保存の編集があります（再試行中）'
+                        : savedAt == null
+                        ? 'この画面を開いてからまだ保存していません'
+                        : DateFormat('M/d HH:mm:ss').format(savedAt),
+                    style: const TextStyle(fontSize: 12),
+                  );
+                },
+              ),
+            ],
+            const SizedBox(height: 12),
+            const Text(
+              'PC の Claude Code（MCP）からの編集は数秒でこの画面に反映されます。'
+              'スマホとの同期は今までどおり PC 側のハブが引き受けます。',
+              style: TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
