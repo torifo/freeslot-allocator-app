@@ -170,6 +170,28 @@ spctl -a -vv build/macos/Build/Products/Release/FRELOCATOR.app
 - notarization 実行
 - zip か dmg の最終配布形式決定
 
+## Release Notes
+
+### 1.0.0+6（競合の記録と解決 / Plan 3b）
+
+Play Console 用の本文（`release/release-notes-6.txt`、ストア提出時に作成）:
+
+```text
+PC と同期したときに、同じ項目を PC とスマホの両方で編集していた場合は「競合」として
+記録し、あとからどちらを採用するか選べるようになりました。同期そのものは今までどおり
+完了します。「設定 › PC と同期 › 競合」から一覧を開けます。
+```
+
+- **データセーフティの回答は変更なし**（「データを収集しません」のまま）。競合レコードは
+  端末とオーナーの PC の間だけを往復し、第三者サーバーには出ない。
+- **権限の追加なし。** 新しい API も新しいネットワーク先も増えていない。
+- **スキーマ版は 2 のまま。** 競合レコードはドキュメント直下の任意フィールド
+  `conflicts[]` で、持たない v2 文書（Plan 2b ビルドの書き出し）とも往復できる。
+  古いアプリは受け取った `conflicts` を落とすが、ハブは常に和集合を取るので PC 側の
+  記録は消えない（この非対称は README と `tools/hub/README.md` に明記）。
+- MCP ツールは 39 → 43（`list_conflicts` / `get_conflict` / `resolve_conflict` /
+  `resolve_all_conflicts`）。
+
 ## Cross-Platform Notes
 
 - アプリ名: `FRELOCATOR`
