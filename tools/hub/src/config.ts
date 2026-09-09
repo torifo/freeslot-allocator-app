@@ -6,10 +6,13 @@ import { SyncRejected } from './sync-engine.js';
 import { createSelfSignedCert, fingerprintOf } from './tls.js';
 
 export interface DeviceRecord { deviceId: string; name: string; token: string; pairedAt: string; lastSyncAt: string | null; }
+/** A browser that opened the hub-served web app. Display only; see `webClients()`. */
+export interface WebClientRecord { id: string; lastSeenAt: string }
 interface HubJson {
   certPem: string; keyPem: string; fingerprint: string;
   pairing: PairingState | null;
   devices: DeviceRecord[];
+  webClients?: WebClientRecord[];
 }
 
 /** `code` is wiped once the attempt budget is spent, so the record only remembers the lockout. */
@@ -60,6 +63,17 @@ export class HubConfig {
   get keyPem(): string { return this.json.keyPem; }
   get fingerprint(): string { return this.json.fingerprint; }
   devices(): DeviceRecord[] { return this.json.devices.map((d) => ({ ...d })); }
+
+  /** Display-only. Deliberately not part of `devices()`: a browser has no local store, so it must never hold back tombstone purge. */
+  webClients(): WebClientRecord[] { return (this.json.webClients ?? []).map((c) => ({ ...c })); }
+
+  async recordWebClient(id: string, atIso: string): Promise<void> {
+    const list = this.json.webClients ?? (this.json.webClients = []);
+    const existing = list.find((c) => c.id === id);
+    if (existing) existing.lastSeenAt = atIso;
+    else list.push({ id, lastSeenAt: atIso });
+    await this.save();
+  }
 
   /** Constant-time lookup: every device is compared, with no early exit. */
   deviceForToken(token: string): DeviceRecord | undefined {
@@ -160,8 +174,11 @@ export class HubConfig {
     return d.token;
   }
 
+  /** Also drops a display-only web client, so `forget_device` works on a browser id too. */
   async forgetDevice(deviceId: string): Promise<void> {
-    if (!this.device(deviceId)) throw new Error(`unknown device ${deviceId}`);
+    const web = (this.json.webClients ?? []).findIndex((c) => c.id === deviceId);
+    if (!this.device(deviceId) && web < 0) throw new Error(`unknown device ${deviceId}`);
+    if (web >= 0) this.json.webClients!.splice(web, 1);
     this.json.devices = this.json.devices.filter((d) => d.deviceId !== deviceId);
     await this.save();
   }
