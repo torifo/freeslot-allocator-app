@@ -142,6 +142,21 @@ export class FileStore {
     });
   }
 
+  /**
+   * Copies `data.json` to `data.json.<suffix>` under the lock, and answers the
+   * path it wrote — or null when there was nothing to copy. Unlike `.bak`,
+   * which every write overwrites, a snapshot is never touched again: it is for
+   * the one-off moments worth keeping a rewind for (a first pairing).
+   */
+  snapshot(suffix: string): Promise<string | null> {
+    return this.withLock(async () => {
+      if (!existsSync(this.filePath)) return null;
+      const target = `${this.filePath}.${suffix}`;
+      await copyFile(this.filePath, target);
+      return target;
+    });
+  }
+
   undoLastWrite(): Promise<boolean> {
     return this.withLock(async () => {
       const bak = `${this.filePath}.bak`;

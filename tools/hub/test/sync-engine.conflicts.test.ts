@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -106,17 +106,36 @@ describe('SyncEngine conflicts', () => {
     expect(result.document.taskMaster.tasks.map((t) => t.title)).toEqual(['hub edit']);
   });
 
-  it('caps open conflicts at 1000, dropping the oldest and warning', async () => {
+  it('caps open conflicts at 1000, tombstoning the oldest and warning', async () => {
     const many = Array.from({ length: MAX_OPEN_CONFLICTS + 5 }, (_, i) =>
       record(`cf-${String(i).padStart(5, '0')}`, { detectedAt: iso(now - (MAX_OPEN_CONFLICTS + 5 - i) * 1000) }));
     await store.update((d) => { d.conflicts = many; return d; });
     const result = await engine.sync('android-1', phoneDoc([]));
     const open = result.document.conflicts!.filter((c) => c.resolution == null && c.deletedAt == null);
     expect(open).toHaveLength(MAX_OPEN_CONFLICTS);
-    // The oldest five went, not the newest.
+    // The oldest five went, not the newest — and they went as tombstones, not
+    // as a hard delete: the phone still holds them and would union them back.
     expect(open.some((c) => c.id === 'cf-00000')).toBe(false);
+    const shed = result.document.conflicts!.find((c) => c.id === 'cf-00000')!;
+    expect(shed.deletedAt).toBe(iso(now));
     expect(result.warnings).toContain('conflict_overflow');
     expect(result.summary.warnings).toBe(result.warnings.length);
+  });
+
+  it('gives a capped record a new clock, so the peer\'s live copy cannot resurrect it', async () => {
+    const many = Array.from({ length: MAX_OPEN_CONFLICTS + 1 }, (_, i) =>
+      record(`cf-${String(i).padStart(5, '0')}`, { detectedAt: iso(now - (MAX_OPEN_CONFLICTS + 1 - i) * 1000) }));
+    await store.update((d) => { d.conflicts = many; return d; });
+    await engine.sync('android-1', phoneDoc([]));
+    const shed = (await store.read()).conflicts!.find((c) => c.id === 'cf-00000')!;
+    expect(shed.deletedAt).toBe(iso(now));
+    expect(shed.clock).not.toBe(many[0].clock);
+
+    // The phone syncs again still holding the live record it was never told
+    // about. A tombstone that kept its old clock would tie, lose the
+    // content-hash tie-break (it hashes to the empty string) and come back.
+    const again = await engine.sync('android-1', phoneDoc([], { conflicts: [many[0]] }));
+    expect(again.document.conflicts!.find((c) => c.id === 'cf-00000')!.deletedAt).toBe(iso(now));
   });
 
   it('keeps only the 200 most recent resolved conflicts', async () => {
@@ -127,8 +146,13 @@ describe('SyncEngine conflicts', () => {
       }));
     await store.update((d) => { d.conflicts = many; return d; });
     const result = await engine.sync('android-1', phoneDoc([]));
-    expect(result.document.conflicts).toHaveLength(MAX_RESOLVED_CONFLICTS);
-    expect(result.document.conflicts!.some((c) => c.id === 'cf-r00000')).toBe(false);
+    const live = result.document.conflicts!.filter((c) => c.deletedAt == null);
+    expect(live).toHaveLength(MAX_RESOLVED_CONFLICTS);
+    expect(live.some((c) => c.id === 'cf-r00000')).toBe(false);
+    // Shed the same way as an over-cap open record: tombstoned with a new
+    // clock, so `purge` — not the next merge — is what finally removes it.
+    const shed = result.document.conflicts!.find((c) => c.id === 'cf-r00000')!;
+    expect(shed.deletedAt).toBe(iso(now));
   });
 
   it('tombstones resolved conflicts older than 30 days and purges them on the existing cutoff', async () => {
@@ -136,14 +160,43 @@ describe('SyncEngine conflicts', () => {
       d.conflicts = [record('cf-old', { resolution: 'hub', resolvedAt: iso(now - RESOLVED_CONFLICT_TTL_MS - 1000) })];
       return d;
     });
+    const stale = (await store.read()).conflicts![0];
     const result = await engine.sync('android-1', phoneDoc([]));
     expect(result.document.conflicts![0].deletedAt).toBe(iso(now));
+    // A housekeeping tombstone is still an edit as far as the merge is
+    // concerned, so it has to outrank the copy the phone still holds.
+    expect(result.document.conflicts![0].clock).not.toBe(stale.clock);
     // The purge cutoff is the earliest device lastSyncAt minus the skew, so a
     // tombstone written far in the past is what actually gets dropped.
     await store.update((d) => { d.conflicts![0].deletedAt = iso(now - 30 * 24 * 60 * 60 * 1000); return d; });
     const purged = await engine.purge();
     expect(purged.purged).toBeGreaterThan(0);
     expect((await store.read()).conflicts).toBeUndefined();
+  });
+
+  it('keeps a first-pairing backup of the hub document, because LWW decides that merge alone', async () => {
+    // No lastSyncAt: detection is off, so nothing records what LWW overwrote.
+    const first = await engine.sync('android-1', phoneDoc([], { lastSyncAt: null }));
+    expect(first.summary.conflicts).toBe(0);
+    const backups = readdirSync(dir).filter((f) => f.startsWith('data.json.first-pair-'));
+    expect(backups).toHaveLength(1);
+    const saved = JSON.parse(readFileSync(join(dir, backups[0]), 'utf8')) as SyncDocumentJson;
+    expect(saved.taskMaster.tasks.map((t) => t.title)).toEqual(['hub edit']);
+
+    // Only the first one: an ordinary sync carries an agreement point.
+    await engine.sync('android-1', phoneDoc([]));
+    expect(readdirSync(dir).filter((f) => f.startsWith('data.json.first-pair-'))).toHaveLength(1);
+  });
+
+  it('writes no first-pairing backup when the hub has nothing to lose', async () => {
+    const empty = mkdtempSync(join(tmpdir(), 'hub-first-pair-'));
+    const cfg2 = await HubConfig.load(empty, () => now);
+    const store2 = new FileStore(empty, 'hub-0000');
+    const engine2 = new SyncEngine(store2, cfg2, new HlcClock('hub-0000', () => now), () => new Date(now));
+    await cfg2.redeemPairingCode((await cfg2.issuePairingCode()).code, 'android-1', 'Pixel');
+    await engine2.sync('android-1', phoneDoc([], { lastSyncAt: null }));
+    expect(readdirSync(empty).filter((f) => f.startsWith('data.json.first-pair-'))).toHaveLength(0);
+    rmSync(empty, { recursive: true, force: true });
   });
 
   it('never loses an id: the merged document holds every id either side had', async () => {
@@ -153,22 +206,42 @@ describe('SyncEngine conflicts', () => {
 });
 
 describe('capConflicts', () => {
+  let ticks = 0;
+  const nextClock = () => `${90 + (ticks += 1)}-0-hub-0000`;
+
   it('leaves a small set alone and reports nothing dropped', () => {
-    const out = capConflicts([record('cf-a')], iso(now));
+    const out = capConflicts([record('cf-a')], iso(now), nextClock);
     expect(out.dropped).toBe(0);
     expect(out.conflicts).toHaveLength(1);
+    expect(out.conflicts[0].clock).toBe('20-0-hub-0000');
   });
 
   it('is a pure function: the input array is untouched', () => {
     const input = [record('cf-a', { resolution: 'hub', resolvedAt: iso(now - RESOLVED_CONFLICT_TTL_MS - 1) })];
     const copy = JSON.parse(JSON.stringify(input));
-    capConflicts(input, iso(now));
+    capConflicts(input, iso(now), nextClock);
     expect(input).toEqual(copy);
   });
 
   it('leaves tombstoned records for purge rather than counting them against a cap', () => {
-    const out = capConflicts([record('cf-a', { deletedAt: iso(now - 1) })], iso(now));
+    const out = capConflicts([record('cf-a', { deletedAt: iso(now - 1) })], iso(now), nextClock);
     expect(out.conflicts).toHaveLength(1);
     expect(out.dropped).toBe(0);
+    // Already a tombstone: no second clock, or every sync would rewrite it.
+    expect(out.conflicts[0].clock).toBe('20-0-hub-0000');
+  });
+
+  it('never hard-deletes: an over-cap record leaves as a tombstone with a fresh clock', () => {
+    const many = Array.from({ length: MAX_OPEN_CONFLICTS + 2 }, (_, i) =>
+      record(`cf-${String(i).padStart(5, '0')}`, { detectedAt: iso(now - (MAX_OPEN_CONFLICTS + 2 - i) * 1000) }));
+    const out = capConflicts(many, iso(now), nextClock);
+    expect(out.dropped).toBe(2);
+    // Nothing disappears; the two oldest are simply tombstoned.
+    expect(out.conflicts).toHaveLength(many.length);
+    for (const id of ['cf-00000', 'cf-00001']) {
+      const shed = out.conflicts.find((c) => c.id === id)!;
+      expect(shed.deletedAt).toBe(iso(now));
+      expect(shed.clock).not.toBe('20-0-hub-0000');
+    }
   });
 });
