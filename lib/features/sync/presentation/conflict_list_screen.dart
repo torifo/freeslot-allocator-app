@@ -51,15 +51,12 @@ class _Body extends ConsumerWidget {
 
     if (open.isEmpty && resolved.isEmpty) {
       return const Center(
-        child: Padding(
-          padding: EdgeInsets.all(24),
-          child: Text('競合はありません'),
-        ),
+        child: Padding(padding: EdgeInsets.all(24), child: Text('競合はありません')),
       );
     }
 
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: _listPadding(context),
       children: <Widget>[
         Text('未解決 ${open.length} 件', style: theme.textTheme.titleMedium),
         const SizedBox(height: 4),
@@ -75,11 +72,17 @@ class _Body extends ConsumerWidget {
             runSpacing: 8,
             children: <Widget>[
               OutlinedButton(
-                onPressed: () => _resolveAll(context, ref, ConflictAdoption.hub, hubLabel),
+                onPressed: () =>
+                    _resolveAll(context, ref, ConflictAdoption.hub, hubLabel),
                 child: Text('すべて$hubLabelを採用'),
               ),
               OutlinedButton(
-                onPressed: () => _resolveAll(context, ref, ConflictAdoption.device, deviceLabel),
+                onPressed: () => _resolveAll(
+                  context,
+                  ref,
+                  ConflictAdoption.device,
+                  deviceLabel,
+                ),
                 child: Text('すべて$deviceLabelを採用'),
               ),
             ],
@@ -113,7 +116,8 @@ class _Body extends ConsumerWidget {
     final confirmed = await confirmAction(
       context,
       title: '$labelをすべて採用',
-      message: '未解決の競合をすべて$labelにします。'
+      message:
+          '未解決の競合をすべて$labelにします。'
           'いま入っている方は上書きされ、次の同期で PC にも反映されます。',
       confirmLabel: '採用する',
     );
@@ -126,7 +130,11 @@ class _Body extends ConsumerWidget {
 }
 
 class _ConflictTile extends StatelessWidget {
-  const _ConflictTile({required this.record, required this.hubMode, this.webId});
+  const _ConflictTile({
+    required this.record,
+    required this.hubMode,
+    this.webId,
+  });
 
   final ConflictRecord record;
   final bool hubMode;
@@ -176,5 +184,18 @@ Future<bool> _guard(BuildContext context, Future<void> Function() body) async {
 }
 
 /// Shared with the detail screen, which needs the same guard.
-Future<bool> runConflictAction(BuildContext context, Future<void> Function() body) =>
-    _guard(context, body);
+Future<bool> runConflictAction(
+  BuildContext context,
+  Future<void> Function() body,
+) => _guard(context, body);
+
+/// Edge-to-edge: the list's last card must stop above the system navigation
+/// bar, so the bottom inset is added to the ordinary page padding.
+EdgeInsets _listPadding(BuildContext context, [double inset = 16]) {
+  return EdgeInsets.fromLTRB(
+    inset,
+    inset,
+    inset,
+    inset + MediaQuery.paddingOf(context).bottom,
+  );
+}

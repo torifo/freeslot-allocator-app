@@ -47,7 +47,11 @@ class ConflictDetailScreen extends ConsumerWidget {
 /// Sync bookkeeping never belongs in the comparison the user reads; deletion is
 /// drawn as its own 削除済み column instead of as a `deletedAt` row.
 const Set<String> _skippedFields = <String>{
-  'id', 'clock', 'updatedAt', 'migrated', 'deletedAt',
+  'id',
+  'clock',
+  'updatedAt',
+  'migrated',
+  'deletedAt',
 };
 
 class _Body extends ConsumerWidget {
@@ -69,10 +73,10 @@ class _Body extends ConsumerWidget {
     final detected = DateTime.tryParse(record.detectedAt);
     final hub = _hubSide.snapshot;
     final device = _deviceSide.snapshot;
-    final fields = <String>{...hub.keys, ...device.keys}
-        .where((f) => !_skippedFields.contains(f))
-        .toList()
-      ..sort();
+    final fields = <String>{
+      ...hub.keys,
+      ...device.keys,
+    }.where((f) => !_skippedFields.contains(f)).toList()..sort();
     // Compared as JSON, not as the strings the table draws: `_display` maps
     // `null` and `false` onto text of their own, but it is a rendering rule and
     // a future addition to it must not be able to make two different values
@@ -84,7 +88,7 @@ class _Body extends ConsumerWidget {
     final oneSideDeleted = _hubSide.isDeleted || _deviceSide.isDeleted;
 
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: _listPadding(context),
       children: <Widget>[
         Text(conflictLabel(record), style: theme.textTheme.titleMedium),
         const SizedBox(height: 4),
@@ -109,7 +113,9 @@ class _Body extends ConsumerWidget {
           children: <Widget>[
             Expanded(child: Text(hubLabel, style: theme.textTheme.labelLarge)),
             const SizedBox(width: 12),
-            Expanded(child: Text(deviceLabel, style: theme.textTheme.labelLarge)),
+            Expanded(
+              child: Text(deviceLabel, style: theme.textTheme.labelLarge),
+            ),
           ],
         ),
         const Divider(),
@@ -119,9 +125,13 @@ class _Body extends ConsumerWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Expanded(child: _SideSummary(side: _hubSide, fields: fields)),
+              Expanded(
+                child: _SideSummary(side: _hubSide, fields: fields),
+              ),
               const SizedBox(width: 12),
-              Expanded(child: _SideSummary(side: _deviceSide, fields: fields)),
+              Expanded(
+                child: _SideSummary(side: _deviceSide, fields: fields),
+              ),
             ],
           )
         else ...<Widget>[
@@ -166,11 +176,13 @@ class _Body extends ConsumerWidget {
                 child: Text('$hubLabelを採用'),
               ),
               FilledButton.tonal(
-                onPressed: () => _resolve(context, ref, ConflictAdoption.device),
+                onPressed: () =>
+                    _resolve(context, ref, ConflictAdoption.device),
                 child: Text('$deviceLabelを採用'),
               ),
               TextButton(
-                onPressed: () => _resolve(context, ref, ConflictAdoption.current),
+                onPressed: () =>
+                    _resolve(context, ref, ConflictAdoption.current),
                 child: const Text('現状のまま'),
               ),
             ],
@@ -180,11 +192,17 @@ class _Body extends ConsumerWidget {
     );
   }
 
-  Future<void> _resolve(BuildContext context, WidgetRef ref, ConflictAdoption adopt) async {
+  Future<void> _resolve(
+    BuildContext context,
+    WidgetRef ref,
+    ConflictAdoption adopt,
+  ) async {
     final navigator = Navigator.of(context);
     final ok = await runConflictAction(
       context,
-      () => ref.read(conflictControllerProvider.notifier).resolve(record.id, adopt),
+      () => ref
+          .read(conflictControllerProvider.notifier)
+          .resolve(record.id, adopt),
     );
     // Only on success. A refusal — a purged entity, an unreadable snapshot —
     // leaves the record open, so leaving the screen would take the SnackBar
@@ -208,7 +226,9 @@ class _SideSummary extends StatelessWidget {
     if (side.isDeleted) {
       return Text(
         '削除済み',
-        style: theme.textTheme.titleMedium?.copyWith(color: theme.colorScheme.error),
+        style: theme.textTheme.titleMedium?.copyWith(
+          color: theme.colorScheme.error,
+        ),
       );
     }
     return Column(
@@ -246,7 +266,9 @@ class _FieldRow extends StatelessWidget {
     final theme = Theme.of(context);
     final style = highlighted
         ? theme.textTheme.bodyMedium
-        : theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+        : theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          );
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Column(
@@ -280,3 +302,14 @@ String _display(Object? value) => switch (value) {
   false => 'OFF',
   _ => '$value',
 };
+
+/// Edge-to-edge: the list's last card must stop above the system navigation
+/// bar, so the bottom inset is added to the ordinary page padding.
+EdgeInsets _listPadding(BuildContext context, [double inset = 16]) {
+  return EdgeInsets.fromLTRB(
+    inset,
+    inset,
+    inset,
+    inset + MediaQuery.paddingOf(context).bottom,
+  );
+}

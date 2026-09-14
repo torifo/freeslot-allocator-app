@@ -19,7 +19,8 @@ import '../../../services/sync/sync_service.dart';
 import '../../../services/sync/sync_settings.dart';
 import '../../daily_plan/application/daily_plan_controller.dart';
 import '../../task_master/application/task_master_controller.dart';
-import '../../task_master/data/task_master_repository.dart' show stateStoreProvider;
+import '../../task_master/data/task_master_repository.dart'
+    show stateStoreProvider;
 import '../application/conflict_controller.dart';
 import '../application/sync_in_flight.dart';
 import 'mcp_guide_section.dart';
@@ -192,7 +193,9 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
     if (mode == null || !mounted) return;
     await _runWithPanel(
       SyncKind.lan,
-      () => ref.read(syncServiceProvider).syncNow(mode: mode, progress: _progress),
+      () => ref
+          .read(syncServiceProvider)
+          .syncNow(mode: mode, progress: _progress),
     );
   }
 
@@ -205,7 +208,9 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
       message = error.message;
     }
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _importFromFile() async {
@@ -214,9 +219,9 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
       path = await pickImportFile();
     } on FormatException catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.message)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.message)));
       return;
     }
     if (path == null || !mounted) return;
@@ -230,7 +235,9 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
         _progress.fail('corrupt', error.message);
         return SyncFailed('corrupt', error.message);
       }
-      return ref.read(syncServiceProvider).applyReceived(json, progress: _progress);
+      return ref
+          .read(syncServiceProvider)
+          .applyReceived(json, progress: _progress);
     });
   }
 
@@ -258,7 +265,8 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
     final ok = await confirmAction(
       context,
       title: 'ペアリングを解除',
-      message: 'この端末に保存した接続情報を消します。'
+      message:
+          'この端末に保存した接続情報を消します。'
           'もう一度同期するには PC の QR を読み直してください。',
       confirmLabel: '解除',
     );
@@ -281,8 +289,12 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
       return Scaffold(
         appBar: AppBar(title: const Text('PC と同期')),
         body: ListView(
-          padding: const EdgeInsets.all(16),
-          children: <Widget>[_hubCard(hub), const SizedBox(height: 16), _conflictCard()],
+          padding: _listPadding(context),
+          children: <Widget>[
+            _hubCard(hub),
+            const SizedBox(height: 16),
+            _conflictCard(),
+          ],
         ),
       );
     }
@@ -291,7 +303,7 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
       body: settings == null
           ? const Center(child: CircularProgressIndicator())
           : ListView(
-              padding: const EdgeInsets.all(16),
+              padding: _listPadding(context),
               children: <Widget>[
                 _statusCard(settings),
                 if (!settings.isPaired && (settings.host ?? '').isNotEmpty) ...[
@@ -321,7 +333,6 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
     );
   }
 
-
   /// The way into the conflict list, with the open count as a badge.
   ///
   /// Always shown — in hub mode too, where the LAN cards are hidden: a browser
@@ -348,7 +359,10 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
         ),
         trailing: count == null || count == 0
             ? const Icon(Icons.chevron_right)
-            : Badge(label: Text('$count'), child: const Icon(Icons.chevron_right)),
+            : Badge(
+                label: Text('$count'),
+                child: const Icon(Icons.chevron_right),
+              ),
         onTap: () => context.push('/sync/conflicts'),
       ),
     );
@@ -381,7 +395,10 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
             ),
             const SizedBox(height: 12),
             Text('PC 側の識別子', style: theme.textTheme.labelLarge),
-            SelectableText(hub.hubDeviceId, style: const TextStyle(fontFamily: 'Menlo', fontSize: 12)),
+            SelectableText(
+              hub.hubDeviceId,
+              style: const TextStyle(fontFamily: 'Menlo', fontSize: 12),
+            ),
             if (hubStore != null) ...<Widget>[
               const SizedBox(height: 12),
               Text('最終保存', style: theme.textTheme.labelLarge),
@@ -430,7 +447,10 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
             padding: const EdgeInsets.only(top: 8),
             child: Text(
               warning,
-              style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
+              style: TextStyle(
+                fontSize: 12,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ),
           );
         }
@@ -455,11 +475,13 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
                   runSpacing: 4,
                   children: <Widget>[
                     OutlinedButton(
-                      onPressed: () => _replaceHubData(store, HubReplace.takeHub),
+                      onPressed: () =>
+                          _replaceHubData(store, HubReplace.takeHub),
                       child: const Text('PC のデータで置き換える'),
                     ),
                     OutlinedButton(
-                      onPressed: () => _replaceHubData(store, HubReplace.takeWeb),
+                      onPressed: () =>
+                          _replaceHubData(store, HubReplace.takeWeb),
                       child: const Text('ブラウザのデータで置き換える'),
                     ),
                   ],
@@ -515,7 +537,9 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
             subtitle: Text(
               s.lastSyncAt == null
                   ? 'まだ同期していません'
-                  : DateFormat('yyyy/MM/dd HH:mm').format(s.lastSyncAt!.toLocal()),
+                  : DateFormat(
+                      'yyyy/MM/dd HH:mm',
+                    ).format(s.lastSyncAt!.toLocal()),
             ),
           ),
         ListTile(
@@ -731,9 +755,9 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
         newPort > 65535) {
       return;
     }
-    await ref.read(syncSettingsStoreProvider).save(
-      s.copyWith(host: newHost, port: newPort),
-    );
+    await ref
+        .read(syncSettingsStoreProvider)
+        .save(s.copyWith(host: newHost, port: newPort));
     await _reload();
     if (!mounted) return;
     // Saving used to leave the dialog and say nothing at all (C-2).
@@ -784,4 +808,15 @@ String? hostValidationError(String raw) {
     return _ipv4.hasMatch(bare) ? null : message;
   }
   return _hostname.hasMatch(bare) ? null : message;
+}
+
+/// Edge-to-edge: the list's last card must stop above the system navigation
+/// bar, so the bottom inset is added to the ordinary page padding.
+EdgeInsets _listPadding(BuildContext context, [double inset = 16]) {
+  return EdgeInsets.fromLTRB(
+    inset,
+    inset,
+    inset,
+    inset + MediaQuery.paddingOf(context).bottom,
+  );
 }

@@ -232,7 +232,7 @@ class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen>
       // A list rather than a Column: the frame grid grows with the number of
       // frames the hub chose, and 200+ of them must scroll rather than overflow.
       body: ListView(
-        padding: const EdgeInsets.all(12),
+        padding: _listPadding(context, 12),
         children: <Widget>[
           Text(
             scanner.isAvailable
@@ -240,10 +240,10 @@ class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen>
                 // the hub's own guide (`McpGuideSection`), not to the screen a
                 // phone user is standing in front of (C-1).
                 ? 'PC 側で QR 画面を開き、この画面のカメラを向け続けてください。'
-                  '（PC の Claude Code をお使いの場合は「PC と同期」の案内を参照）\n'
-                  'コマは繰り返し表示されるので、順番は気にしなくて大丈夫です。'
+                      '（PC の Claude Code をお使いの場合は「PC と同期」の案内を参照）\n'
+                      'コマは繰り返し表示されるので、順番は気にしなくて大丈夫です。'
                 : 'この端末にはカメラがないため QR では受け取れません。'
-                  '$_fallbackActionか LAN 同期を使ってください。',
+                      '$_fallbackActionか LAN 同期を使ってください。',
           ),
           // Rendered while the camera is failing too: the explanation of what
           // went wrong belongs where the preview would have been, next to the
@@ -254,8 +254,10 @@ class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen>
               // A fixed slice of the screen rather than a square: the panel
               // underneath carries the frame counter the user is watching, and
               // a preview that filled the width would push it off the bottom.
-              height: (MediaQuery.sizeOf(context).height * 0.45)
-                  .clamp(160.0, 420.0),
+              height: (MediaQuery.sizeOf(context).height * 0.45).clamp(
+                160.0,
+                420.0,
+              ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(8),
                 child: KeyedSubtree(
@@ -329,4 +331,15 @@ class _QrReceiveScreenState extends ConsumerState<QrReceiveScreen>
       ),
     );
   }
+}
+
+/// Edge-to-edge: the list's last card must stop above the system navigation
+/// bar, so the bottom inset is added to the ordinary page padding.
+EdgeInsets _listPadding(BuildContext context, [double inset = 16]) {
+  return EdgeInsets.fromLTRB(
+    inset,
+    inset,
+    inset,
+    inset + MediaQuery.paddingOf(context).bottom,
+  );
 }
