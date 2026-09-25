@@ -11,6 +11,8 @@ import '../../daily_plan/application/daily_plan_logic.dart';
 import '../../daily_plan/domain/daily_plan_models.dart';
 import '../../task_master/application/task_master_controller.dart';
 import '../../task_master/domain/task_models.dart';
+import '../application/week_overview.dart';
+import 'week_mini_card.dart';
 
 // ── Root widget ───────────────────────────────────────────────
 class HomeScreen extends ConsumerWidget {
@@ -125,7 +127,7 @@ class _WideHome extends StatelessWidget {
         child: Row(
           children: [
             // ── Sidebar ──────────────────────────────────────
-            _Sidebar(today: today),
+            _Sidebar(today: today, planData: planData),
 
             // ── Main content ─────────────────────────────────
             Expanded(
@@ -286,8 +288,9 @@ class _WideHeader extends StatelessWidget {
 /// of the same destinations, one of them only ever right on this screen, was
 /// the bug (C-1).
 class _Sidebar extends StatelessWidget {
-  const _Sidebar({required this.today});
+  const _Sidebar({required this.today, required this.planData});
   final DateTime today;
+  final DailyPlanStateData planData;
 
   @override
   Widget build(BuildContext context) {
@@ -368,87 +371,11 @@ class _Sidebar extends StatelessWidget {
             ),
           ),
           const Spacer(),
-          // Week mini card
-          Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: AppColors.deep,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'THIS WEEK',
-                  style: TextStyle(
-                    fontSize: 9,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 2.0,
-                    color: AppColors.clay,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  '今週の計画を確認する',
-                  style: japaneseSerifTextStyle(
-                    fontSize: 12,
-                    color: AppColors.onDeep,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                SizedBox(
-                  // Tall enough for the highest bar (30) plus its day label:
-                  // 40 clipped the row by 7 px wherever the wide layout was
-                  // actually rendered.
-                  height: 48,
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: List.generate(7, (i) {
-                      // The mini week card is Monday-first, so index 0 is
-                      // Monday and DateTime.monday == 1.
-                      final isToday = i == today.weekday - 1;
-                      final height = 10.0 + (i % 3) * 10;
-                      return Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 1.5),
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.end,
-                            children: [
-                              AnimatedContainer(
-                                duration: const Duration(milliseconds: 300),
-                                height: height,
-                                decoration: BoxDecoration(
-                                  color: isToday
-                                      ? AppColors.clay
-                                      : AppColors.ink2,
-                                  borderRadius: const BorderRadius.only(
-                                    topLeft: Radius.circular(3),
-                                    topRight: Radius.circular(3),
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                ['月', '火', '水', '木', '金', '土', '日'][i],
-                                style: TextStyle(
-                                  fontSize: 9,
-                                  color: isToday
-                                      ? AppColors.clay
-                                      : AppColors.ink3,
-                                  fontWeight: isToday
-                                      ? FontWeight.w600
-                                      : FontWeight.w400,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    }),
-                  ),
-                ),
-              ],
-            ),
+          // Week mini card: real minutes per day, today highlighted.
+          WeekMiniCard(
+            today: today,
+            days: buildWeekOverview(planData, today),
+            onTap: () => context.go('/weekly-report'),
           ),
         ],
       ),
@@ -787,12 +714,7 @@ class _QuickActions extends StatelessWidget {
       sub: '自由時間枠の追加・編集',
       route: '/daily-plan',
     ),
-    _Action(
-      glyph: '任',
-      label: 'タスク一覧を開く',
-      sub: 'タスクを登録・編集する',
-      route: '/tasks',
-    ),
+    _Action(glyph: '任', label: 'タスク一覧を開く', sub: 'タスクを登録・編集する', route: '/tasks'),
     _Action(
       glyph: '報',
       label: '週次レポートを見る',
