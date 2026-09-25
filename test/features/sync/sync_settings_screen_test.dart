@@ -264,7 +264,9 @@ void main() {
     expect(find.text('直前の同期前に戻す'), findsNothing);
   });
 
-  testWidgets('paired shows the host, the last sync and the sync button', (tester) async {
+  testWidgets('paired shows the host, the last sync and the sync button', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     await SyncSettingsStore().save(_paired());
     final container = await testContainer();
@@ -301,7 +303,9 @@ void main() {
     expect((await SyncSettingsStore().load()).isPaired, isFalse);
   });
 
-  testWidgets('a running sync opens the panel and disables 今すぐ同期', (tester) async {
+  testWidgets('a running sync opens the panel and disables 今すぐ同期', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     await SyncSettingsStore().save(_paired());
     final fake = _FakeSyncService();
@@ -322,10 +326,19 @@ void main() {
     expect(find.text('キャンセル'), findsOneWidget);
     // The tile behind the sheet is greyed out rather than silently answering
     // `busy` when it is tapped again.
-    expect(tester.widget<ListTile>(find.widgetWithText(ListTile, '今すぐ同期')).enabled, isFalse);
+    expect(
+      tester.widget<ListTile>(find.widgetWithText(ListTile, '今すぐ同期')).enabled,
+      isFalse,
+    );
 
     fake.lastProgress!.finish(
-      const SyncSummary(added: 1, updated: 2, deleted: 3, warnings: 0, removed: 4),
+      const SyncSummary(
+        added: 1,
+        updated: 2,
+        deleted: 3,
+        warnings: 0,
+        removed: 4,
+      ),
     );
     fake.pending.complete(
       const SyncApplied(
@@ -335,10 +348,16 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('追加 1 / 更新 2 / 削除 3 / 消去 4 / 警告 0 / 競合 0'), findsOneWidget);
+    expect(
+      find.text('追加 1 / 更新 2 / 削除 3 / 消去 4 / 警告 0 / 競合 0'),
+      findsOneWidget,
+    );
     await tester.tap(find.text('閉じる'));
     await tester.pumpAndSettle();
-    expect(tester.widget<ListTile>(find.widgetWithText(ListTile, '今すぐ同期')).enabled, isTrue);
+    expect(
+      tester.widget<ListTile>(find.widgetWithText(ListTile, '今すぐ同期')).enabled,
+      isTrue,
+    );
   });
 
   testWidgets('a stored backup offers 直前の同期前に戻す', (tester) async {
@@ -368,7 +387,9 @@ void main() {
     expect(find.text('直前の同期前に戻す'), findsNothing);
   });
 
-  testWidgets('leaving the screen mid-sync still clears the in-flight flag', (tester) async {
+  testWidgets('leaving the screen mid-sync still clears the in-flight flag', (
+    tester,
+  ) async {
     // `app.dart` holds its foreground reload back while a sync is in flight. If
     // the flag is never lowered — because the screen was popped before the sync
     // finished — the app stops reloading for the rest of its life.
@@ -412,7 +433,9 @@ void main() {
     expect(container.read(syncInFlightProvider), isFalse);
   });
 
-  testWidgets('the sheet is never on 待機中 with a 閉じる that abandons the run', (tester) async {
+  testWidgets('the sheet is never on 待機中 with a 閉じる that abandons the run', (
+    tester,
+  ) async {
     // The fake only starts the progress after a microtask, like the real
     // client, which reaches the network first.
     SharedPreferences.setMockInitialValues(<String, Object>{});
@@ -439,47 +462,55 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('purged_before asks, and the answer re-runs the sync in that mode', (tester) async {
-    SharedPreferences.setMockInitialValues(<String, Object>{});
-    await SyncSettingsStore().save(_paired());
-    final fake = _FakeSyncService(
-      outcomes: <SyncOutcome>[
-        SyncNeedsReplace(syncErrorMessage('purged_before')),
-        const SyncApplied(
-          SyncSummary(added: 5, updated: 0, deleted: 0, warnings: 0),
-          <String>[],
-        ),
-      ],
-    );
-    final container = await testContainer(
-      overrides: <Override>[syncServiceProvider.overrideWithValue(fake)],
-    );
-    await _pumpScreen(tester, container);
+  testWidgets(
+    'purged_before asks, and the answer re-runs the sync in that mode',
+    (tester) async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      await SyncSettingsStore().save(_paired());
+      final fake = _FakeSyncService(
+        outcomes: <SyncOutcome>[
+          SyncNeedsReplace(syncErrorMessage('purged_before')),
+          const SyncApplied(
+            SyncSummary(added: 5, updated: 0, deleted: 0, warnings: 0),
+            <String>[],
+          ),
+        ],
+      );
+      final container = await testContainer(
+        overrides: <Override>[syncServiceProvider.overrideWithValue(fake)],
+      );
+      await _pumpScreen(tester, container);
 
-    await tester.tap(find.text('今すぐ同期'));
-    // Explicit frames while the panel's indeterminate bar is still sweeping.
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    await tester.pumpAndSettle();
+      await tester.tap(find.text('今すぐ同期'));
+      // Explicit frames while the panel's indeterminate bar is still sweeping.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pumpAndSettle();
 
-    // The sheet steps aside for the question: this outcome is not a result.
-    expect(find.byType(SyncReplaceDialog), findsOneWidget);
-    expect(find.textContaining('どちらのデータを正にする'), findsOneWidget);
+      // The sheet steps aside for the question: this outcome is not a result.
+      expect(find.byType(SyncReplaceDialog), findsOneWidget);
+      expect(find.textContaining('どちらのデータを正にする'), findsOneWidget);
 
-    await tester.tap(find.text('PC の状態で置き換える'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    await tester.pumpAndSettle();
+      await tester.tap(find.text('PC の状態で置き換える'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pumpAndSettle();
 
-    expect(fake.modes, <SyncMode>[SyncMode.merge, SyncMode.takeHub]);
-    expect(find.text('追加 5 / 更新 0 / 削除 0 / 消去 0 / 警告 0 / 競合 0'), findsOneWidget);
-    expect(container.read(syncInFlightProvider), isFalse);
+      expect(fake.modes, <SyncMode>[SyncMode.merge, SyncMode.takeHub]);
+      expect(
+        find.text('追加 5 / 更新 0 / 削除 0 / 消去 0 / 警告 0 / 競合 0'),
+        findsOneWidget,
+      );
+      expect(container.read(syncInFlightProvider), isFalse);
 
-    await tester.tap(find.text('閉じる'));
-    await tester.pumpAndSettle();
-  });
+      await tester.tap(find.text('閉じる'));
+      await tester.pumpAndSettle();
+    },
+  );
 
-  testWidgets('an error nothing mapped still lands on a Japanese failure', (tester) async {
+  testWidgets('an error nothing mapped still lands on a Japanese failure', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     await SyncSettingsStore().save(_paired());
     final fake = _ThrowingSyncService();
@@ -496,7 +527,9 @@ void main() {
     expect(container.read(syncInFlightProvider), isFalse);
   });
 
-  testWidgets('接続先を手入力 refuses an empty host and an impossible port', (tester) async {
+  testWidgets('接続先を手入力 refuses an empty host and an impossible port', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     await SyncSettingsStore().save(_paired());
     final container = await testContainer();
@@ -554,7 +587,9 @@ void main() {
     expect(find.text('接続先を保存しました'), findsOneWidget);
   });
 
-  testWidgets('接続先を手入力 opens empty on a phone that has never paired', (tester) async {
+  testWidgets('接続先を手入力 opens empty on a phone that has never paired', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     final container = await testContainer();
     await _pumpScreen(tester, container);
@@ -571,21 +606,22 @@ void main() {
     expect(port.controller!.text, '47820');
   });
 
-  testWidgets('a host without a pairing says so and offers the way out', (tester) async {
+  testWidgets('a host without a pairing says so and offers the way out', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     await SyncSettingsStore().save(const SyncSettings(host: '192.168.1.50'));
     final container = await testContainer();
     await _pumpScreen(tester, container);
 
     expect(find.text('未ペアリング'), findsOneWidget);
-    expect(
-      find.textContaining('接続先は設定済みですが、まだペアリングしていません。'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('接続先は設定済みですが、まだペアリングしていません。'), findsOneWidget);
     expect(find.text('ペアリングへ進む'), findsOneWidget);
   });
 
-  testWidgets('the sync screen names no hub tool outside the macOS guide', (tester) async {
+  testWidgets('the sync screen names no hub tool outside the macOS guide', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     final container = await testContainer();
     await _pumpScreen(tester, container);
@@ -594,7 +630,9 @@ void main() {
     expect(find.text('QR が読めないとき（PC の IP を直接入力）'), findsOneWidget);
   });
 
-  testWidgets('ファイルから取り込む reports a picker refusal without opening a panel', (tester) async {
+  testWidgets('ファイルから取り込む reports a picker refusal without opening a panel', (
+    tester,
+  ) async {
     // Only the picker is exercised here: reading the chosen file is real
     // `dart:io`, which never completes inside the test binding's faked async,
     // so `readImportJson` itself is covered in `file_exporter_test.dart`.
@@ -628,7 +666,9 @@ void main() {
     expect(applied.received, 0);
   }, skip: !Platform.isMacOS);
 
-  testWidgets('the public web build gets the Claude Code (MCP) guide', (tester) async {
+  testWidgets('the public web build gets the Claude Code (MCP) guide', (
+    tester,
+  ) async {
     // `kIsWeb` is a compile-time constant the VM tests can never flip, so the
     // screen takes the answer as a parameter — this is the web build's list.
     SharedPreferences.setMockInitialValues(<String, Object>{});
@@ -645,14 +685,16 @@ void main() {
     );
     expect(title, findsOneWidget);
     expect(
-      find.textContaining('git clone https://github.com/torifo/freeslot-allocator-app.git'),
+      find.textContaining(
+        'git clone https://github.com/torifo/freeslot-allocator-app.git',
+      ),
       findsOneWidget,
     );
     // The public build is not the hub's browser build, and says so.
-    expect(find.textContaining('ハブが配信するブラウザ版を使ってください'), findsOneWidget);
+    expect(find.textContaining('HUB が配信するブラウザ版を使ってください'), findsOneWidget);
   });
 
-  testWidgets('the web guide spells out all four steps', (tester) async {
+  testWidgets('the web guide is a single agent prompt plus manual notes', (tester) async {
     await tester.pumpWidget(
       const MaterialApp(
         home: Scaffold(
@@ -662,12 +704,18 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('1. リポジトリを取得してハブをビルドする'), findsOneWidget);
-    expect(find.text('2. Claude Code でリポジトリを開く'), findsOneWidget);
-    expect(find.text('3. ハブが配信するブラウザ版を開く'), findsOneWidget);
-    expect(find.text('4. スマホと同期する'), findsOneWidget);
+    // One agent prompt, one copy button: no per-step copies to juggle.
+    expect(find.text('エージェント用プロンプトをコピー'), findsOneWidget);
+    expect(find.byIcon(Icons.copy), findsOneWidget);
+    expect(find.textContaining('npm run build:web'), findsWidgets);
+    expect(find.textContaining('sync_status'), findsWidgets);
+    expect(find.textContaining('lan.webApp.url'), findsWidgets);
+    expect(find.text('手動でやる場合'), findsOneWidget);
     // No `dart:io` on the web: the path is prose, not a probed directory.
-    expect(find.textContaining('~/Library/Application Support/FRELOCATOR/data.json'), findsOneWidget);
+    expect(
+      find.textContaining('~/Library/Application Support/FRELOCATOR/data.json'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('macOS gets the Claude Code (MCP) guide', (tester) async {

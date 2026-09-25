@@ -76,29 +76,19 @@ String _normalizeFingerprint(String value) =>
 /// The hub's own `message` is English and meant for logs, so every code the
 /// hub can return gets a sentence that says what the person should do next.
 String syncErrorMessage(String code, {String? fallback}) => switch (code) {
-  'not_paired' =>
-    'PC とペアリングされていません。設定の「PC とペアリング」から QR を読み取ってください。',
-  'unauthorized' =>
-    'PC がこの端末を認識できませんでした。もう一度ペアリングしてください。',
+  'not_paired' => 'PC とペアリングされていません。設定の「PC とペアリング」から QR を読み取ってください。',
+  'unauthorized' => 'PC がこの端末を認識できませんでした。もう一度ペアリングしてください。',
   'pairing_failed' => 'ペアリングコードが違います。PC の画面の QR を読み直してください。',
-  'pairing_code_expired' =>
-    'ペアリングコードの有効期限が切れています。PC で新しい QR を表示してください。',
-  'too_many_attempts' =>
-    '失敗が続いたためペアリングが止められました。PC で新しい QR を表示してください。',
-  'purged_before' =>
-    'PC 側で古い削除履歴が掃除されています。どちらのデータを正にするか選んでください。',
+  'pairing_code_expired' => 'ペアリングコードの有効期限が切れています。PC で新しい QR を表示してください。',
+  'too_many_attempts' => '失敗が続いたためペアリングが止められました。PC で新しい QR を表示してください。',
+  'purged_before' => 'PC 側で古い削除履歴が掃除されています。どちらのデータを正にするか選んでください。',
   'upgrade_required' => 'アプリが古いため同期できません。アプリを更新してください。',
-  'unsupported_version' =>
-    'PC 側のハブが古いため同期できません。PC のハブを更新してください。',
-  'invalid_document' =>
-    'この端末のデータを PC が読めませんでした。アプリを更新しても直らない場合はサポートへご連絡ください。',
-  'bad_timestamp' =>
-    '前回の同期時刻の記録が読めませんでした。もう一度同期すると記録し直されます。',
-  'payload_too_large' =>
-    'データが大きすぎて送れませんでした。不要なタスクを整理するか、QR かファイルで渡してください。',
+  'unsupported_version' => 'PC 側の HUB が古いため同期できません。PC の HUB を更新してください。',
+  'invalid_document' => 'この端末のデータを PC が読めませんでした。アプリを更新しても直らない場合はサポートへご連絡ください。',
+  'bad_timestamp' => '前回の同期時刻の記録が読めませんでした。もう一度同期すると記録し直されます。',
+  'payload_too_large' => 'データが大きすぎて送れませんでした。不要なタスクを整理するか、QR かファイルで渡してください。',
   'certificate' => 'PC の証明書が変わっています。もう一度ペアリングしてください。',
-  'unreachable' =>
-    'PC に接続できません。同じ Wi-Fi に接続されているか確認するか、QR で連携してください。',
+  'unreachable' => 'PC に接続できません。同じ Wi-Fi に接続されているか確認するか、QR で連携してください。',
   'timeout' => 'PC からの応答がありません。しばらくしてからもう一度お試しください。',
   'cancelled' => '同期を中止しました。',
   'corrupt' => 'PC から受け取ったデータを読めませんでした。',
@@ -106,8 +96,8 @@ String syncErrorMessage(String code, {String? fallback}) => switch (code) {
   'busy' => '同期の実行中です。終わるまでお待ちください。',
   'bad_mode' => '同期の種類を PC が理解できませんでした。アプリを更新してください。',
   'bad_request' => 'PC がこの要求を受け付けませんでした。アプリを更新してください。',
-  'not_found' => 'PC のハブにこの機能がありません。PC のハブを更新してください。',
-  'internal' => 'PC 側でエラーが起きました。PC のハブを再起動してからお試しください。',
+  'not_found' => 'PC の HUB にこの機能がありません。PC の HUB を更新してください。',
+  'internal' => 'PC 側でエラーが起きました。PC の HUB を再起動してからお試しください。',
   // Not a hub code: the UI's catch-all for anything nothing else mapped. A
   // plain Japanese sentence beats a Dart exception's `toString` on screen.
   'unknown' => '同期に失敗しました。もう一度お試しください。',

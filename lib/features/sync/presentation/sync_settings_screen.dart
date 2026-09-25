@@ -382,7 +382,7 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
             Text('この PC のデータを直接編集しています', style: theme.textTheme.titleMedium),
             const SizedBox(height: 8),
             const Text(
-              'この画面は PC 側のハブが配信しているブラウザ版です。'
+              'この画面は PC 側の HUB が配信しているブラウザ版です。'
               '編集は PC のデータファイルにそのまま書き込まれ、ブラウザ側には控えを残しません。'
               '保存前にタブを閉じたりリロードしたりすると、その編集は失われます。',
               style: TextStyle(fontSize: 12),
@@ -421,7 +421,7 @@ class _SyncSettingsScreenState extends ConsumerState<SyncSettingsScreen> {
             const SizedBox(height: 12),
             const Text(
               'PC の Claude Code（MCP）からの編集は数秒でこの画面に反映されます。'
-              'スマホとの同期は今までどおり PC 側のハブが引き受けます。',
+              'スマホとの同期は今までどおり PC 側の HUB が引き受けます。',
               style: TextStyle(fontSize: 12),
             ),
           ],

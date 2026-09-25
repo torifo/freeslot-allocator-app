@@ -32,11 +32,13 @@ class McpGuideSection extends StatelessWidget {
           children: <Widget>[
             Text('Claude Code（MCP）と連携', style: theme.textTheme.titleMedium),
             const SizedBox(height: 8),
-            const Text('この Mac では、Claude Code から FRELOCATOR のタスクや計画を直接編集できます。手順:'),
+            const Text(
+              'この Mac では、Claude Code から FRELOCATOR のタスクや計画を直接編集できます。手順:',
+            ),
             const SizedBox(height: 12),
             const _Step(
               no: '1',
-              title: 'リポジトリでハブをビルドする',
+              title: 'リポジトリで HUB をビルドする',
               command: 'cd tools/hub && npm install && npm run build',
             ),
             const _Step(
@@ -57,25 +59,25 @@ class McpGuideSection extends StatelessWidget {
               style: const TextStyle(fontFamily: 'Menlo', fontSize: 12),
             ),
             const Text(
-              'アプリとハブは同じファイルをロック付きで共有します。1 世代前は data.json.bak に残ります。',
+              'アプリと HUB は同じファイルをロック付きで共有します。1 世代前は data.json.bak に残ります。',
               style: TextStyle(fontSize: 12),
             ),
             const SizedBox(height: 12),
             Text('ペアリングと QR のページ', style: theme.textTheme.labelLarge),
             const Text(
-              'ハブが動いている間だけ、スマホとの LAN 同期を受け付けます。'
+              'HUB が動いている間だけ、スマホとの LAN 同期を受け付けます。'
               'ペアリング用と QR 送信用のページの URL は sync_status の lan.pairingPage / lan.qrPage に出ます。'
-              'URL にはハブを起動するたびに変わる秘密の文字列が入るので、毎回 sync_status から取り直してください。'
+              'URL には HUB を起動するたびに変わる秘密の文字列が入るので、毎回 sync_status から取り直してください。'
               'どちらのページもこの Mac からしか開けません。',
               style: TextStyle(fontSize: 12),
             ),
             const SizedBox(height: 12),
             Text('ブラウザ版をこの Mac で開く', style: theme.textTheme.labelLarge),
             const Text(
-              'ハブは FRELOCATOR のブラウザ版も配信できます。'
+              'HUB は FRELOCATOR のブラウザ版も配信できます。'
               'tools/hub で npm run build:web を一度実行してから、'
               'sync_status の lan.webApp.url をこの Mac のブラウザで開いてください。'
-              'この URL にもハブを起動するたびに変わる秘密の文字列が入ります。',
+              'この URL にも HUB を起動するたびに変わる秘密の文字列が入ります。',
               style: TextStyle(fontSize: 12),
             ),
             const Text(
@@ -99,10 +101,33 @@ class McpGuideSection extends StatelessWidget {
 class WebMcpGuideSection extends StatelessWidget {
   const WebMcpGuideSection({super.key});
 
-  static const String _clone =
-      'git clone https://github.com/torifo/freeslot-allocator-app.git && '
-      'cd freeslot-allocator-app/tools/hub && '
-      'npm install && npm run build && npm run build:web';
+  static const String repoUrl =
+      'https://github.com/torifo/freeslot-allocator-app.git';
+
+  /// One self-contained instruction block for a coding agent (Claude Code,
+  /// Codex, etc.). Pasting it is the whole setup: the agent clones, builds,
+  /// verifies the MCP server, and opens the hub-served web app.
+  static const String agentPrompt =
+      'FRELOCATOR の HUB（Claude Code 向け MCP サーバー）をこの PC にセットアップしてください。\n'
+      '\n'
+      '1. リポジトリを取得する: git clone $repoUrl '
+      '（既にあれば git pull）\n'
+      '2. HUB をビルドする: cd freeslot-allocator-app/tools/hub && '
+      'npm install && npm run build && npm run build:web\n'
+      '3. リポジトリ直下の .mcp.json に frelocator-hub'
+      '（command: node, args: tools/hub/dist/index.js）が同梱されている。'
+      'リポジトリのルートを作業ディレクトリとして開き直し、'
+      'frelocator-hub の MCP ツールが使えることを sync_status を呼んで確認する。\n'
+      '4. sync_status の結果の lan.webApp.url を、この PC の既定ブラウザで開く'
+      '（macOS なら open <url>）。URL には HUB 起動ごとに変わる秘密の文字列が入るので、'
+      '毎回 sync_status から取り直す。\n'
+      '5. スマホと同期する場合は lan.pairingPage の URL を開いて QR を表示し、'
+      'スマホの「PC と同期 > PC とペアリング」で読み取るよう案内する。'
+      '競合があれば同期後にスマホの「競合」から採用側を選べる。\n'
+      '\n'
+      '完了したら、開いた URL と、データファイルの場所'
+      '（macOS: ~/Library/Application Support/FRELOCATOR/data.json。'
+      'アプリと HUB がロック付きで共有する）を報告してください。';
 
   @override
   Widget build(BuildContext context) {
@@ -118,44 +143,54 @@ class WebMcpGuideSection extends StatelessWidget {
             const Text(
               'エンジニア向け: PC 上で Claude Code から FRELOCATOR のタスクや計画を編集し、'
               'スマホに同期できます。'
-              'このブラウザ版（公開 Web）はハブと同期しません。'
-              'ハブが配信するブラウザ版を使ってください。',
-            ),
-            const SizedBox(height: 12),
-            const _Step(
-              no: '1',
-              title: 'リポジトリを取得してハブをビルドする',
-              command: _clone,
-            ),
-            const _Step(
-              no: '2',
-              title: 'Claude Code でリポジトリを開く',
-              command: McpGuideSection._mcpJson,
-            ),
-            const Text(
-              'リポジトリ直下の .mcp.json（同梱）により frelocator-hub が登録され、'
-              'sync_status などのツールが使えます。',
-              style: TextStyle(fontSize: 12),
-            ),
-            const SizedBox(height: 8),
-            const _Step(no: '3', title: 'ハブが配信するブラウザ版を開く'),
-            const Text(
-              'Claude Code で sync_status を実行し、lan.webApp.url をその PC のブラウザで開きます。'
-              'URL にはハブ起動ごとに変わる秘密の文字列が入ります。'
-              'ペアリング用ページは lan.pairingPage、QR 送信は lan.qrPage です。',
-              style: TextStyle(fontSize: 12),
-            ),
-            const SizedBox(height: 8),
-            const _Step(no: '4', title: 'スマホと同期する'),
-            const Text(
-              'スマホ側の「PC と同期」でペアリングすると LAN 経由で同期します。'
-              '競合があれば同期後に「競合」から採用側を選べます。',
-              style: TextStyle(fontSize: 12),
+              'このブラウザ版（公開 Web）は HUB と同期しません。'
+              'HUB が配信するブラウザ版を使ってください。',
             ),
             const SizedBox(height: 12),
             const Text(
-              'データは PC の ~/Library/Application Support/FRELOCATOR/data.json（macOS）に'
-              '保存され、アプリとハブがロック付きで共有します。',
+              '下のプロンプトをコーディングエージェント（Claude Code など）に貼り付けると、'
+              '取得・ビルド・MCP の確認・ブラウザ版を開くところまで一度に進みます。',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Padding(
+                padding: EdgeInsets.all(12),
+                child: SelectableText(
+                  agentPrompt,
+                  style: TextStyle(fontFamily: 'Menlo', fontSize: 12),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton.icon(
+                icon: const Icon(Icons.copy, size: 18),
+                label: const Text('エージェント用プロンプトをコピー'),
+                onPressed: () async {
+                  await Clipboard.setData(
+                    const ClipboardData(text: agentPrompt),
+                  );
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(const SnackBar(content: Text('コピーしました')));
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text('手動でやる場合', style: theme.textTheme.labelLarge),
+            const Text(
+              'リポジトリ（$repoUrl）を clone し、tools/hub で npm install と npm run build、'
+              'npm run build:web を実行します。同梱の .mcp.json で frelocator-hub が登録されるので、'
+              'Claude Code でリポジトリを開いて sync_status を実行し、'
+              'lan.webApp.url をブラウザで開きます。'
+              'スマホとは「PC と同期」のペアリングで LAN 同期します。',
               style: TextStyle(fontSize: 12),
             ),
           ],
@@ -196,9 +231,9 @@ class _Step extends StatelessWidget {
                   onPressed: () async {
                     await Clipboard.setData(ClipboardData(text: command));
                     if (!context.mounted) return;
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('コピーしました')),
-                    );
+                    ScaffoldMessenger.of(
+                      context,
+                    ).showSnackBar(const SnackBar(content: Text('コピーしました')));
                   },
                 ),
               ],
